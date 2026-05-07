@@ -28,7 +28,6 @@ impl App {
                             format!("Saved rule to {}: {}", rules_path.display(), command_label),
                             false,
                         );
-                        self.sync_rules_to_workspace(&project_name);
                     }
                     Err(e) => self.push_log(format!("Failed to save rule: {e}"), true),
                 }
@@ -85,7 +84,6 @@ impl App {
                         ),
                         false,
                     );
-                    self.sync_rules_to_workspace(&project_name);
                 }
                 Err(e) => self.push_log(format!("Failed to save deny rule: {e}"), true),
             }
@@ -137,9 +135,6 @@ impl App {
                         ),
                         false,
                     );
-                    if let Some(name) = &project_name {
-                        self.sync_rules_to_workspace(name);
-                    }
                 } else {
                     self.push_log(
                         format!("network rule '{}' already permanently allowed", entry),
@@ -178,9 +173,6 @@ impl App {
                         ),
                         false,
                     );
-                    if let Some(name) = &project_name {
-                        self.sync_rules_to_workspace(name);
-                    }
                 } else {
                     self.push_log(
                         format!("network rule '{}' already permanently denied", entry),
@@ -234,7 +226,6 @@ impl App {
         cwd: &str,
         approval_mode: crate::rules::ApprovalMode,
     ) -> Result<()> {
-        let is_new = !rules_path.exists();
         let mut rules = crate::rules::load(rules_path)
             .with_context(|| format!("loading rules file '{}'", rules_path.display()))?;
         let mut changed = false;
@@ -268,10 +259,10 @@ impl App {
         if !changed {
             return Ok(());
         }
-        let expected_content = crate::rules::render_rules_file(&rules, is_new)
+        let expected_content = crate::rules::render_rules_file(&rules)
             .with_context(|| format!("rendering rules file '{}'", rules_path.display()))?;
         self.note_rules_internal_write(rules_path.to_path_buf(), expected_content);
-        crate::rules::write_rules_file(rules_path, &rules, is_new)
+        crate::rules::write_rules_file(rules_path, &rules)
             .with_context(|| format!("writing rules file '{}'", rules_path.display()))?;
         Ok(())
     }
@@ -305,8 +296,6 @@ impl App {
                 "cannot persist network rule: unknown workspace (request lacked workspace attribution)"
             ),
         };
-
-        let is_new = !rules_path.exists();
         let mut rules = crate::rules::load(&rules_path)
             .with_context(|| format!("loading rules file '{}'", rules_path.display()))?;
 
@@ -345,10 +334,10 @@ impl App {
             return Ok(None);
         }
 
-        let expected_content = crate::rules::render_rules_file(&rules, is_new)
+        let expected_content = crate::rules::render_rules_file(&rules)
             .with_context(|| format!("rendering rules file '{}'", rules_path.display()))?;
         self.note_rules_internal_write(rules_path.clone(), expected_content);
-        crate::rules::write_rules_file(&rules_path, &rules, is_new)
+        crate::rules::write_rules_file(&rules_path, &rules)
             .with_context(|| format!("writing rules file '{}'", rules_path.display()))?;
         Ok(Some(rules_path))
     }
@@ -393,10 +382,6 @@ impl App {
             .iter()
             .find(|p| p.name == project_name)
             .map(|p| p.canonical_path.join("harness-rules.toml"))
-    }
-
-    pub(crate) fn sync_rules_to_workspace(&mut self, project_name: &str) {
-        let _ = project_name;
     }
 }
 

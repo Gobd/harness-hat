@@ -23,6 +23,7 @@ use crate::container::core::{
 };
 use crate::container::helpers::detect_default_colors;
 use crate::container::{ContainerSession, SessionEventProxy, compose_no_proxy, read_container_id};
+use crate::fs_util::write_env_file_entry;
 
 /// Launch `docker run` for a container definition and wire it to a PTY-backed
 /// terminal session.
@@ -160,37 +161,39 @@ pub fn spawn(
         "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH",
     ];
     for var in ca_env_vars {
-        writeln!(env_file, "{var}={ca_env_path}")?;
+        write_env_file_entry(&mut env_file, var, ca_env_path)?;
     }
 
-    writeln!(env_file, "HARNESS_HAT_TOKEN={token}")?;
-    writeln!(env_file, "HARNESS_HAT_SESSION_TOKEN={session_token}")?;
-    writeln!(env_file, "HARNESS_HAT_PROJECT={project_name}")?;
-    writeln!(env_file, "HARNESS_HAT_MOUNT_TARGET={mount_str}")?;
-    writeln!(env_file, "HARNESS_HAT_URL={container_exec_url}")?;
-    writeln!(
-        env_file,
-        "HARNESS_HAT_STRICT_NETWORK={}",
-        if strict_network { "1" } else { "0" }
+    write_env_file_entry(&mut env_file, "HARNESS_HAT_TOKEN", token)?;
+    write_env_file_entry(&mut env_file, "HARNESS_HAT_SESSION_TOKEN", session_token)?;
+    write_env_file_entry(&mut env_file, "HARNESS_HAT_PROJECT", project_name)?;
+    write_env_file_entry(&mut env_file, "HARNESS_HAT_MOUNT_TARGET", &mount_str)?;
+    write_env_file_entry(&mut env_file, "HARNESS_HAT_URL", &container_exec_url)?;
+    write_env_file_entry(
+        &mut env_file,
+        "HARNESS_HAT_STRICT_NETWORK",
+        if strict_network { "1" } else { "0" },
     )?;
-    writeln!(
-        env_file,
-        "HARNESS_HAT_SCOPED_PROXY_ADDR={container_proxy_addr}"
+    write_env_file_entry(
+        &mut env_file,
+        "HARNESS_HAT_SCOPED_PROXY_ADDR",
+        &container_proxy_addr,
     )?;
-    writeln!(
-        env_file,
-        "HARNESS_HAT_SCOPED_PROXY_AUTH={scoped_proxy_auth}"
+    write_env_file_entry(
+        &mut env_file,
+        "HARNESS_HAT_SCOPED_PROXY_AUTH",
+        &scoped_proxy_auth,
     )?;
 
     if !strict_network {
-        writeln!(env_file, "HTTP_PROXY={container_proxy_url}")?;
-        writeln!(env_file, "HTTPS_PROXY={container_proxy_url}")?;
-        writeln!(env_file, "ALL_PROXY={container_proxy_url}")?;
-        writeln!(env_file, "NO_PROXY={no_proxy}")?;
-        writeln!(env_file, "http_proxy={container_proxy_url}")?;
-        writeln!(env_file, "https_proxy={container_proxy_url}")?;
-        writeln!(env_file, "all_proxy={container_proxy_url}")?;
-        writeln!(env_file, "no_proxy={no_proxy}")?;
+        write_env_file_entry(&mut env_file, "HTTP_PROXY", &container_proxy_url)?;
+        write_env_file_entry(&mut env_file, "HTTPS_PROXY", &container_proxy_url)?;
+        write_env_file_entry(&mut env_file, "ALL_PROXY", &container_proxy_url)?;
+        write_env_file_entry(&mut env_file, "NO_PROXY", &no_proxy)?;
+        write_env_file_entry(&mut env_file, "http_proxy", &container_proxy_url)?;
+        write_env_file_entry(&mut env_file, "https_proxy", &container_proxy_url)?;
+        write_env_file_entry(&mut env_file, "all_proxy", &container_proxy_url)?;
+        write_env_file_entry(&mut env_file, "no_proxy", &no_proxy)?;
     }
 
     docker_args.push("--env-file".to_string());
@@ -316,7 +319,7 @@ pub fn spawn(
             );
             info!("{note}");
             launch_notes.push(note);
-            writeln!(env_file, "CLAUDE_CODE_OAUTH_TOKEN={setup_token}")?;
+            write_env_file_entry(&mut env_file, "CLAUDE_CODE_OAUTH_TOKEN", &setup_token)?;
         } else if let Some(cred_json) = extract_claude_keychain_credential() {
             let access_token: Option<String> =
                 serde_json::from_str::<serde_json::Value>(&cred_json)
@@ -332,7 +335,7 @@ pub fn spawn(
                 let note = "Claude session data imported from the macOS keychain credential and exported as CLAUDE_CODE_OAUTH_TOKEN".to_string();
                 info!("{note}");
                 launch_notes.push(note);
-                writeln!(env_file, "CLAUDE_CODE_OAUTH_TOKEN={tok}")?;
+                write_env_file_entry(&mut env_file, "CLAUDE_CODE_OAUTH_TOKEN", tok)?;
             }
 
             let staging_path = "/tmp/.harness-hat-claude-credentials.json";

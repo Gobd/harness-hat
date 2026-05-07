@@ -1,14 +1,14 @@
 [package]
 name = "harness-hat"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Zero-trust container manager for AI coding agents"
+description = "Network, Disk, and Host Isolation for AI Coding Agents"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/only-cliches/harness-hat"
 homepage = "https://github.com/only-cliches/harness-hat"
-keywords = ["ai", "agents", "sandbox", "docker", "terminal"]
+keywords = ["ai", "agents", "sandbox", "docker", "isolation"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["target/", ".git/", ".github/"]
 
@@ -45,8 +45,6 @@ reqwest = { version = "0.12", features = ["blocking", "json", "stream"] }
 rcgen = { version = "0.13", features = ["pem"] }
 rustls = "0.23"
 tokio-rustls = "0.26"
-webpki-roots = "0.26"
-httparse = "1"
 
 # Tracing + OpenTelemetry
 tracing = "0.1"
@@ -57,8 +55,7 @@ opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto"] }
 tracing-opentelemetry = "0.32"
 
-# Container PTY
-portable-pty = "0.9"
+# Container terminal
 vt100 = "0.15"
 alacritty_terminal = "0.26"
 

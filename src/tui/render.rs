@@ -37,7 +37,7 @@ mod terminal;
 
 pub(crate) use overlays::*;
 pub use root::render;
-pub(crate) use root::{render_scrollbar, right_pane_gap_width};
+pub(crate) use root::{log_pane_height, render_scrollbar, right_pane_gap_width};
 pub(crate) use sidebar::*;
 pub(crate) use terminal::*;
 

@@ -5,8 +5,8 @@ use toml_edit::{DocumentMut, value};
 use tracing::instrument;
 
 use crate::config::{
-    AgentKind, AliasValue, Config, ContainerMount, DefaultsConfig, SyncMode, WorkspaceConfig,
-    WorkspaceSection, default_mount_target,
+    AgentKind, AliasValue, Config, ContainerMount, DefaultsConfig, MountMode, WorkspaceConfig,
+    default_mount_target,
 };
 
 // ── Rule loading ─────────────────────────────────────────────────────────────
@@ -71,6 +71,7 @@ pub fn load(path: &Path) -> Result<Config> {
     validate_docker_dir(&config, path)?;
     resolve_container_profiles(&mut config)?;
     validate(&config)?;
+    canonicalize_workspace_paths(&mut config)?;
     ensure_logging_instance_id(path, &raw, &mut config)?;
     Ok(config)
 }
@@ -84,9 +85,6 @@ fn expand_config_paths(config: &mut Config) -> Result<()> {
     }
     for proj in &mut config.workspaces {
         proj.canonical_path = expand_path(&proj.canonical_path)?;
-        if let Some(p) = &proj.workspace_path {
-            proj.workspace_path = Some(expand_path(p)?);
-        }
         if let Some(he) = &mut proj.hostdo {
             if let Some(aliases) = &mut he.command_aliases {
                 for alias in aliases.values_mut() {
@@ -157,6 +155,14 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
         );
         let image_tag = image_tag_for_stem(&image_stem);
 
+        let agent = profile
+            .agent
+            .clone()
+            .or_else(|| defaults.agent.clone())
+            .unwrap_or(AgentKind::None);
+        let mut mounts = merge_mounts(&defaults.mounts, &profile.mounts, &[]);
+        add_existing_agent_session_mounts(&mut mounts, &agent);
+
         resolved.push(crate::config::ContainerDef {
             name: profile_name.clone(),
             profile: None,
@@ -166,12 +172,8 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
                 .clone()
                 .or_else(|| defaults.mount_target.clone())
                 .unwrap_or_else(default_mount_target),
-            agent: profile
-                .agent
-                .clone()
-                .or_else(|| defaults.agent.clone())
-                .unwrap_or(AgentKind::None),
-            mounts: merge_mounts(&defaults.mounts, &profile.mounts, &[]),
+            agent,
+            mounts,
             env_passthrough: merge_unique_strings(
                 &defaults.env_passthrough,
                 &profile.env_passthrough,
@@ -184,6 +186,83 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
     config.containers = resolved;
 
     Ok(())
+}
+
+fn add_existing_agent_session_mounts(mounts: &mut Vec<ContainerMount>, agent: &AgentKind) {
+    let Some(home_dir) = dirs::home_dir() else {
+        return;
+    };
+    add_existing_agent_session_mounts_for_home(mounts, agent, &home_dir);
+}
+
+pub(crate) fn add_existing_agent_session_mounts_for_home(
+    mounts: &mut Vec<ContainerMount>,
+    agent: &AgentKind,
+    home_dir: &Path,
+) {
+    for mount in agent_session_mounts_for_home(agent, home_dir) {
+        if !mount.host.exists() {
+            continue;
+        }
+        if mounts
+            .iter()
+            .any(|existing| existing.host == mount.host || existing.container == mount.container)
+        {
+            continue;
+        }
+        mounts.push(mount);
+    }
+}
+
+pub(crate) fn agent_session_mounts_for_home(
+    agent: &AgentKind,
+    home_dir: &Path,
+) -> Vec<ContainerMount> {
+    let rw = MountMode::Rw;
+    match agent {
+        AgentKind::Claude => vec![
+            ContainerMount {
+                host: home_dir.join(".claude.json"),
+                container: PathBuf::from("/home/ubuntu/.claude.json"),
+                mode: rw.clone(),
+            },
+            ContainerMount {
+                host: home_dir.join(".claude"),
+                container: PathBuf::from("/home/ubuntu/.claude"),
+                mode: rw,
+            },
+        ],
+        AgentKind::Codex => vec![
+            ContainerMount {
+                host: home_dir.join(".codex"),
+                container: PathBuf::from("/home/ubuntu/.codex"),
+                mode: rw.clone(),
+            },
+            ContainerMount {
+                host: home_dir.join(".config/codex"),
+                container: PathBuf::from("/home/ubuntu/.config/codex"),
+                mode: rw,
+            },
+        ],
+        AgentKind::Gemini => vec![ContainerMount {
+            host: home_dir.join(".gemini"),
+            container: PathBuf::from("/home/ubuntu/.gemini"),
+            mode: rw,
+        }],
+        AgentKind::Opencode => vec![
+            ContainerMount {
+                host: home_dir.join(".opencode"),
+                container: PathBuf::from("/home/ubuntu/.opencode"),
+                mode: rw.clone(),
+            },
+            ContainerMount {
+                host: home_dir.join(".config/opencode"),
+                container: PathBuf::from("/home/ubuntu/.config/opencode"),
+                mode: rw,
+            },
+        ],
+        AgentKind::None => Vec::new(),
+    }
 }
 
 #[instrument(skip(config, config_path))]
@@ -199,6 +278,19 @@ fn validate_docker_dir(config: &Config, config_path: &Path) -> Result<()> {
         config_path.display(),
         config.docker_dir.display()
     );
+    Ok(())
+}
+
+fn canonicalize_workspace_paths(config: &mut Config) -> Result<()> {
+    for proj in &mut config.workspaces {
+        proj.canonical_path = proj.canonical_path.canonicalize().with_context(|| {
+            format!(
+                "project '{}': canonical_path is not accessible: {}",
+                proj.name,
+                proj.canonical_path.display()
+            )
+        })?;
+    }
     Ok(())
 }
 
@@ -422,33 +514,6 @@ pub fn expand_path(path: &Path) -> Result<PathBuf> {
     } else {
         Ok(path.to_path_buf())
     }
-}
-
-/// Effective workspace path for a project (managed workspace copy).
-///
-/// For direct-mount projects, use `effective_mount_source_path`.
-#[instrument(skip(proj, ws))]
-pub fn effective_workspace_path(proj: &WorkspaceConfig, ws: &WorkspaceSection) -> PathBuf {
-    let _ = ws;
-    proj.canonical_path.clone()
-}
-
-/// Host-side directory that should be mounted into the container at `mount_target`.
-#[instrument(skip(proj, ws, defaults))]
-pub fn effective_mount_source_path(
-    proj: &WorkspaceConfig,
-    ws: &WorkspaceSection,
-    defaults: &DefaultsConfig,
-) -> PathBuf {
-    let _ = (ws, defaults);
-    proj.canonical_path.clone()
-}
-
-/// Effective sync mode for a project.
-#[instrument(skip(proj, defaults))]
-pub fn effective_sync_mode(proj: &WorkspaceConfig, defaults: &DefaultsConfig) -> SyncMode {
-    let _ = (proj, defaults);
-    SyncMode::Direct
 }
 
 /// Effective denied executables.

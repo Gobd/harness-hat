@@ -52,9 +52,7 @@ pub enum ApprovalDecision {
 
 /// Request payload accepted by the hostdo HTTP endpoint.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct ExecRequest {
-    pub project: Option<String>,
     pub argv: Vec<String>,
     pub cwd: String,
     #[serde(default)]
@@ -136,11 +134,7 @@ pub struct ErrorResponse {
 
 /// Request payload accepted by the container stop endpoint.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct StopRequest {
-    pub project: Option<String>,
-    pub container_id: Option<String>,
-}
+pub struct StopRequest {}
 
 /// Response payload returned by the container stop endpoint.
 #[derive(Debug, Serialize)]

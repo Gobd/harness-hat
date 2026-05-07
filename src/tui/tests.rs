@@ -809,6 +809,18 @@ fn right_pane_gap_only_shows_for_docker_build_views() {
 }
 
 #[test]
+fn log_pane_height_follows_ui_config() {
+    let app = build_test_app();
+    assert_eq!(super::render::log_pane_height(&app), 0);
+
+    let mut config = (*app.config.get()).clone();
+    config.defaults.ui.show_log_pane = true;
+    app.config.set(Arc::new(config));
+
+    assert_eq!(super::render::log_pane_height(&app), 6);
+}
+
+#[test]
 fn removing_active_session_clears_terminal_fullscreen() {
     let mut app = build_test_app();
     app.active_session = Some(0);

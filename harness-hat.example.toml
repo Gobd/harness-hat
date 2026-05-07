@@ -13,8 +13,6 @@ docker_dir = __HARNESS_HAT_DOCKER_DIR__
 
 [manager]
 # Global rules file used by the manager for persisted approvals.
-# Use the canonical key below. `rules_file` still parses as an alias, but
-# `global_rules_file` is the clearer name to document.
 global_rules_file = "~/.config/harness-hat/harness-rules.toml"
 
 [agents.gemini]
@@ -30,12 +28,18 @@ global_rules_file = "~/.config/harness-hat/harness-rules.toml"
 # The default is 32; increase this if your workspace names are longer.
 sidebar_width = 32
 
+# Show the always-on log pane at the bottom of the TUI. The pane is hidden by
+# default; set this to true to show it. Fullscreen log view remains available.
+show_log_pane = false
+
 [defaults.hostdo]
 # Local exec bridge used by the `hostdo` helper inside containers.
 server_port = 7878
 
-# Must be reachable from Docker containers.
-# Do not leave this on 127.0.0.1 or other loopback-only values.
+# Must be reachable from Docker containers. On Linux, 0.0.0.0 is the most
+# portable default, but it also exposes the authenticated local bridge on host
+# network interfaces. Prefer a Docker bridge/local VM interface if you know it,
+# or use a host firewall to restrict this port to local Docker traffic.
 server_host = "0.0.0.0"
 
 # Env var name that carries the shared auth token for the exec bridge.
@@ -44,7 +48,7 @@ token_env_var = "HARNESS_HAT_TOKEN"
 # Maximum command timeout an agent may request with `hostdo --timeout`, in seconds.
 max_timeout_secs = 3600
 
-# Executables that are always denied.
+# Executables that are always denied via hostdo calls.
 # These are common shell escape or privilege escalation paths.
 denied_executables = ["sh", "bash", "zsh", "fish", "csh", "ksh", "sudo", "su", "doas"]
 
@@ -69,7 +73,9 @@ denied_argument_fragments = []
 # Local proxy used for outbound HTTP/HTTPS policy enforcement.
 proxy_port = 8081
 
-# Must be reachable from Docker containers.
+# Must be reachable from Docker containers. Use the narrowest Docker-reachable
+# bind address your environment supports; 0.0.0.0 is portable but broader than
+# ideal on shared or untrusted networks.
 proxy_host = "0.0.0.0"
 
 # If true, force all outbound HTTP/HTTPS traffic through proxy.
@@ -191,25 +197,25 @@ agent = "claude"
 # env_passthrough = ["ANTHROPIC_API_KEY"]
 
 # Hosts that should bypass MITM TLS interception for this profile.
+# This disables TLS traffic inspection for these domains.
 bypass_proxy = [
   "api.anthropic.com",
   "claude.ai",
   "platform.claude.com",
   "downloads.claude.ai",
-  "storage.googleapis.com",
+  "storage.googleapis.com"
 ]
 
-# Auth/session state is not mounted by default. If you opt in, prefer read-only
-# mounts or project-scoped credentials.
-# [[container_profiles.claude.mounts]]
-# host = "~/.claude.json"
-# container = "/home/ubuntu/.claude.json"
-# mode = "ro"
-#
-# [[container_profiles.claude.mounts]]
-# host = "~/.claude"
-# container = "/home/ubuntu/.claude"
-# mode = "ro"
+# Persist Claude auth/session state across launches.
+[[container_profiles.claude.mounts]]
+host = "~/.claude.json"
+container = "/home/ubuntu/.claude.json"
+mode = "rw"
+
+[[container_profiles.claude.mounts]]
+host = "~/.claude"
+container = "/home/ubuntu/.claude"
+mode = "rw"
 
 [container_profiles.codex]
 image = "default"
@@ -220,22 +226,21 @@ agent = "codex"
 
 bypass_proxy = [
   "chatgpt.com",
-  ".chatgpt.com",
+  "*.chatgpt.com",
   "chat.openai.com",
   "auth.openai.com",
 ]
 
-# Auth/session state is not mounted by default. If you opt in, prefer read-only
-# mounts or project-scoped credentials.
-# [[container_profiles.codex.mounts]]
-# host = "~/.codex"
-# container = "/home/ubuntu/.codex"
-# mode = "ro"
-#
-# [[container_profiles.codex.mounts]]
-# host = "~/.config/codex"
-# container = "/home/ubuntu/.config/codex"
-# mode = "ro"
+# Persist Codex auth/session state across launches.
+[[container_profiles.codex.mounts]]
+host = "~/.codex"
+container = "/home/ubuntu/.codex"
+mode = "rw"
+
+[[container_profiles.codex.mounts]]
+host = "~/.config/codex"
+container = "/home/ubuntu/.config/codex"
+mode = "rw"
 
 [container_profiles.gemini]
 image = "default"
@@ -253,12 +258,11 @@ bypass_proxy = [
   "www.googleapis.com",
 ]
 
-# Auth/session state is not mounted by default. If you opt in, prefer read-only
-# mounts or project-scoped credentials.
-# [[container_profiles.gemini.mounts]]
-# host = "~/.gemini"
-# container = "/home/ubuntu/.gemini"
-# mode = "ro"
+# Persist Gemini auth/session state across launches.
+[[container_profiles.gemini.mounts]]
+host = "~/.gemini"
+container = "/home/ubuntu/.gemini"
+mode = "rw"
 
 [container_profiles.opencode]
 image = "default"
@@ -273,14 +277,13 @@ bypass_proxy = [
   ".githubusercontent.com",
 ]
 
-# Auth/session state is not mounted by default. If you opt in, prefer read-only
-# mounts or project-scoped credentials.
-# [[container_profiles.opencode.mounts]]
-# host = "~/.opencode"
-# container = "/home/ubuntu/.opencode"
-# mode = "ro"
-#
-# [[container_profiles.opencode.mounts]]
-# host = "~/.config/opencode"
-# container = "/home/ubuntu/.config/opencode"
-# mode = "ro"
+# Persist opencode auth/session state across launches.
+[[container_profiles.opencode.mounts]]
+host = "~/.opencode"
+container = "/home/ubuntu/.opencode"
+mode = "rw"
+
+[[container_profiles.opencode.mounts]]
+host = "~/.config/opencode"
+container = "/home/ubuntu/.config/opencode"
+mode = "rw"

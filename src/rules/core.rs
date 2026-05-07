@@ -522,7 +522,6 @@ pub fn append_auto_approval(path: &Path, argv: &[String], cwd: &str) -> Result<(
 
 #[cfg(test)]
 fn append_command_rule(path: &Path, argv: &[String], cwd: &str) -> Result<()> {
-    let is_new = !path.exists();
     let mut rules = load(path)?;
     if rules
         .hostdo
@@ -542,23 +541,22 @@ fn append_command_rule(path: &Path, argv: &[String], cwd: &str) -> Result<()> {
         concurrency: ConcurrencyPolicy::default(),
         approval_mode: ApprovalMode::Auto,
     });
-    write_rules_file(path, &rules, is_new)
+    write_rules_file(path, &rules)
 }
 
-/// Write rules to a file, adding a comment header if the file is new.
-pub fn write_rules_file(path: &Path, rules: &ProjectRules, is_new: bool) -> Result<()> {
+/// Write rules to a file with the standard comment header.
+pub fn write_rules_file(path: &Path, rules: &ProjectRules) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating directory for {}", path.display()))?;
     }
-    let content = render_rules_file(rules, is_new)?;
+    let content = render_rules_file(rules)?;
     std::fs::write(path, &content).with_context(|| format!("writing {}", path.display()))
 }
 
 /// Render rules file contents exactly as `write_rules_file` would serialize it.
-pub fn render_rules_file(rules: &ProjectRules, is_new: bool) -> Result<String> {
+pub fn render_rules_file(rules: &ProjectRules) -> Result<String> {
     let toml_str = toml::to_string_pretty(rules).context("serializing rules to TOML")?;
-    let _ = is_new; // retained for API compatibility
     Ok(format!("{RULES_FILE_HEADER}{toml_str}"))
 }
 

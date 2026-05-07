@@ -459,9 +459,29 @@ timeout_secs = 60
 concurrency = "queue"
 approval_mode = "auto"
 
-[hostdo.command_aliases.fmt]
-cmd = "cargo fmt"
+[[hostdo.commands]]
+argv = [
+    "rustfmt",
+    "--check",
+    "src/init.rs",
+    "src/config/tests.rs",
+]
 cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "test",
+    "sample_config_writes_parseable_docker_dir",
+    "add_existing_agent_session_mounts_imports_present_paths_for_all_agents",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
 
 [hostdo.command_aliases.build]
 cmd = "cargo build"
@@ -477,6 +497,10 @@ cwd = "$WORKSPACE"
 
 [hostdo.command_aliases.test]
 cmd = "cargo test"
+cwd = "$WORKSPACE"
+
+[hostdo.command_aliases.fmt]
+cmd = "cargo fmt"
 cwd = "$WORKSPACE"
 
 [network]

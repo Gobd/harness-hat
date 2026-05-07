@@ -267,7 +267,7 @@ pub(crate) fn render_network_group_detail(
     let activities = app.network_activities_for_session(session_idx);
     let tone = |c| maybe_dim(c, dimmed);
     let count = activities.len();
-    let title = format!(" ({count}) ");
+    let title = network_group_title(app, session_idx, count, area.width);
     let block = Block::default()
         .title(title)
         .title_style(
@@ -398,6 +398,26 @@ pub(crate) fn render_network_group_detail(
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+fn network_group_title(app: &App, session_idx: usize, count: usize, width: u16) -> String {
+    let raw = app
+        .sessions
+        .get(session_idx)
+        .map(|session| {
+            format!(
+                " Network: agent={} workspace={} docker={} ({count}) ",
+                session.container_name,
+                session.project,
+                short_container_id(&session.container_id)
+            )
+        })
+        .unwrap_or_else(|| format!(" Network ({count}) "));
+    truncate_middle(&raw, width.saturating_sub(2) as usize)
+}
+
+fn short_container_id(container_id: &str) -> String {
+    container_id.chars().take(12).collect()
+}
+
 fn append_activity_summary_lines(
     lines: &mut Vec<Line>,
     activity: &crate::activity::Activity,
@@ -478,7 +498,8 @@ fn append_network_detail_lines(
             Span::styled("  Payload : ", Style::default().fg(tone(Color::DarkGray))),
             Span::styled(
                 format!(
-                    "{content_length} bytes{}",
+                    "{}{}",
+                    crate::proxy::format_byte_count(*content_length as u64),
                     if *payload_truncated {
                         " (preview truncated)"
                     } else {

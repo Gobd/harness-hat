@@ -104,8 +104,7 @@ pub(super) async fn exec_handler(
     };
     // Extract path strings before alias resolution (aliases may reference them).
     let canonical_path = proj.canonical_path.display().to_string();
-    let workspace_path_buf =
-        config::effective_mount_source_path(proj, &cfg.workspace, &cfg.defaults);
+    let workspace_path_buf = proj.canonical_path.clone();
 
     let resolved = match resolve_exec_argv_aliases(
         &request_argv,
@@ -957,8 +956,11 @@ fn resolve_runner_container_cwd(
     mount_target: &Path,
     workspace_host_path: &Path,
 ) -> PathBuf {
-    if host_cwd == workspace_host_path || host_cwd.starts_with(workspace_host_path) {
-        if let Ok(rel) = host_cwd.strip_prefix(workspace_host_path) {
+    let workspace_root = workspace_host_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_host_path.to_path_buf());
+    if host_cwd == workspace_root.as_path() || host_cwd.starts_with(&workspace_root) {
+        if let Ok(rel) = host_cwd.strip_prefix(&workspace_root) {
             return mount_target.join(rel);
         }
     }
@@ -973,11 +975,12 @@ fn resolve_runner_container_cwd(
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_timeout_secs, requested_timeout_exceeds_rule, supports_exec_jobs,
-        validate_requested_timeout,
+        effective_timeout_secs, requested_timeout_exceeds_rule, resolve_runner_container_cwd,
+        supports_exec_jobs, validate_requested_timeout,
     };
     use crate::rules::{ApprovalMode, ConcurrencyPolicy, DEFAULT_TIMEOUT_SECS, RuleCommand};
     use axum::http::HeaderMap;
+    use std::path::Path;
 
     fn rule(timeout_secs: u64) -> RuleCommand {
         RuleCommand {
@@ -1048,6 +1051,26 @@ mod tests {
         let cmd = rule(600);
         let err = effective_timeout_secs(None, Some(&cmd), 300).unwrap_err();
         assert!(err.contains("exceeds configured maximum"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_cwd_maps_canonical_host_cwd_when_workspace_path_is_symlink() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real_workspace = temp.path().join("real-workspace");
+        let linked_workspace = temp.path().join("linked-workspace");
+        let real_subdir = real_workspace.join("src");
+        std::fs::create_dir_all(&real_subdir).expect("create workspace");
+        std::os::unix::fs::symlink(&real_workspace, &linked_workspace).expect("symlink");
+
+        let mapped = resolve_runner_container_cwd(
+            Path::new("/workspace"),
+            &real_subdir.canonicalize().expect("canonical subdir"),
+            Path::new("/workspace"),
+            &linked_workspace,
+        );
+
+        assert_eq!(mapped, Path::new("/workspace/src"));
     }
 
     #[test]

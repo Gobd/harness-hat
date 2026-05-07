@@ -158,7 +158,7 @@ allowlist = ["domain=github.com"]
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let path = dir.join("harness-rules.toml");
 
-        write_rules_file(&path, &ProjectRules::default(), false).expect("write");
+        write_rules_file(&path, &ProjectRules::default()).expect("write");
         let s = std::fs::read_to_string(&path).expect("read");
         assert!(
             s.starts_with("# harness-rules.toml — policy"),

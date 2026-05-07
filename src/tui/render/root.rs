@@ -54,14 +54,22 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(LOG_HEIGHT),
-            Constraint::Length(STATUS_HEIGHT),
-        ])
-        .split(area);
+    let show_log_pane = log_pane_height(app) > 0;
+    let outer = if show_log_pane {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(LOG_HEIGHT),
+                Constraint::Length(STATUS_HEIGHT),
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(STATUS_HEIGHT)])
+            .split(area)
+    };
 
     let gap_width = right_pane_gap_width(app);
     let main_row = Layout::default()
@@ -75,12 +83,24 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     render_sidebar(frame, app, main_row[0]);
     render_right_pane(frame, app, main_row[2]);
-    render_log(frame, app, outer[1]);
-    render_status_bar(frame, app, outer[2]);
+    if show_log_pane {
+        render_log(frame, app, outer[1]);
+        render_status_bar(frame, app, outer[2]);
+    } else {
+        render_status_bar(frame, app, outer[1]);
+    }
     if app.base_rules_changed.is_some() {
         render_base_rules_changed_overlay(frame, app, area);
     } else if app.remove_workspace_confirm.is_some() {
         render_remove_workspace_confirm_overlay(frame, app, area);
+    }
+}
+
+pub(crate) fn log_pane_height(app: &App) -> u16 {
+    if app.config.get().defaults.ui.show_log_pane {
+        LOG_HEIGHT
+    } else {
+        0
     }
 }
 

@@ -12,7 +12,6 @@ pub use crate::rules::ApprovalMode;
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     pub manager: ManagerConfig,
-    pub workspace: WorkspaceSection,
     /// Directory containing the repository root used for Docker builds.
     /// This is required at startup and is auto-populated by
     /// `harness-hat-manager --init`.
@@ -40,7 +39,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             manager: ManagerConfig::default(),
-            workspace: WorkspaceSection::default(),
             // `docker_dir` is expected to be populated during
             // `harness-hat-manager --init`.
             // An empty PathBuf here signifies an uninitialized state.
@@ -63,13 +61,6 @@ pub struct ManagerConfig {
     #[serde(alias = "rules_file")]
     pub global_rules_file: PathBuf,
 }
-
-/// Reserved section for future workspace-scoped settings.
-///
-/// Breaking change: `workspace.root` has been removed.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-#[serde(deny_unknown_fields)]
-pub struct WorkspaceSection {}
 
 // ── Agents ───────────────────────────────────────────────────────────────────
 
@@ -104,10 +95,6 @@ pub struct GeminiAgentConfig {
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct DefaultsConfig {
     #[serde(default)]
-    pub sync: SyncDefaults,
-    #[serde(default)]
-    pub workspace: WorkspaceDefaults,
-    #[serde(default)]
     pub ui: UiDefaults,
     #[serde(default)]
     pub hostdo: HostdoDefaults,
@@ -118,53 +105,11 @@ pub struct DefaultsConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct SyncDefaults {
-    pub mode: SyncMode,
-    pub delete_propagation: bool,
-    pub rename_propagation: bool,
-    pub symlink_policy: SymlinkPolicy,
-    pub conflict_policy: ConflictPolicy,
-}
-
-impl Default for SyncDefaults {
-    fn default() -> Self {
-        Self {
-            mode: SyncMode::default(),
-            delete_propagation: false,
-            rename_propagation: false,
-            symlink_policy: SymlinkPolicy::default(),
-            conflict_policy: ConflictPolicy::default(),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct WorkspaceDefaults {
-    #[serde(default = "bool_true")]
-    pub disposable: bool,
-    #[serde(default)]
-    pub default_policy: ApprovalMode,
-}
-
-impl Default for WorkspaceDefaults {
-    fn default() -> Self {
-        Self {
-            disposable: true,
-            default_policy: ApprovalMode::default(),
-        }
-    }
-}
-
-/// Helper function for `serde(default = "bool_true")` to set a boolean field to true by default.
-pub(crate) fn bool_true() -> bool {
-    true
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct UiDefaults {
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: u16,
+    #[serde(default = "default_show_log_pane")]
+    pub show_log_pane: bool,
 }
 
 /// Provides the default value for `UiDefaults.sidebar_width`.
@@ -172,10 +117,15 @@ fn default_sidebar_width() -> u16 {
     32
 }
 
+fn default_show_log_pane() -> bool {
+    false
+}
+
 impl Default for UiDefaults {
     fn default() -> Self {
         Self {
             sidebar_width: default_sidebar_width(),
+            show_log_pane: default_show_log_pane(),
         }
     }
 }

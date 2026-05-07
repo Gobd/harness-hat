@@ -31,10 +31,9 @@ impl App {
 
     pub(crate) fn settings_action_rows(&self, project_idx: usize) -> Vec<SettingsActionRow> {
         let cfg = self.config.get();
-        let Some(proj) = cfg.workspaces.get(project_idx) else {
+        if cfg.workspaces.get(project_idx).is_none() {
             return Vec::new();
-        };
-        let _ = proj;
+        }
         Self::settings_action_rows_for()
     }
 

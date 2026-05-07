@@ -79,8 +79,7 @@ impl App {
             return;
         }
 
-        let mount_source_path =
-            crate::config::effective_mount_source_path(&proj, &cfg.workspace, &cfg.defaults);
+        let mount_source_path = proj.canonical_path.clone();
         self.log_project_rules_status(&proj);
 
         let exec_port = cfg.defaults.hostdo.server_port;
@@ -116,8 +115,7 @@ impl App {
             &mount_source_path,
             &proj.canonical_path,
             &proj.name,
-            crate::config::effective_sync_mode(&proj, &cfg.defaults)
-                == crate::config::SyncMode::Direct,
+            true,
             &ctr.mount_target,
             &exec_url,
             &proxy_url,

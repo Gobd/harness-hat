@@ -129,6 +129,7 @@ Lives on your machine. Defines your environment:
   * Profiles are direct launch targets (there is no separate `[[containers]]` list).
 * Registered workspaces and their paths.
 * Global network and execution defaults.
+* UI defaults, including `[defaults.ui].show_log_pane = true` to show the bottom log pane.
 
 ### `harness-rules.toml` (Workspace Security Policy)
 
@@ -163,7 +164,7 @@ level = "approvals"
 
 ## Workspace Mounting
 
-Harness Hat runs workspaces in direct mode: each container mounts the canonical repository directory directly. There is no workspace mirroring or sync workflow.
+Harness Hat runs workspaces in direct mode: each container mounts the target dir into the container at `/workspace`.
 
 ## Network & Proxy Control
 
@@ -184,6 +185,7 @@ Under `[defaults.proxy]` in `harness-hat.toml`:
 
 * **`strict_network`**: Enables `NET_ADMIN` capabilities to enforce iptables rules inside the container, ensuring no traffic can bypass the proxy.
 * **`proxy_port`**: The local port the proxy listens on (default: `8081`).
+* **`proxy_host`**: The host address for per-container proxy listeners. It must be reachable from Docker containers; prefer the narrowest Docker-reachable interface and firewall it on shared networks.
 
 Example network policy in `harness-rules.toml`:
 
@@ -211,6 +213,7 @@ Lets an agent request execution of specific commands on your host machine, witho
 * **Docker runner rules:** Image-backed commands match both `argv` and `image`, so approving `hostdo npm test` does not automatically approve `hostdo --image node:20 npm test`.
 * **Timeout rules:** Approved commands store `timeout_secs` in `harness-rules.toml`. Requested timeouts are capped by `[defaults.hostdo].max_timeout_secs` in `harness-hat.toml`.
 * **Aliases:** Map simple agent-facing commands to complex host-side ones (e.g. `hostdo tests` to `cargo test --all`).
+* **Bind address:** `[defaults.hostdo].server_host` must be reachable from Docker containers. Avoid exposing it on untrusted networks; bind to a Docker-local interface when available or restrict access with a host firewall.
 
 ### `killme` (Container Exit)
 

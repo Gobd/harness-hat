@@ -4,8 +4,8 @@ mod tests {
     use crate::proxy::core::{NetworkDecision, ProxyState, SourceIdentityStatus};
     use crate::proxy::helpers::{
         bypass_host_matches, decode_source_from_proxy_authorization,
-        ensure_host_header_matches_target, proxy_authorization_matches_token, resolve_public_addrs,
-        split_host_port,
+        ensure_host_header_matches_target, format_byte_count, proxy_authorization_matches_token,
+        resolve_public_addrs, split_host_port,
     };
     use crate::proxy::http::{prompt_network, read_body_any};
     use crate::shared_config::SharedConfig;
@@ -34,6 +34,16 @@ mod tests {
         let headers = vec![("Proxy-Authorization".to_string(), header_value)];
         assert!(proxy_authorization_matches_token(&headers, "testtoken"));
         assert!(!proxy_authorization_matches_token(&headers, "wrong-token"));
+    }
+
+    #[test]
+    fn format_byte_count_uses_compact_units() {
+        assert_eq!(format_byte_count(0), "0b");
+        assert_eq!(format_byte_count(512), "512b");
+        assert_eq!(format_byte_count(1024), "1kb");
+        assert_eq!(format_byte_count(1536), "1.5kb");
+        assert_eq!(format_byte_count(10 * 1024), "10kb");
+        assert_eq!(format_byte_count(1024 * 1024), "1mb");
     }
 
     #[tokio::test]

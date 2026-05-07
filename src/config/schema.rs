@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::config::{AliasValue, ApprovalMode, bool_true};
+use crate::config::AliasValue;
 
 // ── Workspaces ───────────────────────────────────────────────────────────────
 
@@ -11,13 +11,6 @@ use crate::config::{AliasValue, ApprovalMode, bool_true};
 pub struct WorkspaceConfig {
     pub name: String,
     pub canonical_path: PathBuf,
-    /// Defaults to the canonical path when absent.
-    pub workspace_path: Option<PathBuf>,
-    #[serde(default = "bool_true")]
-    pub disposable: bool,
-    #[serde(default)]
-    pub default_policy: ApprovalMode,
-    pub sync: Option<SyncOverride>,
     pub hostdo: Option<WorkspaceHostdo>,
 }
 
@@ -26,22 +19,9 @@ impl Default for WorkspaceConfig {
         Self {
             name: String::new(),
             canonical_path: PathBuf::new(),
-            workspace_path: None,
-            disposable: true,
-            default_policy: ApprovalMode::default(),
-            sync: None,
             hostdo: None,
         }
     }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct SyncOverride {
-    pub mode: Option<SyncMode>,
-    pub delete_propagation: Option<bool>,
-    pub rename_propagation: Option<bool>,
-    pub symlink_policy: Option<SymlinkPolicy>,
-    pub conflict_policy: Option<ConflictPolicy>,
 }
 
 // ── Containers ───────────────────────────────────────────────────────────────
@@ -166,61 +146,6 @@ pub struct WorkspaceHostdo {
 }
 
 // ── Enums ────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum SyncMode {
-    WorkspaceOnly,
-    Pushback,
-    Bidirectional,
-    Pullthrough,
-    Direct,
-}
-
-impl Default for SyncMode {
-    fn default() -> Self {
-        Self::Pushback
-    }
-}
-
-impl std::fmt::Display for SyncMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::WorkspaceOnly => write!(f, "workspace-only"),
-            Self::Pushback => write!(f, "pushback"),
-            Self::Bidirectional => write!(f, "bidirectional"),
-            Self::Pullthrough => write!(f, "pullthrough"),
-            Self::Direct => write!(f, "direct"),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum SymlinkPolicy {
-    Reject,
-    Copy,
-    Follow,
-}
-
-impl Default for SymlinkPolicy {
-    fn default() -> Self {
-        Self::Reject
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum ConflictPolicy {
-    PreserveCanonical,
-    PreserveWorkspace,
-}
-
-impl Default for ConflictPolicy {
-    fn default() -> Self {
-        Self::PreserveCanonical
-    }
-}
 
 // ── Logging ──────────────────────────────────────────────────────────────────
 

@@ -12,6 +12,28 @@ use crate::config::Config;
 use crate::proxy::SourceIdentityStatus;
 use crate::proxy::http::is_hop_by_hop;
 
+pub(crate) fn format_byte_count(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes}b");
+    }
+
+    let mut value = bytes as f64;
+    let mut unit = "b";
+    for next_unit in ["kb", "mb", "gb", "tb"] {
+        value /= 1024.0;
+        unit = next_unit;
+        if value < 1024.0 {
+            break;
+        }
+    }
+
+    if value >= 10.0 || value.fract().abs() < f64::EPSILON {
+        format!("{value:.0}{unit}")
+    } else {
+        format!("{value:.1}{unit}")
+    }
+}
+
 pub(crate) fn parse_source_from_headers(
     headers: &[(String, String)],
 ) -> (Option<String>, Option<String>, SourceIdentityStatus) {

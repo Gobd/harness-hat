@@ -166,7 +166,7 @@ Rules of engagement:\n\
             },
             extra
         ));
-        let content = crate::rules::render_rules_file(&starter, true)
+        let content = crate::rules::render_rules_file(&starter)
             .with_context(|| format!("rendering starter rules file '{}'", rules_path.display()))?;
         std::fs::write(&rules_path, &content)
             .with_context(|| format!("writing starter rules file '{}'", rules_path.display()))?;

@@ -155,8 +155,9 @@ pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Re
     };
 
     let show_proxy_details = item.source_status != "listener_bound_source";
-    let popup_area = centered_rect(72, 56, if show_proxy_details { 13 } else { 12 }, area);
+    let popup_area = centered_rect(86, 60, if show_proxy_details { 14 } else { 13 }, area);
     frame.render_widget(Clear, popup_area);
+    let source_header = pending_network_source_header(app, item);
 
     let action_line = Line::from(vec![
         Span::styled(
@@ -203,6 +204,10 @@ pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Re
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         )),
+        Line::from(Span::styled(
+            format!("  {source_header}"),
+            Style::default().fg(Color::White),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::styled("  Method  : ", Style::default().fg(Color::DarkGray)),
@@ -225,8 +230,10 @@ pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Re
             Span::styled("  Source  : ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!(
-                    "workspace={}  container={}",
-                    source_workspace, source_container
+                    "workspace={}  agent={}  docker_container={}",
+                    source_workspace,
+                    source_container,
+                    pending_network_docker_container_id(app, item)
                 ),
                 Style::default().fg(Color::White),
             ),
@@ -266,7 +273,10 @@ pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Re
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
-                .title(" Network Approval Required ")
+                .title(truncate_middle(
+                    &format!(" Network: {source_header} "),
+                    popup_area.width.saturating_sub(2) as usize,
+                ))
                 .title_alignment(Alignment::Center)
                 .title_style(
                     Style::default()
@@ -278,6 +288,66 @@ pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Re
         ),
         popup_area,
     );
+}
+
+fn pending_network_source_header(app: &App, item: &crate::proxy::PendingNetworkItem) -> String {
+    let session = pending_network_source_session(app, item);
+    let agent = session
+        .map(|session| session.container_name.clone())
+        .or_else(|| item.source_container.clone())
+        .unwrap_or_else(|| "unknown-agent".to_string());
+    let workspace = session
+        .map(|session| session.project.clone())
+        .or_else(|| item.source_project.clone())
+        .unwrap_or_else(|| "unknown-workspace".to_string());
+    let docker_container = session
+        .map(|session| short_container_id(&session.container_id))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    format!("agent={agent}  workspace={workspace}  docker={docker_container}")
+}
+
+fn pending_network_docker_container_id(
+    app: &App,
+    item: &crate::proxy::PendingNetworkItem,
+) -> String {
+    pending_network_source_session(app, item)
+        .map(|session| short_container_id(&session.container_id))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn pending_network_source_session<'a>(
+    app: &'a App,
+    item: &crate::proxy::PendingNetworkItem,
+) -> Option<&'a crate::container::ContainerSession> {
+    let source_project = item.source_project.as_deref();
+    let source_container = item.source_container.as_deref();
+
+    if let Some(source_container) = source_container {
+        if let Some(session) = app.sessions.iter().find(|session| {
+            source_project.is_none_or(|project| session.project == project)
+                && App::container_identity_matches(
+                    source_container,
+                    &session.container_id,
+                    &session.container_name,
+                    &session.docker_name,
+                )
+        }) {
+            return Some(session);
+        }
+    }
+
+    let source_project = source_project?;
+    let mut matching_sessions = app
+        .sessions
+        .iter()
+        .filter(|session| session.project == source_project);
+    let only = matching_sessions.next()?;
+    matching_sessions.next().is_none().then_some(only)
+}
+
+fn short_container_id(container_id: &str) -> String {
+    container_id.chars().take(12).collect()
 }
 
 pub(crate) fn render_remove_workspace_confirm_overlay(frame: &mut Frame, app: &App, area: Rect) {

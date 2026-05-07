@@ -216,6 +216,33 @@ mod tests {
         let contents = std::fs::read_to_string(&output).expect("read sample config");
         let parsed: Config = toml::from_str(&contents).expect("parse sample config");
         assert_eq!(parsed.docker_dir, cwd.join("docker"));
+
+        for (profile, host, container) in [
+            ("claude", "~/.claude.json", "/home/ubuntu/.claude.json"),
+            ("claude", "~/.claude", "/home/ubuntu/.claude"),
+            ("codex", "~/.codex", "/home/ubuntu/.codex"),
+            ("codex", "~/.config/codex", "/home/ubuntu/.config/codex"),
+            ("gemini", "~/.gemini", "/home/ubuntu/.gemini"),
+            ("opencode", "~/.opencode", "/home/ubuntu/.opencode"),
+            (
+                "opencode",
+                "~/.config/opencode",
+                "/home/ubuntu/.config/opencode",
+            ),
+        ] {
+            let mounts = &parsed
+                .container_profiles
+                .get(profile)
+                .unwrap_or_else(|| panic!("{profile} profile"))
+                .mounts;
+            assert!(
+                mounts
+                    .iter()
+                    .any(|mount| mount.host == std::path::PathBuf::from(host)
+                        && mount.container == std::path::PathBuf::from(container)),
+                "{profile} profile missing session mount {host} -> {container}"
+            );
+        }
     }
 
     #[test]

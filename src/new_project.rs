@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::config::{AliasValue, SyncMode};
+use crate::config::AliasValue;
 use crate::rules::{HostdoRules, ProjectRules};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +53,7 @@ pub fn write_rules_if_missing(workspace_dir: &Path, project_type: ProjectType) -
         return Ok(false);
     }
     let rules = default_rules(project_type);
-    crate::rules::write_rules_file(&rules_path, &rules, true)
+    crate::rules::write_rules_file(&rules_path, &rules)
         .with_context(|| format!("writing {}", rules_path.display()))?;
     Ok(true)
 }
@@ -130,7 +130,6 @@ pub fn append_project_block(
     config_path: &Path,
     project_name: &str,
     canonical_path: &Path,
-    sync_mode: SyncMode,
 ) -> Result<()> {
     anyhow::ensure!(
         !project_name.trim().is_empty(),
@@ -139,12 +138,6 @@ pub fn append_project_block(
 
     let name = toml_basic_string(project_name)?;
     let canonical = toml_basic_string(&canonical_path.display().to_string())?;
-    let mode = sync_mode_toml_value(&sync_mode);
-    let disposable = if matches!(sync_mode, SyncMode::Direct) {
-        "disposable = false\n"
-    } else {
-        ""
-    };
 
     let block = format!(
         r#"
@@ -152,12 +145,7 @@ pub fn append_project_block(
 [[workspaces]]
 name = {name}
 canonical_path = {canonical}
-{disposable}
-
-[workspaces.sync]
-mode = "{mode}"
-"#,
-        disposable = disposable
+"#
     );
 
     use std::io::Write;
@@ -215,16 +203,6 @@ pub fn remove_workspace_block(config_path: &Path, workspace_name: &str) -> Resul
     Ok(removed)
 }
 
-fn sync_mode_toml_value(mode: &SyncMode) -> &'static str {
-    match mode {
-        SyncMode::WorkspaceOnly => "workspace_only",
-        SyncMode::Pushback => "pushback",
-        SyncMode::Bidirectional => "bidirectional",
-        SyncMode::Pullthrough => "pullthrough",
-        SyncMode::Direct => "direct",
-    }
-}
-
 fn toml_basic_string(s: &str) -> Result<String> {
     anyhow::ensure!(
         !s.contains('\n') && !s.contains('\r'),
@@ -240,7 +218,7 @@ mod tests {
         ProjectType, append_project_block, default_rules, remove_workspace_block,
         write_rules_if_missing,
     };
-    use crate::config::{Config, SyncMode};
+    use crate::config::Config;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -300,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn config_append_block_parses_and_sets_sync_mode() {
+    fn config_append_block_parses_direct_workspace() {
         let root = unique_temp_dir("append-config");
         let config_path = root.join("harness-hat.toml");
         let canon = root.join("canon");
@@ -322,21 +300,19 @@ global_rules_file = "{}"
         );
         fs::write(&config_path, raw).expect("write base config");
 
-        append_project_block(&config_path, "proj", &canon, SyncMode::Bidirectional)
-            .expect("append");
+        append_project_block(&config_path, "proj", &canon).expect("append");
         let cfg: Config = crate::config::load(&config_path).expect("load");
 
         let proj = cfg.workspaces.first().expect("project");
         assert_eq!(proj.name, "proj");
-        assert_eq!(proj.canonical_path, canon);
         assert_eq!(
-            proj.sync.as_ref().and_then(|s| s.mode.clone()),
-            Some(SyncMode::Bidirectional)
+            proj.canonical_path,
+            canon.canonicalize().expect("canonical workspace")
         );
     }
 
     #[test]
-    fn config_append_block_marks_direct_projects_non_disposable() {
+    fn config_append_block_does_not_emit_sync_section() {
         let root = unique_temp_dir("append-config-direct");
         let config_path = root.join("harness-hat.toml");
         let canon = root.join("canon");
@@ -358,17 +334,17 @@ global_rules_file = "{}"
         );
         fs::write(&config_path, raw).expect("write base config");
 
-        append_project_block(&config_path, "proj", &canon, SyncMode::Direct).expect("append");
+        append_project_block(&config_path, "proj", &canon).expect("append");
         let cfg: Config = crate::config::load(&config_path).expect("load");
 
         let proj = cfg.workspaces.first().expect("project");
         assert_eq!(proj.name, "proj");
-        assert_eq!(proj.canonical_path, canon);
         assert_eq!(
-            proj.sync.as_ref().and_then(|s| s.mode.clone()),
-            Some(SyncMode::Direct)
+            proj.canonical_path,
+            canon.canonicalize().expect("canonical workspace")
         );
-        assert!(!proj.disposable);
+        let raw = fs::read_to_string(&config_path).expect("read config");
+        assert!(!raw.contains("[workspaces.sync]"));
     }
 
     #[test]

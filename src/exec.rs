@@ -11,6 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc;
 
 use crate::config::{self, Config, WorkspaceConfig};
+use crate::fs_util::write_env_file_entry;
 use crate::rules::{ComposedRules, RuleCommand};
 
 #[derive(Debug)]
@@ -265,62 +266,20 @@ where
 
     let started = Instant::now();
     let mut child = cmd.spawn()?;
-    let (line_tx, mut line_rx) = mpsc::unbounded_channel::<(bool, String)>();
-    let mut reader_tasks = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        reader_tasks.push(tokio::spawn(read_process_progress(
-            stdout,
-            false,
-            line_tx.clone(),
-        )));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        reader_tasks.push(tokio::spawn(read_process_progress(stderr, true, line_tx)));
-    }
-
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    let status = loop {
-        if cancel_flag.load(Ordering::SeqCst) {
-            let _ = child.kill().await;
-            anyhow::bail!("command cancelled");
-        }
-        if started.elapsed() >= Duration::from_secs(timeout_secs) {
-            let _ = child.kill().await;
-            anyhow::bail!("command timed out after {timeout_secs}s");
-        }
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-
-        tokio::select! {
-            line = line_rx.recv() => {
-                if let Some((is_stderr, line)) = line {
-                    append_output_capped(if is_stderr { &mut stderr } else { &mut stdout }, &line);
-                    on_output(is_stderr, line);
-                }
+    run_spawned_child_streaming(
+        &mut child,
+        started,
+        timeout_secs,
+        cancel_flag,
+        "command",
+        Duration::from_millis(50),
+        |is_stderr, line, _draining, stdout, stderr| {
+            if append_output_capped(if is_stderr { stderr } else { stdout }, &line) {
+                on_output(is_stderr, line);
             }
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                // Poll process status and cancellation on the next loop.
-            }
-        }
-    };
-
-    for task in reader_tasks {
-        let _ = task.await;
-    }
-    while let Ok((is_stderr, line)) = line_rx.try_recv() {
-        append_output_capped(if is_stderr { &mut stderr } else { &mut stdout }, &line);
-        on_output(is_stderr, line);
-    }
-
-    let duration_ms = started.elapsed().as_millis() as u64;
-    Ok(ExecResult {
-        exit_code: status.code().unwrap_or(-1),
-        stdout,
-        stderr,
-        duration_ms,
-    })
+        },
+    )
+    .await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,69 +362,24 @@ where
 
     let started = Instant::now();
     let mut child = cmd.spawn()?;
-
-    let (line_tx, mut line_rx) = mpsc::unbounded_channel::<(bool, String)>();
-    let mut reader_tasks = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        reader_tasks.push(tokio::spawn(read_process_progress(
-            stdout,
-            false,
-            line_tx.clone(),
-        )));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        reader_tasks.push(tokio::spawn(read_process_progress(stderr, true, line_tx)));
-    }
-
-    let mut stdout = String::new();
-    let mut stderr = String::new();
     let mut last_progress_emit = Instant::now() - Duration::from_secs(1);
-    let status = loop {
-        if cancel_flag.load(Ordering::SeqCst) {
-            let _ = child.kill().await;
-            anyhow::bail!("docker pull cancelled");
-        }
-        if started.elapsed() >= Duration::from_secs(timeout_secs) {
-            let _ = child.kill().await;
-            anyhow::bail!("docker pull timed out after {timeout_secs}s");
-        }
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-
-        tokio::select! {
-            maybe_line = line_rx.recv() => {
-                if let Some((is_stderr, line)) = maybe_line {
-                let capture = if is_stderr { &mut stderr } else { &mut stdout };
-                append_capped(capture, &line);
-                if let Some(progress) = parse_docker_pull_progress_line(&line)
-                    && should_emit_pull_progress(&progress, &mut last_progress_emit)
-                {
-                    on_progress(progress);
-                }
-                }
+    run_spawned_child_streaming(
+        &mut child,
+        started,
+        timeout_secs,
+        cancel_flag,
+        "docker pull",
+        Duration::from_millis(100),
+        |is_stderr, line, draining, stdout, stderr| {
+            append_capped(if is_stderr { stderr } else { stdout }, &line);
+            if let Some(progress) = parse_docker_pull_progress_line(&line)
+                && (draining || should_emit_pull_progress(&progress, &mut last_progress_emit))
+            {
+                on_progress(progress);
             }
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-        }
-    };
-
-    for task in reader_tasks {
-        let _ = task.await;
-    }
-    while let Ok((is_stderr, line)) = line_rx.try_recv() {
-        append_capped(if is_stderr { &mut stderr } else { &mut stdout }, &line);
-        if let Some(progress) = parse_docker_pull_progress_line(&line) {
-            on_progress(progress);
-        }
-    }
-
-    let duration_ms = started.elapsed().as_millis() as u64;
-    Ok(ExecResult {
-        exit_code: status.code().unwrap_or(-1),
-        stdout,
-        stderr,
-        duration_ms,
-    })
+        },
+    )
+    .await
 }
 
 fn should_emit_pull_progress(progress: &DockerPullProgress, last_emit: &mut Instant) -> bool {
@@ -490,11 +404,78 @@ fn is_notable_pull_progress(progress: &DockerPullProgress) -> bool {
         || text.starts_with("status:")
 }
 
-async fn read_process_progress<R>(
-    mut reader: R,
-    is_stderr: bool,
-    tx: mpsc::UnboundedSender<(bool, String)>,
-) where
+async fn run_spawned_child_streaming<F>(
+    child: &mut tokio::process::Child,
+    started: Instant,
+    timeout_secs: u64,
+    cancel_flag: Arc<AtomicBool>,
+    label: &str,
+    poll_interval: Duration,
+    mut on_line: F,
+) -> Result<ExecResult>
+where
+    F: FnMut(bool, String, bool, &mut String, &mut String) + Send,
+{
+    let (line_tx, mut line_rx) = mpsc::channel::<(bool, String)>(PROCESS_OUTPUT_QUEUE_CAPACITY);
+    let mut reader_tasks = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        reader_tasks.push(tokio::spawn(read_process_progress(
+            stdout,
+            false,
+            line_tx.clone(),
+        )));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        reader_tasks.push(tokio::spawn(read_process_progress(
+            stderr,
+            true,
+            line_tx.clone(),
+        )));
+    }
+    drop(line_tx);
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let status = loop {
+        if cancel_flag.load(Ordering::SeqCst) {
+            let _ = child.kill().await;
+            anyhow::bail!("{label} cancelled");
+        }
+        if started.elapsed() >= Duration::from_secs(timeout_secs) {
+            let _ = child.kill().await;
+            anyhow::bail!("{label} timed out after {timeout_secs}s");
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+
+        tokio::select! {
+            line = line_rx.recv() => {
+                if let Some((is_stderr, line)) = line {
+                    on_line(is_stderr, line, false, &mut stdout, &mut stderr);
+                }
+            }
+            _ = tokio::time::sleep(poll_interval) => {}
+        }
+    };
+
+    while let Some((is_stderr, line)) = line_rx.recv().await {
+        on_line(is_stderr, line, true, &mut stdout, &mut stderr);
+    }
+    for task in reader_tasks {
+        let _ = task.await;
+    }
+
+    Ok(ExecResult {
+        exit_code: status.code().unwrap_or(-1),
+        stdout,
+        stderr,
+        duration_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+async fn read_process_progress<R>(mut reader: R, is_stderr: bool, tx: mpsc::Sender<(bool, String)>)
+where
     R: AsyncRead + Unpin,
 {
     let mut pending = Vec::new();
@@ -511,7 +492,7 @@ async fn read_process_progress<R>(
             if *byte == b'\n' || *byte == b'\r' {
                 if !pending.is_empty() {
                     let line = String::from_utf8_lossy(&pending).into_owned();
-                    if tx.send((is_stderr, line)).is_err() {
+                    if tx.send((is_stderr, line)).await.is_err() {
                         return;
                     }
                     pending.clear();
@@ -524,16 +505,17 @@ async fn read_process_progress<R>(
 
     if !pending.is_empty() {
         let line = String::from_utf8_lossy(&pending).into_owned();
-        let _ = tx.send((is_stderr, line));
+        let _ = tx.send((is_stderr, line)).await;
     }
 }
 
 const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 const MAX_PROCESS_LINE_BYTES: usize = 64 * 1024;
+const PROCESS_OUTPUT_QUEUE_CAPACITY: usize = 128;
 
-fn append_output_capped(buf: &mut String, line: &str) {
+fn append_output_capped(buf: &mut String, line: &str) -> bool {
     if buf.len() >= MAX_CAPTURE_BYTES {
-        return;
+        return false;
     }
     let remaining = MAX_CAPTURE_BYTES - buf.len();
     if line.len() < remaining {
@@ -542,19 +524,11 @@ fn append_output_capped(buf: &mut String, line: &str) {
     } else {
         buf.push_str(&line[..remaining.min(line.len())]);
     }
+    true
 }
 
 fn append_capped(buf: &mut String, line: &str) {
-    if buf.len() >= MAX_CAPTURE_BYTES {
-        return;
-    }
-    let remaining = MAX_CAPTURE_BYTES - buf.len();
-    if line.len() < remaining {
-        buf.push_str(line);
-        buf.push('\n');
-    } else {
-        buf.push_str(&line[..remaining.min(line.len())]);
-    }
+    let _ = append_output_capped(buf, line);
 }
 
 fn append_docker_env_file(
@@ -569,33 +543,11 @@ fn append_docker_env_file(
         .prefix("harness-hat-runner-env-")
         .tempfile()?;
     for (key, value) in env_vars {
-        validate_env_file_entry(key, value)?;
-        writeln!(file, "{key}={value}")?;
+        write_env_file_entry(&mut file, key, value)?;
     }
     file.flush()?;
     cmd.arg("--env-file").arg(file.path());
     Ok(Some(file))
-}
-
-fn validate_env_file_entry(key: &str, value: &str) -> Result<()> {
-    anyhow::ensure!(
-        is_valid_env_name(key),
-        "invalid environment variable name in env profile: {key}"
-    );
-    anyhow::ensure!(
-        !value.contains('\n') && !value.contains('\r'),
-        "environment variable value for {key} must not contain newlines"
-    );
-    Ok(())
-}
-
-fn is_valid_env_name(key: &str) -> bool {
-    let mut chars = key.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 pub fn parse_docker_pull_progress_line(line: &str) -> Option<DockerPullProgress> {
@@ -828,61 +780,20 @@ where
 
     let started = Instant::now();
     let mut child = cmd.spawn()?;
-    let (line_tx, mut line_rx) = mpsc::unbounded_channel::<(bool, String)>();
-    let mut reader_tasks = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        reader_tasks.push(tokio::spawn(read_process_progress(
-            stdout,
-            false,
-            line_tx.clone(),
-        )));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        reader_tasks.push(tokio::spawn(read_process_progress(stderr, true, line_tx)));
-    }
-
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-
-    let status = loop {
-        if cancel_flag.load(Ordering::SeqCst) {
-            let _ = child.kill().await;
-            anyhow::bail!("docker command cancelled");
-        }
-        if started.elapsed() >= Duration::from_secs(timeout_secs) {
-            let _ = child.kill().await;
-            anyhow::bail!("docker command timed out after {timeout_secs}s");
-        }
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-
-        tokio::select! {
-            line = line_rx.recv() => {
-                if let Some((is_stderr, line)) = line {
-                    append_output_capped(if is_stderr { &mut stderr } else { &mut stdout }, &line);
-                    on_output(is_stderr, line);
-                }
+    run_spawned_child_streaming(
+        &mut child,
+        started,
+        timeout_secs,
+        cancel_flag,
+        "docker command",
+        Duration::from_millis(50),
+        |is_stderr, line, _draining, stdout, stderr| {
+            if append_output_capped(if is_stderr { stderr } else { stdout }, &line) {
+                on_output(is_stderr, line);
             }
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-        }
-    };
-
-    for task in reader_tasks {
-        let _ = task.await;
-    }
-    while let Ok((is_stderr, line)) = line_rx.try_recv() {
-        append_output_capped(if is_stderr { &mut stderr } else { &mut stdout }, &line);
-        on_output(is_stderr, line);
-    }
-
-    let duration_ms = started.elapsed().as_millis() as u64;
-    Ok(ExecResult {
-        exit_code: status.code().unwrap_or(-1),
-        stdout,
-        stderr,
-        duration_ms,
-    })
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1065,7 +976,7 @@ mod tests {
         use tokio::io::AsyncWriteExt;
 
         let (mut writer, reader) = tokio::io::duplex(64);
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(4);
         let task = tokio::spawn(read_process_progress(reader, true, tx));
 
         writer
@@ -1114,5 +1025,31 @@ mod tests {
         assert_eq!(result.stderr, "err\n");
         assert!(seen.contains(&(false, "out".to_string())));
         assert!(seen.contains(&(true, "err".to_string())));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_streaming_caps_large_output_without_hanging() {
+        let mut seen_count = 0usize;
+        let result = run_command_streaming(
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                "yes line | head -n 260000".to_string(),
+            ],
+            Path::new("."),
+            &HashMap::new(),
+            10,
+            Arc::new(AtomicBool::new(false)),
+            |_, _| seen_count += 1,
+        )
+        .await
+        .expect("stream high-volume command");
+
+        assert_eq!(result.exit_code, 0);
+        assert!(seen_count > PROCESS_OUTPUT_QUEUE_CAPACITY);
+        assert!(seen_count < 260000);
+        assert!(result.stdout.len() <= MAX_CAPTURE_BYTES);
+        assert!(result.stderr.is_empty());
     }
 }

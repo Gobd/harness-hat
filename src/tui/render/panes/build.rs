@@ -13,7 +13,7 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
     let workspace_path = app
         .selected_project_idx()
         .and_then(|pi| cfg.workspaces.get(pi))
-        .map(|proj| crate::config::effective_workspace_path(proj, &cfg.workspace));
+        .map(|proj| proj.canonical_path.clone());
     let block = Block::default()
         .title(format!(" Run Container for '{}' ", workspace_name))
         .title_style(

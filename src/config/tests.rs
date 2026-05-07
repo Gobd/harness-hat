@@ -1,9 +1,10 @@
 #[cfg(test)]
 mod tests {
     use crate::config::{
-        Config, ContainerMount, DefaultsConfig, MountMode, SyncMode, effective_mount_source_path,
-        effective_sync_mode, effective_workspace_path, image_tag_for_stem, load,
-        load_composed_rules_for_workspace, merge_mounts, merge_unique_strings,
+        AgentKind, Config, ContainerMount, DefaultsConfig, MountMode,
+        add_existing_agent_session_mounts_for_home, agent_session_mounts_for_home,
+        image_tag_for_stem, load, load_composed_rules_for_workspace, merge_mounts,
+        merge_unique_strings,
     };
     use crate::rules::{ApprovalMode, NetworkPolicy};
     use std::fs;
@@ -54,6 +55,11 @@ canonical_path = "{}"
     #[test]
     fn defaults_sidebar_width_defaults_to_32() {
         assert_eq!(DefaultsConfig::default().ui.sidebar_width, 32);
+    }
+
+    #[test]
+    fn defaults_show_log_pane_defaults_to_false() {
+        assert!(!DefaultsConfig::default().ui.show_log_pane);
     }
 
     #[test]
@@ -144,6 +150,32 @@ sidebar_width = 28
         fs::write(&cfg_path, raw).expect("write config");
         let cfg = load(&cfg_path).expect("config should load");
         assert_eq!(cfg.defaults.ui.sidebar_width, 28);
+    }
+
+    #[test]
+    fn load_applies_log_pane_visibility() {
+        let root = unique_temp_dir("log-pane-visibility");
+        let cfg_path = root.join("harness-hat.toml");
+        let docker_dir = root.join("docker-root");
+        fs::create_dir_all(&docker_dir).expect("create docker dir");
+        let raw = format!(
+            r#"
+docker_dir = "{}"
+
+[workspace]
+
+[manager]
+global_rules_file = "{}"
+
+[defaults.ui]
+show_log_pane = true
+"#,
+            docker_dir.display(),
+            root.join("global-rules.toml").display()
+        );
+        fs::write(&cfg_path, raw).expect("write config");
+        let cfg = load(&cfg_path).expect("config should load");
+        assert!(cfg.defaults.ui.show_log_pane);
     }
 
     #[test]
@@ -447,12 +479,52 @@ canonical_path = "{}"
         let cfg = load(&cfg_path).expect("config should load");
         assert_eq!(cfg.workspaces.len(), 1);
         assert_eq!(cfg.workspaces[0].name, "workspace-a");
-        assert_eq!(cfg.workspaces[0].canonical_path, workspace_path);
+        assert_eq!(
+            cfg.workspaces[0].canonical_path,
+            workspace_path.canonicalize().expect("canonical workspace")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_canonicalizes_workspace_paths() {
+        let root = unique_temp_dir("canonical-workspace-path");
+        let cfg_path = root.join("harness-hat.toml");
+        let docker_dir = root.join("docker-root");
+        let real_workspace = root.join("real-workspace");
+        let linked_workspace = root.join("linked-workspace");
+        fs::create_dir_all(&docker_dir).expect("create docker dir");
+        fs::create_dir_all(&real_workspace).expect("create real workspace");
+        std::os::unix::fs::symlink(&real_workspace, &linked_workspace).expect("symlink");
+
+        let raw = format!(
+            r#"
+docker_dir = "{}"
+[workspace]
+
+[manager]
+global_rules_file = "{}"
+[[workspaces]]
+name = "workspace-a"
+canonical_path = "{}"
+"#,
+            docker_dir.display(),
+            root.join("global-rules.toml").display(),
+            linked_workspace.display()
+        );
+        fs::write(&cfg_path, raw).expect("write config");
+
+        let cfg = load(&cfg_path).expect("config should load");
+
+        assert_eq!(
+            cfg.workspaces[0].canonical_path,
+            real_workspace.canonicalize().expect("canonical workspace")
+        );
     }
 
     #[test]
-    fn effective_mode_is_always_direct() {
-        let root = unique_temp_dir("direct-disposable");
+    fn load_rejects_workspace_path_field() {
+        let root = unique_temp_dir("reject-workspace-path");
         let cfg_path = root.join("harness-hat.toml");
         let docker_dir = root.join("docker-root");
         let project_path = root.join("project-a");
@@ -469,7 +541,36 @@ global_rules_file = "{}"
 [[projects]]
 name = "project-a"
 canonical_path = "{}"
-disposable = true
+workspace_path = "{}"
+"#,
+            docker_dir.display(),
+            root.join("global-rules.toml").display(),
+            project_path.display(),
+            root.join("some-other-place").display()
+        );
+        fs::write(&cfg_path, raw).expect("write config");
+        load(&cfg_path).expect_err("config should reject workspace_path");
+    }
+
+    #[test]
+    fn load_rejects_workspace_sync_section() {
+        let root = unique_temp_dir("reject-workspace-sync");
+        let cfg_path = root.join("harness-hat.toml");
+        let docker_dir = root.join("docker-root");
+        let project_path = root.join("project-a");
+        fs::create_dir_all(&docker_dir).expect("create docker dir");
+        fs::create_dir_all(&project_path).expect("create project path");
+
+        let raw = format!(
+            r#"
+docker_dir = "{}"
+[workspace]
+
+[manager]
+global_rules_file = "{}"
+[[projects]]
+name = "project-a"
+canonical_path = "{}"
 [projects.sync]
 mode = "direct"
 "#,
@@ -478,51 +579,7 @@ mode = "direct"
             project_path.display()
         );
         fs::write(&cfg_path, raw).expect("write config");
-        let cfg = load(&cfg_path).expect("config should load");
-        let proj = cfg.workspaces.first().expect("project present");
-        assert_eq!(effective_sync_mode(proj, &cfg.defaults), SyncMode::Direct);
-    }
-
-    #[test]
-    fn workspace_and_mount_paths_always_resolve_to_canonical() {
-        let root = unique_temp_dir("direct-workspace-path");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        let project_path = root.join("project-a");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        fs::create_dir_all(&project_path).expect("create project path");
-
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-[[projects]]
-name = "project-a"
-canonical_path = "{}"
-disposable = false
-workspace_path = "{}"
-[projects.sync]
-mode = "direct"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display(),
-            project_path.display(),
-            root.join("some-other-place").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let cfg = load(&cfg_path).expect("config should load");
-        let proj = cfg.workspaces.first().expect("project present");
-        assert_eq!(
-            effective_workspace_path(proj, &cfg.workspace),
-            proj.canonical_path
-        );
-        assert_eq!(
-            effective_mount_source_path(proj, &cfg.workspace, &cfg.defaults),
-            proj.canonical_path
-        );
+        load(&cfg_path).expect_err("config should reject workspace sync section");
     }
 
     // New tests for merge_unique_strings
@@ -670,6 +727,129 @@ mode = "direct"
         assert!(result.contains(&m1));
         assert!(result.contains(&m2));
         assert!(result.contains(&m3));
+    }
+
+    #[test]
+    fn agent_session_mounts_match_legacy_default_paths() {
+        let home = Path::new("/home/dev");
+        let codex = agent_session_mounts_for_home(&AgentKind::Codex, home);
+        assert!(codex.iter().any(|m| {
+            m.host == home.join(".codex") && m.container == Path::new("/home/ubuntu/.codex")
+        }));
+        assert!(codex.iter().any(|m| {
+            m.host == home.join(".config/codex")
+                && m.container == Path::new("/home/ubuntu/.config/codex")
+        }));
+
+        let claude = agent_session_mounts_for_home(&AgentKind::Claude, home);
+        assert!(claude.iter().any(|m| {
+            m.host == home.join(".claude.json")
+                && m.container == Path::new("/home/ubuntu/.claude.json")
+        }));
+        assert!(claude.iter().any(|m| {
+            m.host == home.join(".claude") && m.container == Path::new("/home/ubuntu/.claude")
+        }));
+
+        let gemini = agent_session_mounts_for_home(&AgentKind::Gemini, home);
+        assert!(gemini.iter().any(|m| {
+            m.host == home.join(".gemini") && m.container == Path::new("/home/ubuntu/.gemini")
+        }));
+
+        let opencode = agent_session_mounts_for_home(&AgentKind::Opencode, home);
+        assert!(opencode.iter().any(|m| {
+            m.host == home.join(".opencode") && m.container == Path::new("/home/ubuntu/.opencode")
+        }));
+        assert!(opencode.iter().any(|m| {
+            m.host == home.join(".config/opencode")
+                && m.container == Path::new("/home/ubuntu/.config/opencode")
+        }));
+    }
+
+    #[test]
+    fn add_existing_agent_session_mounts_imports_only_present_paths() {
+        let home = unique_temp_dir("agent-session-home");
+        fs::create_dir_all(home.join(".codex")).expect("create codex home");
+        let mut mounts = vec![ContainerMount {
+            host: home.join(".custom-codex"),
+            container: "/home/ubuntu/.config/codex".into(),
+            mode: MountMode::Ro,
+        }];
+
+        add_existing_agent_session_mounts_for_home(&mut mounts, &AgentKind::Codex, &home);
+
+        assert!(mounts.iter().any(|m| {
+            m.host == home.join(".codex") && m.container == Path::new("/home/ubuntu/.codex")
+        }));
+        assert!(!mounts.iter().any(|m| m.host == home.join(".config/codex")));
+        assert_eq!(
+            mounts
+                .iter()
+                .filter(|m| m.container == Path::new("/home/ubuntu/.config/codex"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn add_existing_agent_session_mounts_imports_present_paths_for_all_agents() {
+        let home = unique_temp_dir("all-agent-session-home");
+        fs::write(home.join(".claude.json"), "{}").expect("create claude json");
+        for path in [
+            ".claude",
+            ".codex",
+            ".config/codex",
+            ".gemini",
+            ".opencode",
+            ".config/opencode",
+        ] {
+            fs::create_dir_all(home.join(path)).expect("create session dir");
+        }
+
+        for (agent, expected) in [
+            (
+                AgentKind::Claude,
+                vec![
+                    (".claude.json", "/home/ubuntu/.claude.json"),
+                    (".claude", "/home/ubuntu/.claude"),
+                ],
+            ),
+            (
+                AgentKind::Codex,
+                vec![
+                    (".codex", "/home/ubuntu/.codex"),
+                    (".config/codex", "/home/ubuntu/.config/codex"),
+                ],
+            ),
+            (AgentKind::Gemini, vec![(".gemini", "/home/ubuntu/.gemini")]),
+            (
+                AgentKind::Opencode,
+                vec![
+                    (".opencode", "/home/ubuntu/.opencode"),
+                    (".config/opencode", "/home/ubuntu/.config/opencode"),
+                ],
+            ),
+        ] {
+            let mut mounts = Vec::new();
+            add_existing_agent_session_mounts_for_home(&mut mounts, &agent, &home);
+
+            assert_eq!(
+                mounts.len(),
+                expected.len(),
+                "unexpected mounts for {agent:?}"
+            );
+            assert!(
+                mounts.iter().all(|m| m.mode == MountMode::Rw),
+                "session mounts should be read-write for {agent:?}"
+            );
+            for (host, container) in expected {
+                assert!(
+                    mounts.iter().any(|m| {
+                        m.host == home.join(host) && m.container == Path::new(container)
+                    }),
+                    "missing {agent:?} session mount {host} -> {container}"
+                );
+            }
+        }
     }
 
     #[test]

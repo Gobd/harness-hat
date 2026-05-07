@@ -6,38 +6,69 @@ This changelog is derived from git history and the current working tree.
 
 ### Added
 - Scoped proxy listeners now require per-session proxy authentication before accepting HTTP or CONNECT traffic.
+- Scoped proxy credentials are now propagated into launched containers and strict-network `tun2proxy` setup through env files instead of exposing authenticated proxy URLs as container addresses.
 - Proxy DNS guardrails now resolve destinations before forwarding and reject loopback, private, link-local, CGNAT, benchmark, multicast, reserved, and IPv4-mapped IPv6 restricted addresses.
 - Proxy forwarding pins the resolved public addresses used for each outbound HTTP(S) request to reduce DNS rebinding exposure.
 - HTTPS MITM forwarding now validates the inner `Host` header against the CONNECT/SNI target and rejects duplicate or mismatched `Host` headers.
+- Network activity rows are now collapsed into a per-session `Network [X]` group with request navigation, selected-request detail, and selected-request cancellation.
+- Host-side `hostdo` execution now canonicalizes and confines request and rule CWDs to the configured workspace before running commands.
 - Proxy tests now cover restricted-address blocking, IPv4-mapped loopback rejection, scoped proxy authentication, Host header mismatch rejection, CONNECT port handling, and oversized request bodies.
+- Hostdo/server tests now cover workspace CWD mapping, parent-directory escape rejection, symlink escape rejection, and persisted `port=...` network rules.
+- Config/server tests now cover canonical workspace loading, symlinked Docker-runner CWD mapping, and shared Docker env-file validation.
 - Strict network mode now configures IPv6 egress blocking when `ip6tables` is available.
 - The base Docker image now resolves proxy and exec bridge hosts to IPv4 addresses before starting `tun2proxy`, keeping strict-network control traffic off virtual DNS addresses.
 - `hostdo` Docker runners now pass environment profiles through Docker env files instead of process arguments.
 - Hostdo Docker runners now validate env-file names and values before writing them.
 - Cargo audit coverage is clean after dependency upgrades for the TUI, PTY, OpenTelemetry, and `time` dependency families.
+- `[defaults.ui].show_log_pane` can show the bottom TUI log pane, which is hidden by default while fullscreen log view remains available.
 
 ### Changed
+- Direct-mode workspace handling now uses each workspace's `canonical_path` directly instead of routing through legacy effective sync/workspace helper APIs.
+- Workspace `canonical_path` values are now canonicalized during config load so direct mounts, hostdo confinement, and Docker runner CWD mapping use the same real filesystem root.
+- Manager-generated workspace config now writes only the direct workspace block and no longer emits ignored `[workspaces.sync]` settings.
+- Rules file rendering now always includes the standard header without carrying a dead `is_new` parameter through call sites.
+- Hostdo approval persistence now stores the resolved host CWD used for execution, keeping saved rules aligned with the workspace-confined path.
+- Manager proxy startup now binds the root proxy to `127.0.0.1:<proxy_port>` instead of inheriting the configurable proxy host.
 - CONNECT policy matching is now port-aware: domain-only allow rules auto-allow HTTPS CONNECT on 443, while raw TCP CONNECT on other ports requires an explicit `port=...` rule.
 - CONNECT passthrough and raw tunnel paths now run policy and public-address preflight checks before bypassing MITM inspection.
 - Plain HTTP and HTTPS forwarding now strip caller-supplied `Host` headers so reqwest derives `Host` from the policy-checked URL.
 - Network "always allow" persistence now includes `port=...` for raw non-443 CONNECT decisions.
 - Default credential/session mounts in the example config are now commented examples instead of active mounts.
-- The default Docker image now installs pinned npm CLI versions instead of floating latest packages or downloading Claude Code through a curl installer.
+- Container launch now writes scoped proxy, `hostdo`, and Claude token values through flushed, validated env files rather than Docker `-e` arguments where possible.
+- Container launch env files and Docker runner env files now share one validator for environment variable names and newline-free values.
+- Temporary helper script copies are now created in the system temp directory instead of under `docker/scripts`.
+- The default Docker image now installs pinned npm CLI versions, including Claude Code, instead of floating latest packages or downloading Claude Code through a curl installer.
+- The base Docker image now builds pinned `tun2proxy` from crates.io and installs NodeSource through a signed apt keyring.
 - The PWA dependency set was refreshed, unused UI packages were removed, and PostCSS is pinned through package overrides.
+- Cargo package metadata now uses the isolation-focused description and keyword set.
 - The minimum supported Rust version is now 1.88.
+- Ratatui, OpenTelemetry, PTY/terminal, and related dependency families were upgraded.
 - Sidebar network group rows now render as `Network [X]` instead of `X Network`.
 - Network group detail panes now use the same `Network [X]` title format.
+- Large activity start events now box the activity payload to reduce enum size.
+- README and the example config now document that Docker-reachable bind addresses should be narrowed or firewalled on shared networks.
 
 ### Fixed
 - `bypass_proxy` can no longer skip network policy decisions for CONNECT or transparent TLS traffic.
+- Scoped transparent TLS traffic without matching proxy authentication is now rejected instead of being allowed through the scoped proxy path.
 - Raw CONNECT rules no longer allow non-443 ports from a domain-only allow entry.
 - HTTPS requests can no longer be approved for one host while forwarding a different inner `Host` header.
 - IPv4-mapped IPv6 literals can no longer bypass restricted IPv4 destination checks.
 - Strict-network launches on Linux no longer fall back to broad `--privileged` mode when `/dev/net/tun` is unavailable.
+- Existing CA private keys now have private file permissions enforced when they are loaded, matching newly generated keys.
+- Env profiles now reject invalid environment variable names or values that cannot be represented safely in Docker env files.
+- Generated container env-file values can no longer inject additional Docker environment entries via embedded newlines.
+- Docker-backed `hostdo --image` commands now preserve workspace-relative runner CWD mapping when the configured workspace path is a symlink.
+- High-volume `hostdo` command output can no longer grow an unbounded manager-side queue; stdout/stderr streaming now applies bounded backpressure and stops forwarding lines after the capture cap is reached.
 - Cargo clippy warnings introduced by dependency and type-size changes were resolved.
 
 ### Removed
+- Removed inert sync/workspace config schema fields (`workspace_path`, per-workspace `sync`, per-workspace `disposable`, per-workspace `default_policy`, `[defaults.sync]`, and `[defaults.workspace]`) that were already ignored by direct-mode runtime behavior.
+- Removed dead request fields from the hostdo exec and container stop HTTP payloads.
+- Removed no-op rules workspace sync hooks from approval persistence.
+- Removed unused direct Rust dependencies on `webpki-roots`, `httparse`, and `portable-pty`.
 - Removed the stale generated `docker/scripts/harness-hat-hostdo-8VP3so` helper artifact from the tree.
+- Runtime helper artifacts under `docker/scripts/harness-hat-hostdo-*` are now ignored for older launch behavior.
 - Removed unused PWA dependencies, including Ark UI and Park UI packages.
 - Removed the unused `rustls-pemfile` dependency.
 

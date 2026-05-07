@@ -24,7 +24,7 @@ use crate::config;
 use crate::proxy::connect::{handle_connect, parse_sni_from_tls_client_hello};
 use crate::proxy::helpers::{
     connect_public_tcp, container_tls_passthrough_matches, ensure_host_header_matches_target,
-    is_expected_disconnect, resolve_public_addrs, write_error_any,
+    format_byte_count, is_expected_disconnect, resolve_public_addrs, write_error_any,
 };
 use crate::proxy::http::{
     forward_request_with_activity, handle_plain_http, parse_request_line_and_headers,
@@ -492,7 +492,11 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
                 Ok((from_client, from_server)) => {
                     state.activity_line(
                         &connect_activity.id,
-                        format!("tunnel closed after {from_client} bytes upstream, {from_server} bytes downstream"),
+                        format!(
+                            "tunnel closed after {} upstream, {} downstream",
+                            format_byte_count(from_client),
+                            format_byte_count(from_server)
+                        ),
                     );
                     state.activity_finished(
                         &connect_activity.id,

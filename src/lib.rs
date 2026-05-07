@@ -19,6 +19,7 @@ pub mod cli;
 pub mod config;
 pub mod container;
 pub mod exec;
+mod fs_util;
 pub mod init;
 pub mod manager;
 pub mod new_project;

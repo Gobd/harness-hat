@@ -6,6 +6,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::fs_util::{
+    set_private_dir_permissions, set_private_file_permissions, write_private_file,
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
     pub project: String,
@@ -152,43 +156,6 @@ impl StateManager {
         self.log_dir
             .join(format!("audit-{}.log", day.format("%Y-%m-%d")))
     }
-}
-
-fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
-    let mut options = OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    set_private_file_permissions(path)?;
-    Ok(())
-}
-
-fn set_private_file_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("setting permissions on {}", path.display()))?;
-    }
-    let _ = path;
-    Ok(())
-}
-
-fn set_private_dir_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("setting permissions on {}", path.display()))?;
-    }
-    let _ = path;
-    Ok(())
 }
 
 #[cfg(test)]

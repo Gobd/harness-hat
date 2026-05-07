@@ -528,7 +528,6 @@ impl App {
             &self.loaded_config_path,
             &name,
             &workspace_path,
-            crate::config::SyncMode::Direct,
         ) {
             self.set_new_project_error(format!("failed updating config: {e}"));
             return;

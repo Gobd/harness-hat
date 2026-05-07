@@ -8,7 +8,7 @@ use crate::activity::{Activity, ActivityState, wait_cancelled};
 use crate::config;
 use crate::proxy::helpers::{
     connect_public_tcp, container_tls_passthrough_matches, ensure_host_header_matches_target,
-    proxy_authorization_matches_token, resolve_public_addrs, write_error_any,
+    format_byte_count, proxy_authorization_matches_token, resolve_public_addrs, write_error_any,
 };
 use crate::proxy::http::{
     connect_head_has_proxy_authorization, forward_request_with_activity, parse_connect_target,
@@ -433,7 +433,11 @@ async fn tunnel_connect(
             Ok((from_client, from_server)) => {
                 state.activity_line(
                     &activity.id,
-                    format!("tunnel closed after {from_client} bytes upstream, {from_server} bytes downstream"),
+                    format!(
+                        "tunnel closed after {} upstream, {} downstream",
+                        format_byte_count(from_client),
+                        format_byte_count(from_server)
+                    ),
                 );
                 state.activity_finished(
                     &activity.id,

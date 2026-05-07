@@ -10,10 +10,10 @@ use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::collections::HashMap;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+use crate::fs_util::{set_private_file_permissions, write_private_file};
 
 pub struct CaStore {
     /// CA cert PEM — inject this into containers so they trust the proxy.
@@ -159,32 +159,6 @@ impl CaStore {
             .insert(domain.to_string(), config.clone());
         Ok(config)
     }
-}
-
-fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
-    let mut options = OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    set_private_file_permissions(path)?;
-    Ok(())
-}
-
-fn set_private_file_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("setting permissions on {}", path.display()))?;
-    }
-    let _ = path;
-    Ok(())
 }
 
 #[cfg(test)]
