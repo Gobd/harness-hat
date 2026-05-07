@@ -18,8 +18,9 @@ use crate::exec::{self, CommandMatch, DenyReason};
 use crate::rules::{DEFAULT_TIMEOUT_SECS, RuleCommand};
 use crate::server::{
     ApprovalDecision, ErrorResponse, ExecJobPhase, ExecJobProgress, ExecJobState, ExecJobStatus,
-    ExecRequest, ExecResponse, PendingItem, ServerState, deny as server_deny, record_audit,
-    require_session_identity, resolve_exec_argv_aliases, resolve_host_cwd,
+    ExecRequest, ExecResponse, PendingItem, ServerState, confine_host_cwd_to_workspace,
+    deny as server_deny, record_audit, require_session_identity, resolve_exec_argv_aliases,
+    resolve_host_cwd_in_workspace,
 };
 use crate::state::{AuditEntry, DecisionKind};
 
@@ -119,15 +120,50 @@ pub(super) async fn exec_handler(
     let workspace_path = workspace_path_buf.display().to_string();
 
     let request_cwd = PathBuf::from(&req.cwd);
-    let has_cwd_override = resolved.cwd_override.is_some();
-    let host_cwd = if let Some(cwd_override) = resolved.cwd_override {
-        cwd_override
+    let requested_host_cwd = if let Some(cwd_override) = resolved.cwd_override {
+        match confine_host_cwd_to_workspace(&cwd_override, &workspace_path_buf) {
+            Ok(cwd) => cwd,
+            Err(reason) => {
+                record_audit(
+                    &state,
+                    AuditEntry {
+                        project: identity_project.clone(),
+                        argv: exec_argv.clone(),
+                        cwd: req.cwd.clone(),
+                        decision: DecisionKind::DeniedByPolicy,
+                        exit_code: None,
+                        duration_ms: None,
+                        timestamp: Utc::now(),
+                    },
+                )
+                .await;
+                return server_deny(reason);
+            }
+        }
     } else {
-        resolve_host_cwd(
+        match resolve_host_cwd_in_workspace(
             &request_cwd,
             Some(identity_mount_target.as_str()),
             &workspace_path_buf,
-        )
+        ) {
+            Ok(cwd) => cwd,
+            Err(reason) => {
+                record_audit(
+                    &state,
+                    AuditEntry {
+                        project: identity_project.clone(),
+                        argv: exec_argv.clone(),
+                        cwd: req.cwd.clone(),
+                        decision: DecisionKind::DeniedByPolicy,
+                        exit_code: None,
+                        duration_ms: None,
+                        timestamp: Utc::now(),
+                    },
+                )
+                .await;
+                return server_deny(reason);
+            }
+        }
     };
 
     // Hard-deny check (executable denylist, fragment denylist).
@@ -184,16 +220,28 @@ pub(super) async fn exec_handler(
     let policy_cmd = explicit_cmd
         .filter(|cmd| cmd.approval_mode != ApprovalMode::Auto || !requested_timeout_exceeds_rule);
 
-    // For unlisted commands (which require approval), default the CWD to the
-    // canonical project directory rather than the workspace copy.
-    let host_cwd = if policy_cmd.is_none() && !has_cwd_override {
-        resolve_host_cwd(
-            &request_cwd,
-            Some(identity_mount_target.as_str()),
-            &proj.canonical_path,
-        )
-    } else {
-        host_cwd
+    let host_cwd = match policy_cmd {
+        Some(cmd) => match confine_host_cwd_to_workspace(Path::new(&cmd.cwd), &proj.canonical_path)
+        {
+            Ok(cwd) => cwd,
+            Err(reason) => {
+                record_audit(
+                    &state,
+                    AuditEntry {
+                        project: identity_project.clone(),
+                        argv: exec_argv.clone(),
+                        cwd: req.cwd.clone(),
+                        decision: DecisionKind::DeniedByPolicy,
+                        exit_code: None,
+                        duration_ms: None,
+                        timestamp: Utc::now(),
+                    },
+                )
+                .await;
+                return server_deny(format!("matched hostdo rule has invalid cwd: {reason}"));
+            }
+        },
+        None => requested_host_cwd,
     };
 
     // Determine approval mode.
@@ -274,7 +322,9 @@ pub(super) async fn exec_handler(
         cancel_flag.clone(),
     );
     let activity_id = activity.id.clone();
-    let _ = state.activity_tx.send(ActivityEvent::Started(activity));
+    let _ = state
+        .activity_tx
+        .send(ActivityEvent::Started(Box::new(activity)));
 
     // Export level from logging config.
     let export_level = cfg
@@ -367,7 +417,7 @@ pub(super) async fn exec_handler(
         cancel_flag: cancel_flag.clone(),
         timeout_secs,
         cwd: host_cwd.clone(),
-        rule_cwd: request_cwd.clone(),
+        rule_cwd: host_cwd.clone(),
         matched_command: matched_command_name,
         response_tx: Some(response_tx),
     };

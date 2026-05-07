@@ -14,6 +14,22 @@ use ratatui::{
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub(crate) fn truncate_middle(value: &str, max_chars: usize) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".to_string();
+    }
+    let left = (max_chars - 1) / 2;
+    let right = max_chars - 1 - left;
+    let mut out = chars[..left].iter().collect::<String>();
+    out.push('…');
+    out.push_str(&chars[chars.len() - right..].iter().collect::<String>());
+    out
+}
+
 mod overlays;
 mod root;
 mod sidebar;

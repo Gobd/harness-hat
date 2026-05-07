@@ -266,6 +266,23 @@ fn validate(config: &Config) -> Result<()> {
         );
     }
 
+    for (profile_name, profile) in &config.env_profiles {
+        for (key, value) in &profile.vars {
+            anyhow::ensure!(
+                is_valid_env_name(key),
+                "env profile '{}': invalid environment variable name: {}",
+                profile_name,
+                key
+            );
+            anyhow::ensure!(
+                !value.contains('\n') && !value.contains('\r'),
+                "env profile '{}': value for {} must not contain newlines",
+                profile_name,
+                key
+            );
+        }
+    }
+
     let mut seen = std::collections::HashSet::new();
     for proj in &config.workspaces {
         anyhow::ensure!(
@@ -356,6 +373,15 @@ fn validate(config: &Config) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn is_valid_env_name(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn ensure_logging_instance_id(path: &Path, raw: &str, config: &mut Config) -> Result<()> {

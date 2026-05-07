@@ -14,6 +14,13 @@ impl App {
                 self.cancel_activity(&id);
                 return;
             }
+            if self.focus == Focus::Network
+                && let Some(si) = self.active_network_session
+                && let Some(id) = self.selected_network_activity_id(si)
+            {
+                self.cancel_activity(&id);
+                return;
+            }
 
             if self.build_is_running() {
                 self.cancel_build();
@@ -75,7 +82,7 @@ impl App {
             return;
         }
 
-        if self.focus == Focus::Activity
+        if matches!(self.focus, Focus::Activity | Focus::Network)
             && (key.code == KeyCode::Esc
                 || (key.code == KeyCode::Char('b')
                     && key.modifiers.contains(KeyModifiers::CONTROL)))
@@ -130,6 +137,7 @@ impl App {
             Focus::Sidebar => self.handle_sidebar_key(key),
             Focus::Terminal => self.handle_terminal_key(key),
             Focus::Activity => self.handle_activity_key(key),
+            Focus::Network => self.handle_network_key(key),
             Focus::Settings => self.handle_settings_key(key),
             Focus::ContainerPicker => self.handle_picker_key(key),
             Focus::ImageBuild => self.handle_build_key(key),
@@ -148,6 +156,11 @@ impl App {
             }
             Focus::Activity => {
                 self.active_activity = None;
+                self.focus = Focus::Sidebar;
+            }
+            Focus::Network => {
+                self.active_network_session = None;
+                self.network_cursor = 0;
                 self.focus = Focus::Sidebar;
             }
             Focus::Settings => {
@@ -264,6 +277,7 @@ impl App {
     pub(crate) fn update_sidebar_preview(&mut self, items: &[SidebarItem]) {
         self.preview_session = match items.get(self.sidebar_idx) {
             Some(SidebarItem::Session(si)) => Some(*si),
+            Some(SidebarItem::NetworkGroup(si)) => Some(*si),
             Some(SidebarItem::Activity(id)) => self.session_for_activity(id),
             _ => None,
         };
@@ -277,16 +291,19 @@ impl App {
             Some(SidebarItem::Settings(pi)) => {
                 self.active_settings_project = Some(pi);
                 self.active_activity = None;
+                self.active_network_session = None;
                 self.settings_cursor = 0;
                 self.focus = Focus::Settings;
             }
             Some(SidebarItem::Launch(_)) => {
                 self.active_activity = None;
+                self.active_network_session = None;
                 self.open_picker();
             }
             Some(SidebarItem::Build(_)) => {
                 self.active_session = None;
                 self.active_activity = None;
+                self.active_network_session = None;
                 self.focus = Focus::ImageBuild;
                 self.active_settings_project = None;
             }
@@ -301,12 +318,23 @@ impl App {
                 self.terminal_scroll = 0;
                 self.focus = Focus::Terminal;
                 self.active_activity = None;
+                self.active_network_session = None;
+                self.active_settings_project = None;
+            }
+            Some(SidebarItem::NetworkGroup(si)) => {
+                self.active_session = Some(si);
+                self.preview_session = Some(si);
+                self.active_activity = None;
+                self.network_cursor = self.network_cursor_for_session(si);
+                self.active_network_session = Some(si);
+                self.focus = Focus::Network;
                 self.active_settings_project = None;
             }
             Some(SidebarItem::Activity(id)) => {
                 self.active_session = self.session_for_activity(&id);
                 self.preview_session = self.active_session;
                 self.active_activity = Some(id);
+                self.active_network_session = None;
                 self.focus = Focus::Activity;
                 self.active_settings_project = None;
             }
@@ -316,11 +344,25 @@ impl App {
     }
 
     pub(crate) fn handle_activity_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.focus_sidebar_shortcut();
+        }
+    }
+
+    pub(crate) fn handle_network_key(&mut self, key: KeyEvent) {
+        let Some(si) = self.active_network_session else {
+            self.focus_sidebar_shortcut();
+            return;
+        };
+        let len = self.network_activity_count_for_session(si);
         match key.code {
             KeyCode::Esc => self.focus_sidebar_shortcut(),
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(id) = self.active_activity.clone() {
-                    self.cancel_activity(&id);
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.network_cursor = self.network_cursor.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if len > 0 {
+                    self.network_cursor = (self.network_cursor + 1).min(len.saturating_sub(1));
                 }
             }
             _ => {}
@@ -340,6 +382,7 @@ impl App {
         self.focus = Focus::NewWorkspace;
         self.active_session = None;
         self.active_activity = None;
+        self.active_network_session = None;
         self.active_settings_project = None;
         self.container_picker = None;
     }

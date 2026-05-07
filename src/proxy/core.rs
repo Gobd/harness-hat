@@ -10,7 +10,6 @@
 /// rules against method + host + path of each request.
 use anyhow::Result;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -24,7 +23,8 @@ use crate::ca::CaStore;
 use crate::config;
 use crate::proxy::connect::{handle_connect, parse_sni_from_tls_client_hello};
 use crate::proxy::helpers::{
-    container_tls_passthrough_matches, is_expected_disconnect, write_error_any,
+    connect_public_tcp, container_tls_passthrough_matches, ensure_host_header_matches_target,
+    is_expected_disconnect, resolve_public_addrs, write_error_any,
 };
 use crate::proxy::http::{
     forward_request_with_activity, handle_plain_http, parse_request_line_and_headers,
@@ -44,6 +44,7 @@ pub struct PendingNetworkItem {
     pub has_proxy_authorization: bool,
     pub method: String,
     pub host: String,
+    pub port: Option<u16>,
     pub path: String,
     pub response_tx: oneshot::Sender<NetworkDecision>,
 }
@@ -59,6 +60,7 @@ pub enum NetworkDecision {
 pub(crate) struct FixedSourceIdentity {
     pub(crate) project: String,
     pub(crate) container: String,
+    pub(crate) auth_token: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +107,6 @@ pub struct ProxyState {
     pub config: SharedConfig,
     pub pending_tx: mpsc::Sender<PendingNetworkItem>,
     pub activity_tx: mpsc::UnboundedSender<ActivityEvent>,
-    pub(crate) client: reqwest::Client,
     pub(crate) fixed_source: Option<FixedSourceIdentity>,
 }
 
@@ -116,26 +117,21 @@ impl ProxyState {
         pending_tx: mpsc::Sender<PendingNetworkItem>,
         activity_tx: mpsc::UnboundedSender<ActivityEvent>,
     ) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(120))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
         Ok(Self {
             ca,
             config,
             pending_tx,
             activity_tx,
-            client,
             fixed_source: None,
         })
     }
 
-    fn with_fixed_source(&self, project: &str, container: &str) -> Self {
+    fn with_fixed_source(&self, project: &str, container: &str, auth_token: &str) -> Self {
         let mut cloned = self.clone();
         cloned.fixed_source = Some(FixedSourceIdentity {
             project: project.to_string(),
             container: container.to_string(),
+            auth_token: auth_token.to_string(),
         });
         cloned
     }
@@ -182,7 +178,7 @@ impl ProxyState {
         );
         let _ = self
             .activity_tx
-            .send(ActivityEvent::Started(activity.clone()));
+            .send(ActivityEvent::Started(Box::new(activity.clone())));
         activity
     }
 
@@ -223,7 +219,18 @@ impl ProxyState {
 /// A scoped listener task that is aborted when dropped.
 pub struct ScopedProxyListener {
     pub addr: String,
+    proxy_auth_token: String,
     abort_handle: tokio::task::AbortHandle,
+}
+
+impl ScopedProxyListener {
+    pub fn proxy_url(&self) -> String {
+        format!("http://harness-hat:{}@{}", self.proxy_auth_token, self.addr)
+    }
+
+    pub fn proxy_auth_token(&self) -> &str {
+        &self.proxy_auth_token
+    }
 }
 
 impl Drop for ScopedProxyListener {
@@ -266,6 +273,7 @@ pub fn spawn_scoped_listener(
     bind_host: &str,
     project: &str,
     container: &str,
+    auth_token: &str,
 ) -> Result<ScopedProxyListener> {
     let bind_addr = format!("{bind_host}:0");
     let std_listener = std::net::TcpListener::bind(&bind_addr)
@@ -276,7 +284,7 @@ pub fn spawn_scoped_listener(
     let local_addr = std_listener.local_addr()?;
     let listener = TcpListener::from_std(std_listener)?;
     let addr = format!("{}:{}", bind_host, local_addr.port());
-    let fixed_state = state.with_fixed_source(project, container);
+    let fixed_state = state.with_fixed_source(project, container, auth_token);
     let task = tokio::spawn(async move {
         if let Err(e) = run_with_listener(fixed_state, listener).await {
             error!("scoped proxy server error: {e}");
@@ -284,6 +292,7 @@ pub fn spawn_scoped_listener(
     });
     Ok(ScopedProxyListener {
         addr,
+        proxy_auth_token: auth_token.to_string(),
         abort_handle: task.abort_handle(),
     })
 }
@@ -363,22 +372,21 @@ impl AsyncWrite for PrefixedTcpStream {
 }
 
 async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Result<()> {
-    let (source_project, source_container, source_status, has_proxy_authorization) =
-        if let Some(fixed) = &state.fixed_source {
-            (
-                Some(fixed.project.clone()),
-                Some(fixed.container.clone()),
-                SourceIdentityStatus::ListenerBoundSource,
-                false,
-            )
-        } else {
-            (
-                None,
-                None,
-                SourceIdentityStatus::MissingProxyAuthorization,
-                false,
-            )
-        };
+    if let Some(fixed) = &state.fixed_source {
+        warn!(
+            source_project = %fixed.project,
+            source_container = %fixed.container,
+            "dropping transparent TLS connection to scoped proxy without proxy authentication"
+        );
+        return Ok(());
+    }
+
+    let (source_project, source_container, source_status, has_proxy_authorization) = (
+        None,
+        None,
+        SourceIdentityStatus::MissingProxyAuthorization,
+        false,
+    );
 
     let cfg = state.config.get();
 
@@ -401,6 +409,67 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
     );
     state.activity_line(&connect_activity.id, format!("target {host}:443"));
 
+    let rules = match config::load_composed_rules_for_workspace(&cfg, source_project.as_deref()) {
+        Ok(rules) => rules,
+        Err(e) => {
+            warn!("proxy rules load error: {e}");
+            state.activity_finished(
+                &connect_activity.id,
+                ActivityState::Failed,
+                Some("invalid harness-rules.toml configuration".to_string()),
+            );
+            return Ok(());
+        }
+    };
+    let preflight_policy = rules.match_connect(&host, 443);
+    if preflight_policy != NetworkPolicy::Deny {
+        if let Err(e) = resolve_public_addrs(&host, 443).await {
+            state.activity_finished(
+                &connect_activity.id,
+                ActivityState::Denied,
+                Some(e.to_string()),
+            );
+            return Ok(());
+        }
+    }
+    let preflight_allowed = match preflight_policy {
+        NetworkPolicy::Auto => true,
+        NetworkPolicy::Deny => false,
+        NetworkPolicy::Prompt => {
+            state.activity_state(
+                &connect_activity.id,
+                ActivityState::PendingApproval,
+                Some("waiting for CONNECT approval".to_string()),
+            );
+            prompt_network(
+                &state,
+                "CONNECT",
+                &host,
+                Some(443),
+                "/",
+                source_project.clone(),
+                source_container.clone(),
+                source_status.as_str(),
+                has_proxy_authorization,
+                Some(&connect_activity),
+            )
+            .await
+        }
+    };
+    if !preflight_allowed {
+        let state_label = if connect_activity.is_cancelled() {
+            ActivityState::Cancelled
+        } else {
+            ActivityState::Denied
+        };
+        state.activity_finished(
+            &connect_activity.id,
+            state_label,
+            Some("blocked by network policy".to_string()),
+        );
+        return Ok(());
+    }
+
     if container_tls_passthrough_matches(&cfg, source_container.as_deref(), &host) {
         info!(
             host = %host,
@@ -409,11 +478,9 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
             source_status = source_status.as_str(),
             "proxy transparent TLS passthrough"
         );
-        let mut upstream = TcpStream::connect(format!("{host}:443"))
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("transparent passthrough connect to {host}:443 failed: {e}")
-            })?;
+        let mut upstream = connect_public_tcp(&host, 443).await.map_err(|e| {
+            anyhow::anyhow!("transparent passthrough connect to {host}:443 failed: {e}")
+        })?;
         upstream.write_all(&prefix).await?;
         state.activity_state(
             &connect_activity.id,
@@ -449,56 +516,6 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
                 );
             }
         }
-        return Ok(());
-    }
-
-    let rules = match config::load_composed_rules_for_workspace(&cfg, source_project.as_deref()) {
-        Ok(rules) => rules,
-        Err(e) => {
-            warn!("proxy rules load error: {e}");
-            state.activity_finished(
-                &connect_activity.id,
-                ActivityState::Failed,
-                Some("invalid harness-rules.toml configuration".to_string()),
-            );
-            return Ok(());
-        }
-    };
-    let preflight_policy = rules.match_network("CONNECT", &host, "/");
-    let preflight_allowed = match preflight_policy {
-        NetworkPolicy::Auto => true,
-        NetworkPolicy::Deny => false,
-        NetworkPolicy::Prompt => {
-            state.activity_state(
-                &connect_activity.id,
-                ActivityState::PendingApproval,
-                Some("waiting for CONNECT approval".to_string()),
-            );
-            prompt_network(
-                &state,
-                "CONNECT",
-                &host,
-                "/",
-                source_project.clone(),
-                source_container.clone(),
-                source_status.as_str(),
-                has_proxy_authorization,
-                Some(&connect_activity),
-            )
-            .await
-        }
-    };
-    if !preflight_allowed {
-        let state_label = if connect_activity.is_cancelled() {
-            ActivityState::Cancelled
-        } else {
-            ActivityState::Denied
-        };
-        state.activity_finished(
-            &connect_activity.id,
-            state_label,
-            Some("blocked by network policy".to_string()),
-        );
         return Ok(());
     }
 
@@ -540,6 +557,10 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
             return Ok(());
         }
     };
+    if ensure_host_header_matches_target(&headers, &host, 443).is_err() {
+        write_error_any(&mut tls_stream, 400, "Bad Request").await?;
+        return Ok(());
+    }
     let body = read_body_any(&mut tls_stream, &headers, inner_remainder).await?;
     let activity = state.start_network_activity(
         source_project.clone(),
@@ -566,7 +587,7 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
         );
     }
 
-    let policy = rules.match_network(&method, &host, &path);
+    let policy = rules.match_network_for_port(&method, &host, &path, Some(443));
     let allowed = match policy {
         NetworkPolicy::Auto => true,
         NetworkPolicy::Deny => false,
@@ -580,6 +601,7 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
                 &state,
                 &method,
                 &host,
+                Some(443),
                 &path,
                 source_project.clone(),
                 source_container.clone(),
@@ -610,6 +632,7 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
         &activity,
         "https",
         &host,
+        443,
         &path,
         &method,
         &headers,

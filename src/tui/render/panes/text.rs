@@ -95,6 +95,7 @@ pub(crate) fn status_bar_keys(app: &App) -> &'static str {
         }
         Focus::Terminal => " [^C]interrupt  [Esc/^B]sidebar  [^S]scroll  [Alt+o]log  [^Q]quit",
         Focus::Activity => " [^C]cancel request  [Esc/^B]sidebar  [^Q]quit",
+        Focus::Network => " [↑↓/jk]select request  [^C]cancel selected  [Esc/^B]sidebar  [^Q]quit",
         Focus::Settings => " [↑↓/jk]navigate  [↵/l]select  [^B]back  [^Q]quit",
         Focus::ContainerPicker => " [↑↓/jk]navigate  [↵/l]launch  [^B]back  [^Q]quit",
         Focus::ImageBuild => {

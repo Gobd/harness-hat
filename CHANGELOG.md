@@ -2,7 +2,46 @@
 
 This changelog is derived from git history and the current working tree.
 
-## [0.3.0] - Unreleased
+## [Future]
+
+### Added
+- Scoped proxy listeners now require per-session proxy authentication before accepting HTTP or CONNECT traffic.
+- Proxy DNS guardrails now resolve destinations before forwarding and reject loopback, private, link-local, CGNAT, benchmark, multicast, reserved, and IPv4-mapped IPv6 restricted addresses.
+- Proxy forwarding pins the resolved public addresses used for each outbound HTTP(S) request to reduce DNS rebinding exposure.
+- HTTPS MITM forwarding now validates the inner `Host` header against the CONNECT/SNI target and rejects duplicate or mismatched `Host` headers.
+- Proxy tests now cover restricted-address blocking, IPv4-mapped loopback rejection, scoped proxy authentication, Host header mismatch rejection, CONNECT port handling, and oversized request bodies.
+- Strict network mode now configures IPv6 egress blocking when `ip6tables` is available.
+- The base Docker image now resolves proxy and exec bridge hosts to IPv4 addresses before starting `tun2proxy`, keeping strict-network control traffic off virtual DNS addresses.
+- `hostdo` Docker runners now pass environment profiles through Docker env files instead of process arguments.
+- Hostdo Docker runners now validate env-file names and values before writing them.
+- Cargo audit coverage is clean after dependency upgrades for the TUI, PTY, OpenTelemetry, and `time` dependency families.
+
+### Changed
+- CONNECT policy matching is now port-aware: domain-only allow rules auto-allow HTTPS CONNECT on 443, while raw TCP CONNECT on other ports requires an explicit `port=...` rule.
+- CONNECT passthrough and raw tunnel paths now run policy and public-address preflight checks before bypassing MITM inspection.
+- Plain HTTP and HTTPS forwarding now strip caller-supplied `Host` headers so reqwest derives `Host` from the policy-checked URL.
+- Network "always allow" persistence now includes `port=...` for raw non-443 CONNECT decisions.
+- Default credential/session mounts in the example config are now commented examples instead of active mounts.
+- The default Docker image now installs pinned npm CLI versions instead of floating latest packages or downloading Claude Code through a curl installer.
+- The PWA dependency set was refreshed, unused UI packages were removed, and PostCSS is pinned through package overrides.
+- The minimum supported Rust version is now 1.88.
+- Sidebar network group rows now render as `Network [X]` instead of `X Network`.
+- Network group detail panes now use the same `Network [X]` title format.
+
+### Fixed
+- `bypass_proxy` can no longer skip network policy decisions for CONNECT or transparent TLS traffic.
+- Raw CONNECT rules no longer allow non-443 ports from a domain-only allow entry.
+- HTTPS requests can no longer be approved for one host while forwarding a different inner `Host` header.
+- IPv4-mapped IPv6 literals can no longer bypass restricted IPv4 destination checks.
+- Strict-network launches on Linux no longer fall back to broad `--privileged` mode when `/dev/net/tun` is unavailable.
+- Cargo clippy warnings introduced by dependency and type-size changes were resolved.
+
+### Removed
+- Removed the stale generated `docker/scripts/harness-hat-hostdo-8VP3so` helper artifact from the tree.
+- Removed unused PWA dependencies, including Ark UI and Park UI packages.
+- Removed the unused `rustls-pemfile` dependency.
+
+## [0.3.0] - May 5, 2026
 
 ### Added
 - Project/package rename from `void-claw` to `harness-hat` across the Rust crate, manager binary, Docker templates, helper scripts, example config, rules file, README, and PWA metadata.

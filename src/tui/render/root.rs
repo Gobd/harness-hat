@@ -208,9 +208,19 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
                 ListItem::new(Line::from(spans))
             }
+            SidebarItem::NetworkGroup(si) => {
+                let activities = app.network_activities_for_session(*si);
+                let count = activities.len();
+                let (marker, color) = network_sidebar_marker(&activities);
+                ListItem::new(Line::from(vec![
+                    Span::styled("    ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(marker, Style::default().fg(color)),
+                    Span::styled(format!("Network ({count})"), Style::default().fg(color)),
+                ]))
+            }
             SidebarItem::Activity(id) => {
                 if let Some(activity) = app.activity_by_id(id) {
-                    let (marker, color) = match activity.state {
+                    let (marker, color) = match &activity.state {
                         crate::activity::ActivityState::PendingApproval => ("? ", Color::Yellow),
                         crate::activity::ActivityState::PullingImage => ("↓ ", Color::Yellow),
                         crate::activity::ActivityState::Running => ("$ ", Color::Cyan),
@@ -298,6 +308,39 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+fn network_sidebar_marker(activities: &[&crate::activity::Activity]) -> (&'static str, Color) {
+    let mut has_pending = false;
+    let mut has_active = false;
+    let mut has_failed = false;
+    let mut has_cancelled = false;
+
+    for activity in activities {
+        match &activity.state {
+            crate::activity::ActivityState::PendingApproval => has_pending = true,
+            crate::activity::ActivityState::Forwarding
+            | crate::activity::ActivityState::Running
+            | crate::activity::ActivityState::PullingImage => has_active = true,
+            crate::activity::ActivityState::Failed | crate::activity::ActivityState::Denied => {
+                has_failed = true
+            }
+            crate::activity::ActivityState::Cancelled => has_cancelled = true,
+            crate::activity::ActivityState::Complete => {}
+        }
+    }
+
+    if has_pending {
+        ("? ", Color::Yellow)
+    } else if has_active {
+        ("⇅ ", Color::Magenta)
+    } else if has_failed {
+        ("! ", Color::Red)
+    } else if has_cancelled {
+        ("× ", Color::DarkGray)
+    } else {
+        ("✓ ", Color::Green)
+    }
+}
+
 fn activity_sidebar_terminal_style(activity: &crate::activity::Activity) -> Style {
     if !activity.state.is_terminal() {
         return Style::default();
@@ -332,22 +375,6 @@ fn terminal_activity_background(succeeded: bool, level: usize) -> Color {
         (false, 1) => Color::Rgb(56, 24, 28),
         (false, _) => Color::Rgb(32, 18, 20),
     }
-}
-
-fn truncate_middle(value: &str, max_chars: usize) -> String {
-    let chars = value.chars().collect::<Vec<_>>();
-    if chars.len() <= max_chars {
-        return value.to_string();
-    }
-    if max_chars <= 1 {
-        return "…".to_string();
-    }
-    let left = (max_chars - 1) / 2;
-    let right = max_chars - 1 - left;
-    let mut out = chars[..left].iter().collect::<String>();
-    out.push('…');
-    out.push_str(&chars[chars.len() - right..].iter().collect::<String>());
-    out
 }
 
 // ── Right pane ────────────────────────────────────────────────────────────────

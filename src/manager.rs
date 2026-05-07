@@ -89,8 +89,7 @@ pub async fn run() -> Result<()> {
     });
 
     let proxy_port = config.defaults.proxy.proxy_port;
-    let proxy_host = config.defaults.proxy.proxy_host.clone();
-    let proxy_addr = format!("{proxy_host}:{proxy_port}");
+    let proxy_addr = format!("127.0.0.1:{proxy_port}");
     let proxy_state = crate::proxy::ProxyState::new(
         ca.clone(),
         shared_config.clone(),

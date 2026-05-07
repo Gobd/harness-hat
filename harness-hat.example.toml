@@ -199,16 +199,17 @@ bypass_proxy = [
   "storage.googleapis.com",
 ]
 
-# Persist Claude auth/session state across launches.
-[[container_profiles.claude.mounts]]
-host = "~/.claude.json"
-container = "/home/ubuntu/.claude.json"
-mode = "rw"
-
-[[container_profiles.claude.mounts]]
-host = "~/.claude"
-container = "/home/ubuntu/.claude"
-mode = "rw"
+# Auth/session state is not mounted by default. If you opt in, prefer read-only
+# mounts or project-scoped credentials.
+# [[container_profiles.claude.mounts]]
+# host = "~/.claude.json"
+# container = "/home/ubuntu/.claude.json"
+# mode = "ro"
+#
+# [[container_profiles.claude.mounts]]
+# host = "~/.claude"
+# container = "/home/ubuntu/.claude"
+# mode = "ro"
 
 [container_profiles.codex]
 image = "default"
@@ -224,16 +225,17 @@ bypass_proxy = [
   "auth.openai.com",
 ]
 
-# Persist Codex auth/session state across launches.
-[[container_profiles.codex.mounts]]
-host = "~/.codex"
-container = "/home/ubuntu/.codex"
-mode = "rw"
-
-[[container_profiles.codex.mounts]]
-host = "~/.config/codex"
-container = "/home/ubuntu/.config/codex"
-mode = "rw"
+# Auth/session state is not mounted by default. If you opt in, prefer read-only
+# mounts or project-scoped credentials.
+# [[container_profiles.codex.mounts]]
+# host = "~/.codex"
+# container = "/home/ubuntu/.codex"
+# mode = "ro"
+#
+# [[container_profiles.codex.mounts]]
+# host = "~/.config/codex"
+# container = "/home/ubuntu/.config/codex"
+# mode = "ro"
 
 [container_profiles.gemini]
 image = "default"
@@ -251,11 +253,12 @@ bypass_proxy = [
   "www.googleapis.com",
 ]
 
-# Persist Gemini auth/session state across launches.
-[[container_profiles.gemini.mounts]]
-host = "~/.gemini"
-container = "/home/ubuntu/.gemini"
-mode = "rw"
+# Auth/session state is not mounted by default. If you opt in, prefer read-only
+# mounts or project-scoped credentials.
+# [[container_profiles.gemini.mounts]]
+# host = "~/.gemini"
+# container = "/home/ubuntu/.gemini"
+# mode = "ro"
 
 [container_profiles.opencode]
 image = "default"
@@ -270,13 +273,14 @@ bypass_proxy = [
   ".githubusercontent.com",
 ]
 
-# Persist opencode auth/session state across launches.
-[[container_profiles.opencode.mounts]]
-host = "~/.opencode"
-container = "/home/ubuntu/.opencode"
-mode = "rw"
-
-[[container_profiles.opencode.mounts]]
-host = "~/.config/opencode"
-container = "/home/ubuntu/.config/opencode"
-mode = "rw"
+# Auth/session state is not mounted by default. If you opt in, prefer read-only
+# mounts or project-scoped credentials.
+# [[container_profiles.opencode.mounts]]
+# host = "~/.opencode"
+# container = "/home/ubuntu/.opencode"
+# mode = "ro"
+#
+# [[container_profiles.opencode.mounts]]
+# host = "~/.config/opencode"
+# container = "/home/ubuntu/.config/opencode"
+# mode = "ro"

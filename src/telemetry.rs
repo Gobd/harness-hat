@@ -5,7 +5,7 @@
 /// main event loop exits to flush any in-flight spans.
 use anyhow::Result;
 use opentelemetry::{KeyValue, trace::TracerProvider as _};
-use opentelemetry_sdk::{Resource, runtime, trace::TracerProvider};
+use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
 use tracing::info;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -14,7 +14,7 @@ use crate::config::{Config, OtlpProtocol};
 // ── Public handle ─────────────────────────────────────────────────────────────
 
 pub struct TelemetryHandle {
-    provider: Option<TracerProvider>,
+    provider: Option<SdkTracerProvider>,
     _log_guard: tracing_appender::non_blocking::WorkerGuard,
 }
 
@@ -45,14 +45,16 @@ pub fn init(config: &Config) -> Result<TelemetryHandle> {
         let exporter = build_exporter(otlp_cfg)?;
 
         let hostname = machine_hostname();
-        let resource = Resource::new(vec![
-            KeyValue::new("service.name", "harness-hat"),
-            KeyValue::new("service.instance.id", instance_id.to_string()),
-            KeyValue::new("host.name", hostname),
-        ]);
+        let resource = Resource::builder()
+            .with_service_name("harness-hat")
+            .with_attributes([
+                KeyValue::new("service.instance.id", instance_id.to_string()),
+                KeyValue::new("host.name", hostname),
+            ])
+            .build();
 
-        let provider = TracerProvider::builder()
-            .with_batch_exporter(exporter, runtime::Tokio)
+        let provider = SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
             .with_resource(resource)
             .build();
 

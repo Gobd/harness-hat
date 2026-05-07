@@ -251,7 +251,7 @@ fn activity_terminal_line(line: &str) -> &str {
 
 #[derive(Debug, Clone)]
 pub enum ActivityEvent {
-    Started(Activity),
+    Started(Box<Activity>),
     State {
         id: ActivityId,
         state: ActivityState,

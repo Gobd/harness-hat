@@ -91,6 +91,36 @@ max_timeout_secs = 0
     }
 
     #[test]
+    fn load_rejects_env_profile_entries_that_cannot_be_env_file_lines() {
+        let root = unique_temp_dir("invalid-env-profile");
+        let cfg_path = root.join("harness-hat.toml");
+        let docker_dir = root.join("docker-root");
+        fs::create_dir_all(&docker_dir).expect("create docker dir");
+        let raw = format!(
+            r#"
+docker_dir = "{}"
+
+[workspace]
+
+[manager]
+global_rules_file = "{}"
+
+[env_profiles.bad.vars]
+"BAD-NAME" = "value"
+"#,
+            docker_dir.display(),
+            root.join("global-rules.toml").display()
+        );
+        fs::write(&cfg_path, raw).expect("write config");
+        let err = load(&cfg_path).expect_err("config load should fail");
+        assert!(
+            err.to_string()
+                .contains("invalid environment variable name"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn load_applies_custom_sidebar_width() {
         let root = unique_temp_dir("sidebar-width-override");
         let cfg_path = root.join("harness-hat.toml");

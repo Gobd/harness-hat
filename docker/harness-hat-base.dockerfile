@@ -2,7 +2,8 @@ FROM rust:1.88-slim-bookworm AS tun2proxy-build
 
 ENV GIT_HASH=crates-io
 
-RUN cargo install --locked --bin tun2proxy-bin tun2proxy
+ARG TUN2PROXY_VERSION=0.7.21
+RUN cargo install --locked --version "${TUN2PROXY_VERSION}" --bin tun2proxy-bin tun2proxy
 
 # harness-hat base — Ubuntu 24.04 LTS (Noble Numbat)
 #
@@ -48,6 +49,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
+      gnupg \
       nano \
       git \
       python3 \
@@ -64,37 +66,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install a current Node runtime for agent CLIs (Gemini CLI requires Node 20+).
 # The NodeSource `nodejs` package already carries npm, and Ubuntu's `npm`
 # package conflicts with it.
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+RUN set -eu; \
+    mkdir -p /etc/apt/keyrings; \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg; \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+      > /etc/apt/sources.list.d/nodesource.list; \
+    apt-get update && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/hostdo.py /usr/local/bin/hostdo
 RUN chmod 755 /usr/local/bin/hostdo
 COPY scripts/killme.py /usr/local/bin/killme
 RUN chmod 755 /usr/local/bin/killme
-ARG TUN2PROXY_RELEASE=latest
-RUN set -eu; \
-    if [ -x /usr/local/cargo/bin/tun2proxy-bin ]; then \
-        install -m 755 /usr/local/cargo/bin/tun2proxy-bin /usr/local/bin/tun2proxy-bin; \
-    else \
-        case "$(dpkg --print-architecture)" in \
-            amd64) asset="tun2proxy-x86_64-unknown-linux-gnu.zip" ;; \
-            arm64) asset="tun2proxy-aarch64-unknown-linux-gnu.zip" ;; \
-            *) echo "harness-hat: unsupported architecture for tun2proxy release fallback" >&2; exit 1 ;; \
-        esac; \
-        if [ "$TUN2PROXY_RELEASE" = "latest" ]; then \
-            release_json="$(curl -fsSL https://api.github.com/repos/tun2proxy/tun2proxy/releases/latest)"; \
-        else \
-            release_json="$(curl -fsSL "https://api.github.com/repos/tun2proxy/tun2proxy/releases/tags/${TUN2PROXY_RELEASE}")"; \
-        fi; \
-        download_url="$(printf '%s' "$release_json" | python3 -c 'import json,sys; obj=json.load(sys.stdin); name=sys.argv[1]; print(next(a["browser_download_url"] for a in obj["assets"] if a["name"] == name))' "$asset")"; \
-        tmpdir="$(mktemp -d)"; \
-        curl -fsSL "$download_url" -o "$tmpdir/tun2proxy.zip"; \
-        python3 -c 'import pathlib, sys, zipfile; zf=zipfile.ZipFile(sys.argv[1]); zf.extractall(sys.argv[2])' "$tmpdir/tun2proxy.zip" "$tmpdir"; \
-        install -m 755 "$tmpdir/tun2proxy-bin" /usr/local/bin/tun2proxy-bin; \
-        rm -rf "$tmpdir"; \
-    fi; \
-    test -x /usr/local/bin/tun2proxy-bin
+COPY --from=tun2proxy-build /usr/local/cargo/bin/tun2proxy-bin /usr/local/bin/tun2proxy-bin
 
 # Trusts the harness-hat MITM CA cert bind-mounted at run time (root only).
 RUN cat > /usr/local/bin/harness-hat-init.sh << 'SCRIPT'
@@ -140,8 +125,8 @@ if [ "${HARNESS_HAT_STRICT_NETWORK:-0}" = "1" ]; then
         echo "harness-hat: strict_network requires root" >&2
         exit 1
     fi
-    if [ -z "${HARNESS_HAT_SCOPED_PROXY_ADDR:-}" ] || [ -z "${HARNESS_HAT_URL:-}" ]; then
-        echo "harness-hat: strict_network missing HARNESS_HAT_SCOPED_PROXY_ADDR or HARNESS_HAT_URL" >&2
+    if [ -z "${HARNESS_HAT_SCOPED_PROXY_ADDR:-}" ] || [ -z "${HARNESS_HAT_SCOPED_PROXY_AUTH:-}" ] || [ -z "${HARNESS_HAT_URL:-}" ]; then
+        echo "harness-hat: strict_network missing HARNESS_HAT_SCOPED_PROXY_ADDR, HARNESS_HAT_SCOPED_PROXY_AUTH, or HARNESS_HAT_URL" >&2
         exit 1
     fi
 
@@ -247,7 +232,7 @@ if [ "${HARNESS_HAT_STRICT_NETWORK:-0}" = "1" ]; then
     fi
     "$TUN2PROXY_BIN" \
         --setup \
-        --proxy "http://${proxy_ip}:${proxy_port}" \
+        --proxy "http://harness-hat:${HARNESS_HAT_SCOPED_PROXY_AUTH}@${proxy_ip}:${proxy_port}" \
         --dns virtual \
         --bypass "$proxy_ip" \
         --bypass "$exec_ip" \

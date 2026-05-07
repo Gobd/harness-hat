@@ -70,11 +70,11 @@ pub fn spawn(
 
     let container_exec_url = loopback_to_host_docker(exec_url);
     let container_proxy_url = loopback_to_host_docker(proxy_url);
-    let container_proxy_addr = container_proxy_url
-        .strip_prefix("http://")
-        .or_else(|| container_proxy_url.strip_prefix("https://"))
-        .unwrap_or(&container_proxy_url)
-        .to_string();
+    let container_proxy_addr = proxy_addr_without_auth(&container_proxy_url);
+    let scoped_proxy_auth = scoped_proxy
+        .as_ref()
+        .map(|proxy| proxy.proxy_auth_token().to_string())
+        .unwrap_or_default();
     let mut launch_notes = Vec::new();
 
     let mut docker_args: Vec<String> = vec![
@@ -176,6 +176,10 @@ pub fn spawn(
     writeln!(
         env_file,
         "HARNESS_HAT_SCOPED_PROXY_ADDR={container_proxy_addr}"
+    )?;
+    writeln!(
+        env_file,
+        "HARNESS_HAT_SCOPED_PROXY_AUTH={scoped_proxy_auth}"
     )?;
 
     if !strict_network {
@@ -312,44 +316,42 @@ pub fn spawn(
             );
             info!("{note}");
             launch_notes.push(note);
-            docker_args.push("-e".to_string());
-            docker_args.push(format!("CLAUDE_CODE_OAUTH_TOKEN={setup_token}"));
-        } else {
-            _cred_tempfile = extract_claude_keychain_credential().and_then(|cred_json| {
-                let access_token: Option<String> =
-                    serde_json::from_str::<serde_json::Value>(&cred_json)
-                        .ok()
-                        .and_then(|v| {
-                            v.get("claudeAiOauth")?
-                                .get("accessToken")?
-                                .as_str()
-                                .map(String::from)
-                        });
-
-                if let Some(ref tok) = access_token {
-                    let note = "Claude session data imported from the macOS keychain credential and exported as CLAUDE_CODE_OAUTH_TOKEN".to_string();
-                    info!("{note}");
-                    launch_notes.push(note);
-                    docker_args.push("-e".to_string());
-                    docker_args.push(format!("CLAUDE_CODE_OAUTH_TOKEN={tok}"));
-                }
-
-                let staging_path = "/tmp/.harness-hat-claude-credentials.json";
-                tempfile::Builder::new()
-                    .prefix("harness-hat-claude-cred-")
-                    .suffix(".json")
-                    .tempfile()
+            writeln!(env_file, "CLAUDE_CODE_OAUTH_TOKEN={setup_token}")?;
+        } else if let Some(cred_json) = extract_claude_keychain_credential() {
+            let access_token: Option<String> =
+                serde_json::from_str::<serde_json::Value>(&cred_json)
                     .ok()
-                    .and_then(|mut tf| {
-                        tf.write_all(cred_json.as_bytes()).ok()?;
-                        let host_path = tf.path().display().to_string();
-                        docker_args.push("-v".to_string());
-                        docker_args.push(format!("{host_path}:{staging_path}:ro"));
-                        Some(tf)
-                    })
-            });
+                    .and_then(|v| {
+                        v.get("claudeAiOauth")?
+                            .get("accessToken")?
+                            .as_str()
+                            .map(String::from)
+                    });
+
+            if let Some(ref tok) = access_token {
+                let note = "Claude session data imported from the macOS keychain credential and exported as CLAUDE_CODE_OAUTH_TOKEN".to_string();
+                info!("{note}");
+                launch_notes.push(note);
+                writeln!(env_file, "CLAUDE_CODE_OAUTH_TOKEN={tok}")?;
+            }
+
+            let staging_path = "/tmp/.harness-hat-claude-credentials.json";
+            let mut tf = tempfile::Builder::new()
+                .prefix("harness-hat-claude-cred-")
+                .suffix(".json")
+                .tempfile()
+                .context("creating Claude credential temp file")?;
+            tf.write_all(cred_json.as_bytes())
+                .context("writing Claude credential temp file")?;
+            tf.flush().context("flushing Claude credential temp file")?;
+            let host_path = tf.path().display().to_string();
+            docker_args.push("-v".to_string());
+            docker_args.push(format!("{host_path}:{staging_path}:ro"));
+            _cred_tempfile = Some(tf);
         }
     }
+
+    env_file.flush().context("flushing container env file")?;
 
     docker_args.push(ctr.image.clone());
     if let Some(argv) = command_argv {
@@ -462,11 +464,10 @@ pub fn spawn(
 fn prepare_executable_helper_script(path: &Path, prefix: &str) -> Result<NamedTempFile> {
     let contents = std::fs::read(path)
         .with_context(|| format!("reading helper script '{}'", path.display()))?;
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut file = tempfile::Builder::new()
         .prefix(prefix)
-        .tempfile_in(parent)
-        .with_context(|| format!("creating helper script temp file in '{}'", parent.display()))?;
+        .tempfile()
+        .context("creating helper script temp file")?;
     file.write_all(&contents)
         .context("writing helper script temp file")?;
     file.flush().context("flushing helper script temp file")?;
@@ -486,6 +487,30 @@ fn prepare_executable_helper_script(path: &Path, prefix: &str) -> Result<NamedTe
     }
 
     Ok(file)
+}
+
+fn proxy_addr_without_auth(proxy_url: &str) -> String {
+    if let Ok(parsed) = url::Url::parse(proxy_url)
+        && let Some(host) = parsed.host_str()
+    {
+        let host = if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]")
+        } else {
+            host.to_string()
+        };
+        let port = parsed.port_or_known_default().unwrap_or(80);
+        return format!("{host}:{port}");
+    }
+
+    let authority = proxy_url
+        .strip_prefix("http://")
+        .or_else(|| proxy_url.strip_prefix("https://"))
+        .unwrap_or(proxy_url);
+    authority
+        .rsplit_once('@')
+        .map(|(_, addr)| addr)
+        .unwrap_or(authority)
+        .to_string()
 }
 
 /// Launch a one-shot passthrough container session.
@@ -653,4 +678,25 @@ pub fn spawn_passthrough(
         _env_tempfile: None,
         _hostdo_tempfile: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proxy_addr_without_auth;
+
+    #[test]
+    fn proxy_addr_without_auth_strips_userinfo() {
+        assert_eq!(
+            proxy_addr_without_auth("http://harness-hat:secret@host.docker.internal:54321"),
+            "host.docker.internal:54321"
+        );
+    }
+
+    #[test]
+    fn proxy_addr_without_auth_formats_ipv6_hosts() {
+        assert_eq!(
+            proxy_addr_without_auth("http://harness-hat:secret@[::1]:54321"),
+            "[::1]:54321"
+        );
+    }
 }

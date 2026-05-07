@@ -189,6 +189,8 @@ impl App {
             sidebar_offset: 0,
             active_session: None,
             active_activity: None,
+            active_network_session: None,
+            network_cursor: 0,
             preview_session: None,
             active_settings_project: None,
             settings_cursor: 0,
@@ -328,9 +330,10 @@ impl App {
             for (si, session) in self.sessions.iter().enumerate() {
                 if session.project == proj.name {
                     items.push(SidebarItem::Session(si));
-                    for activity in self.activities_for_session(si) {
-                        items.push(SidebarItem::Activity(activity.id.clone()));
-                    }
+                    items.extend(Self::sidebar_activity_items_for_session(
+                        si,
+                        self.activities_for_session(si),
+                    ));
                 }
             }
             if self.build_project_idx == Some(pi) && self.build_is_running() {
@@ -347,6 +350,11 @@ impl App {
         match self.sidebar_items().get(self.sidebar_idx) {
             Some(SidebarItem::Workspace(pi)) => Some(*pi),
             Some(SidebarItem::Session(si)) => {
+                let cfg = self.config.get();
+                let name = self.sessions.get(*si)?.project.as_str();
+                cfg.workspaces.iter().position(|p| p.name == name)
+            }
+            Some(SidebarItem::NetworkGroup(si)) => {
                 let cfg = self.config.get();
                 let name = self.sessions.get(*si)?.project.as_str();
                 cfg.workspaces.iter().position(|p| p.name == name)
@@ -402,6 +410,78 @@ impl App {
             .collect()
     }
 
+    pub(crate) fn sidebar_activity_items_for_session(
+        session_idx: usize,
+        activities: Vec<&Activity>,
+    ) -> Vec<SidebarItem> {
+        let mut items = Vec::new();
+        let mut network_group_added = false;
+        for activity in activities {
+            if matches!(
+                &activity.kind,
+                crate::activity::ActivityKind::Network { .. }
+            ) {
+                if !network_group_added {
+                    items.push(SidebarItem::NetworkGroup(session_idx));
+                    network_group_added = true;
+                }
+            } else {
+                items.push(SidebarItem::Activity(activity.id.clone()));
+            }
+        }
+        items
+    }
+
+    pub(crate) fn network_activities_for_session(&self, session_idx: usize) -> Vec<&Activity> {
+        self.activities_for_session(session_idx)
+            .into_iter()
+            .filter(|activity| {
+                matches!(
+                    &activity.kind,
+                    crate::activity::ActivityKind::Network { .. }
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn network_activity_count_for_session(&self, session_idx: usize) -> usize {
+        self.network_activities_for_session(session_idx).len()
+    }
+
+    pub(crate) fn network_cursor_for_len(&self, session_idx: usize, len: usize) -> usize {
+        if len == 0 {
+            return 0;
+        }
+        if self.active_network_session == Some(session_idx) {
+            self.network_cursor.min(len.saturating_sub(1))
+        } else {
+            len.saturating_sub(1)
+        }
+    }
+
+    pub(crate) fn network_cursor_for_session(&self, session_idx: usize) -> usize {
+        let len = self.network_activity_count_for_session(session_idx);
+        self.network_cursor_for_len(session_idx, len)
+    }
+
+    pub(crate) fn selected_network_activity_id(&self, session_idx: usize) -> Option<ActivityId> {
+        let activities = self.network_activities_for_session(session_idx);
+        let cursor = self.network_cursor_for_len(session_idx, activities.len());
+        activities.get(cursor).map(|activity| activity.id.clone())
+    }
+
+    pub(crate) fn clamp_active_network_cursor(&mut self) {
+        let Some(si) = self.active_network_session else {
+            return;
+        };
+        let len = self.network_activity_count_for_session(si);
+        if len == 0 {
+            self.network_cursor = 0;
+            return;
+        }
+        self.network_cursor = self.network_cursor.min(len.saturating_sub(1));
+    }
+
     pub(crate) fn session_for_activity(&self, id: &str) -> Option<usize> {
         let activity = self.activity_by_id(id)?;
         self.sessions.iter().position(|session| {
@@ -442,9 +522,9 @@ impl App {
         match event {
             ActivityEvent::Started(activity) => {
                 if let Some(existing) = self.activity_by_id_mut(&activity.id) {
-                    *existing = activity;
+                    *existing = *activity;
                 } else {
-                    self.activities.push(activity);
+                    self.activities.push(*activity);
                 }
             }
             ActivityEvent::State { id, state, status } => {
@@ -523,13 +603,47 @@ impl App {
             SidebarItem::Activity(id) => Some(id.clone()),
             _ => None,
         });
+        let sidebar_network_session = items.get(self.sidebar_idx).and_then(|item| match item {
+            SidebarItem::NetworkGroup(si) => Some(*si),
+            _ => None,
+        });
+        let selected_network_session = self.active_network_session.or(sidebar_network_session);
+        let selected_network_identity = selected_network_session.and_then(|si| {
+            self.sessions.get(si).map(|session| {
+                (
+                    session.project.clone(),
+                    session.container_id.clone(),
+                    session.container_name.clone(),
+                    session.docker_name.clone(),
+                )
+            })
+        });
         for activity in &mut self.activities {
             if !activity.state.is_terminal() {
                 activity.terminal_unselected_at = None;
                 continue;
             }
+            let selected_by_network_group = if let (
+                crate::activity::ActivityKind::Network { .. },
+                Some((project, container_id, container_name, docker_name)),
+            ) =
+                (&activity.kind, selected_network_identity.as_ref())
+            {
+                activity.project == *project
+                    && activity.container.as_deref().is_some_and(|container| {
+                        Self::container_identity_matches(
+                            container,
+                            container_id,
+                            container_name,
+                            docker_name,
+                        )
+                    })
+            } else {
+                false
+            };
             let is_selected = active_activity.as_deref() == Some(activity.id.as_str())
-                || sidebar_activity.as_deref() == Some(activity.id.as_str());
+                || sidebar_activity.as_deref() == Some(activity.id.as_str())
+                || selected_by_network_group;
             if is_selected {
                 activity.terminal_unselected_at = None;
             } else if activity.terminal_unselected_at.is_none() {
@@ -550,6 +664,7 @@ impl App {
                     .map(|unselected_at| now.duration_since(unselected_at) < ttl)
                     .unwrap_or(true)
         });
+        self.clamp_active_network_cursor();
     }
 
     pub(crate) fn active_exec_modal_idx(&self) -> Option<usize> {
@@ -607,6 +722,19 @@ impl App {
             }
             Some(si) if si > removed_idx => {
                 self.active_session = Some(si - 1);
+            }
+            _ => {}
+        }
+        match self.active_network_session {
+            Some(si) if si == removed_idx => {
+                self.active_network_session = None;
+                self.network_cursor = 0;
+                if self.focus == Focus::Network {
+                    self.focus = Focus::Sidebar;
+                }
+            }
+            Some(si) if si > removed_idx => {
+                self.active_network_session = Some(si - 1);
             }
             _ => {}
         }
@@ -671,6 +799,10 @@ impl App {
         if self.active_session == Some(idx) {
             self.active_session = None;
             self.focus = Focus::Sidebar;
+        }
+        if self.active_network_session == Some(idx) {
+            self.active_network_session = None;
+            self.network_cursor = 0;
         }
         ContainerStopDecision::Stopped
     }

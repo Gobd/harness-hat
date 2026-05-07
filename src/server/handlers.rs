@@ -485,6 +485,55 @@ pub(super) fn resolve_host_cwd(
     request_cwd.to_path_buf()
 }
 
+/// Resolve and verify a request CWD for host-side execution.
+///
+/// The container controls `cwd`, so the mapped path is treated as untrusted:
+/// it must exist and must resolve inside the configured workspace after
+/// following symlinks and normalizing `..` components.
+pub(super) fn resolve_host_cwd_in_workspace(
+    request_cwd: &Path,
+    mount_target: Option<&str>,
+    workspace_path: &Path,
+) -> std::result::Result<PathBuf, String> {
+    let mapped = resolve_host_cwd(request_cwd, mount_target, workspace_path);
+    confine_host_cwd_to_workspace(&mapped, workspace_path)
+}
+
+pub(super) fn confine_host_cwd_to_workspace(
+    host_cwd: &Path,
+    workspace_path: &Path,
+) -> std::result::Result<PathBuf, String> {
+    if !host_cwd.is_absolute() {
+        return Err(format!(
+            "hostdo cwd must resolve to an absolute path inside the workspace: {}",
+            host_cwd.display()
+        ));
+    }
+
+    let workspace_root = workspace_path.canonicalize().map_err(|e| {
+        format!(
+            "workspace path is not accessible: {}: {e}",
+            workspace_path.display()
+        )
+    })?;
+    let resolved_cwd = host_cwd.canonicalize().map_err(|e| {
+        format!(
+            "hostdo cwd does not exist or is not accessible: {}: {e}",
+            host_cwd.display()
+        )
+    })?;
+
+    if resolved_cwd == workspace_root || resolved_cwd.starts_with(&workspace_root) {
+        Ok(resolved_cwd)
+    } else {
+        Err(format!(
+            "hostdo cwd must stay inside workspace {}: {}",
+            workspace_root.display(),
+            resolved_cwd.display()
+        ))
+    }
+}
+
 /// Represents a resolved command alias, including the expanded argv and an optional CWD override.
 pub(super) struct ResolvedAlias {
     pub(super) argv: Vec<String>,
@@ -536,7 +585,10 @@ pub(super) fn resolve_exec_argv_aliases(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_exec_argv_aliases, resolve_host_cwd};
+    use super::{
+        confine_host_cwd_to_workspace, resolve_exec_argv_aliases, resolve_host_cwd,
+        resolve_host_cwd_in_workspace,
+    };
     use crate::config::AliasValue;
     use crate::server::SessionRegistry;
     use crate::shared_config::SharedConfig;
@@ -553,6 +605,12 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
+    fn test_state_manager() -> StateManager {
+        let dir =
+            std::env::temp_dir().join(format!("harness-hat-server-state-{}", uuid::Uuid::new_v4()));
+        StateManager::open(&dir).unwrap()
+    }
+
     #[test]
     fn resolve_host_cwd_maps_using_mount_target_header() {
         let request = Path::new("/custom-mount/src/subdir");
@@ -567,6 +625,45 @@ mod tests {
         let workspace = Path::new("/tmp/workspaces/project-b");
         let mapped = resolve_host_cwd(request, None, workspace);
         assert_eq!(mapped, PathBuf::from("/tmp/workspaces/project-b/api"));
+    }
+
+    #[test]
+    fn resolve_host_cwd_in_workspace_rejects_parent_escape() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+
+        let err = resolve_host_cwd_in_workspace(
+            Path::new("/workspace/.."),
+            Some("/workspace"),
+            &workspace,
+        )
+        .expect_err("parent escape should be rejected");
+
+        assert!(
+            err.contains("must stay inside workspace"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confine_host_cwd_to_workspace_rejects_symlink_escape() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        let link = workspace.join("link");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::create_dir(&outside).expect("outside");
+        std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+
+        let err = confine_host_cwd_to_workspace(&link, &workspace)
+            .expect_err("symlink escape should be rejected");
+
+        assert!(
+            err.contains("must stay inside workspace"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -733,7 +830,7 @@ mod tests {
     ) -> super::ServerState {
         super::ServerState {
             config: SharedConfig::new(Arc::new(crate::config::Config::default())),
-            state: StateManager::open(Path::new("/tmp")).unwrap(),
+            state: test_state_manager(),
             pending_tx: mpsc::channel(1).0,
             stop_tx: mpsc::channel(1).0,
             audit_tx: mpsc::channel(1).0,
@@ -845,7 +942,7 @@ mod tests {
     async fn require_session_identity_missing_auth_header() {
         let state = super::ServerState {
             config: SharedConfig::new(Arc::new(crate::config::Config::default())),
-            state: StateManager::open(Path::new("/tmp")).unwrap(), // Use a real path for StateManager
+            state: test_state_manager(),
             pending_tx: mpsc::channel(1).0,
             stop_tx: mpsc::channel(1).0,
             audit_tx: mpsc::channel(1).0,
@@ -866,7 +963,7 @@ mod tests {
     async fn require_session_identity_invalid_auth_token() {
         let state = super::ServerState {
             config: SharedConfig::new(Arc::new(crate::config::Config::default())),
-            state: StateManager::open(Path::new("/tmp")).unwrap(),
+            state: test_state_manager(),
             pending_tx: mpsc::channel(1).0,
             stop_tx: mpsc::channel(1).0,
             audit_tx: mpsc::channel(1).0,
@@ -892,7 +989,7 @@ mod tests {
     async fn require_session_identity_missing_session_token() {
         let state = super::ServerState {
             config: SharedConfig::new(Arc::new(crate::config::Config::default())),
-            state: StateManager::open(Path::new("/tmp")).unwrap(),
+            state: test_state_manager(),
             pending_tx: mpsc::channel(1).0,
             stop_tx: mpsc::channel(1).0,
             audit_tx: mpsc::channel(1).0,
@@ -914,7 +1011,7 @@ mod tests {
     async fn require_session_identity_unknown_session_token() {
         let state = super::ServerState {
             config: SharedConfig::new(Arc::new(crate::config::Config::default())),
-            state: StateManager::open(Path::new("/tmp")).unwrap(),
+            state: test_state_manager(),
             pending_tx: mpsc::channel(1).0,
             stop_tx: mpsc::channel(1).0,
             audit_tx: mpsc::channel(1).0,
@@ -949,7 +1046,7 @@ mod tests {
         );
         let state = super::ServerState {
             config: SharedConfig::new(Arc::new(crate::config::Config::default())),
-            state: StateManager::open(Path::new("/tmp")).unwrap(),
+            state: test_state_manager(),
             pending_tx: mpsc::channel(1).0,
             stop_tx: mpsc::channel(1).0,
             audit_tx: mpsc::channel(1).0,

@@ -51,6 +51,7 @@ impl StateManager {
     pub fn open(log_dir: &Path) -> Result<Self> {
         fs::create_dir_all(log_dir)
             .with_context(|| format!("creating log dir: {}", log_dir.display()))?;
+        set_private_dir_permissions(log_dir)?;
         Ok(Self {
             log_dir: log_dir.to_path_buf(),
             lock: Arc::new(Mutex::new(())),
@@ -61,6 +62,7 @@ impl StateManager {
         let _guard = self.lock.lock().unwrap();
         let path = self.token_path();
         if path.exists() {
+            set_private_file_permissions(&path)?;
             let token = fs::read_to_string(&path)
                 .with_context(|| format!("reading token file: {}", path.display()))?;
             let token = token.trim().to_string();
@@ -70,7 +72,7 @@ impl StateManager {
         }
 
         let token = uuid::Uuid::new_v4().to_string().replace('-', "");
-        fs::write(&path, format!("{token}\n"))
+        write_private_file(&path, format!("{token}\n").as_bytes())
             .with_context(|| format!("writing token file: {}", path.display()))?;
         Ok(token)
     }
@@ -84,6 +86,7 @@ impl StateManager {
             .append(true)
             .open(&path)
             .with_context(|| format!("opening audit log: {}", path.display()))?;
+        set_private_file_permissions(&path)?;
         let line = serde_json::to_string(entry).context("serializing audit entry")?;
         f.write_all(line.as_bytes())
             .with_context(|| format!("writing audit log: {}", path.display()))?;
@@ -149,6 +152,43 @@ impl StateManager {
         self.log_dir
             .join(format!("audit-{}.log", day.format("%Y-%m-%d")))
     }
+}
+
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    set_private_file_permissions(path)?;
+    Ok(())
+}
+
+fn set_private_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting permissions on {}", path.display()))?;
+    }
+    let _ = path;
+    Ok(())
+}
+
+fn set_private_dir_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("setting permissions on {}", path.display()))?;
+    }
+    let _ = path;
+    Ok(())
 }
 
 #[cfg(test)]

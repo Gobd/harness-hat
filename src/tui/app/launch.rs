@@ -88,11 +88,13 @@ impl App {
         let exec_url = format!("http://{exec_host}:{exec_port}");
         let hostdo_script_host_path = cfg.docker_dir.join("scripts/hostdo.py");
         let proxy_host = &cfg.defaults.proxy.proxy_host;
+        let session_token = uuid::Uuid::new_v4().simple().to_string();
         let scoped_proxy = match crate::proxy::spawn_scoped_listener(
             &self.proxy_state,
             proxy_host,
             &proj.name,
             &ctr.name,
+            &session_token,
         ) {
             Ok(listener) => listener,
             Err(e) => {
@@ -103,7 +105,7 @@ impl App {
                 return;
             }
         };
-        let proxy_url = format!("http://{}", scoped_proxy.addr);
+        let proxy_url = scoped_proxy.proxy_url();
         self.push_log(
             format!("launching '{}' on '{}'", ctr.name, proj.name),
             false,
@@ -206,7 +208,6 @@ impl App {
             );
         }
 
-        let session_token = uuid::Uuid::new_v4().simple().to_string();
         self.session_registry.insert(
             session_token.clone(),
             crate::server::SessionIdentity {

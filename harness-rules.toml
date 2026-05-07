@@ -43,7 +43,7 @@
 # Coder-style network rules. Deny matches win over allow matches; if no rule
 # matches, request is prompted.
 # Rule format:
-#   method=GET,POST domain=api.example.com path=/v1/*,/health
+#   method=GET,POST domain=api.example.com path=/v1/*,/health port=443,8443
 #
 # Use [network].allowlist for permanent allows and [network].denylist for
 # permanent denies.
@@ -55,6 +55,11 @@
 # Path matching:
 # - exact (`/v1/users`)
 # - wildcard (`/v1/*`)
+#
+# Port matching:
+# - omitted port matches normal HTTP/HTTPS requests on any port
+# - CONNECT allow rules without `port=` only auto-approve port 443
+# - raw CONNECT to other ports requires an explicit `port=...` allow rule
 
 [hostdo]
 default_policy = "prompt"
@@ -168,9 +173,291 @@ timeout_secs = 60
 concurrency = "queue"
 approval_mode = "deny"
 
-[hostdo.command_aliases.check]
-cmd = "cargo check"
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "audit",
+]
 cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "test",
+    "proxy::tests",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "clippy",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "tree",
+    "-i",
+    "paste",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "deny"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "tree",
+    "-i",
+    "serial",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "tree",
+    "-i",
+    "rand@0.8.5",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "info",
+    "ratatui",
+    "portable-pty",
+    "opentelemetry",
+    "opentelemetry_sdk",
+    "opentelemetry-otlp",
+    "tracing-opentelemetry",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "info",
+    "ratatui",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "info",
+    "portable-pty",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "info",
+    "opentelemetry_sdk",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "info",
+    "opentelemetry",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "info",
+    "opentelemetry-otlp",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "info",
+    "tracing-opentelemetry",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "info",
+    "ratatui@0.30.0",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "info",
+    "portable-pty@0.9.0",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "rustc",
+    "--version",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "info",
+    "opentelemetry@0.31.0",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "info",
+    "opentelemetry_sdk@0.31.0",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "info",
+    "opentelemetry-otlp@0.31.1",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "info",
+    "tracing-opentelemetry@0.32.1",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "info",
+    "opentelemetry-otlp@0.31.1",
+    "-v",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "update",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "rg",
+    "-n",
+    "ResourceBuilder",
+    "/Users/scottlott/.cargo/registry/src",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "test",
+    "tui::tests",
+    "sidebar",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "test",
+    "sidebar",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
 
 [hostdo.command_aliases.fmt]
 cmd = "cargo fmt"
@@ -180,12 +467,16 @@ cwd = "$WORKSPACE"
 cmd = "cargo build"
 cwd = "$WORKSPACE"
 
-[hostdo.command_aliases.test]
-cmd = "cargo test"
-cwd = "$WORKSPACE"
-
 [hostdo.command_aliases.lint]
 cmd = "cargo clippy"
+cwd = "$WORKSPACE"
+
+[hostdo.command_aliases.check]
+cmd = "cargo check"
+cwd = "$WORKSPACE"
+
+[hostdo.command_aliases.test]
+cmd = "cargo test"
 cwd = "$WORKSPACE"
 
 [network]
@@ -194,7 +485,7 @@ allowlist = [
     "domain=github.com",
     "domain=registry.npmjs.org",
     "domain=api.github.com",
+    "domain=chatgpt.com",
+    "domain=ab.chatgpt.com",
 ]
-denylist = [
-    "domain=*.example.com",
-]
+denylist = ["domain=*.example.com"]

@@ -4,10 +4,14 @@
 /// Derives per-domain leaf certificates on demand (cached in memory).
 /// The CA cert PEM is exposed so it can be injected into containers.
 use anyhow::{Context, Result};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -38,6 +42,7 @@ impl CaStore {
     }
 
     fn load(cert_path: &Path, key_path: &Path) -> Result<Self> {
+        set_private_file_permissions(key_path)?;
         let cert_pem = std::fs::read_to_string(cert_path)
             .with_context(|| format!("reading {}", cert_path.display()))?;
         let key_pem = std::fs::read_to_string(key_path)
@@ -70,15 +75,8 @@ impl CaStore {
 
         std::fs::write(cert_path, &cert_pem)
             .with_context(|| format!("writing {}", cert_path.display()))?;
-        std::fs::write(key_path, &key_pem)
+        write_private_file(key_path, key_pem.as_bytes())
             .with_context(|| format!("writing {}", key_path.display()))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("setting permissions on {}", key_path.display()))?;
-        }
 
         Ok(Self {
             cert_pem,
@@ -104,15 +102,19 @@ impl CaStore {
     }
 
     fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
-        let mut buf = pem.as_bytes();
-        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut buf)
-            .collect::<std::result::Result<_, _>>()
-            .context("parsing CA cert PEM")?;
-        certs
-            .into_iter()
-            .next()
-            .map(|c: CertificateDer<'static>| c.to_vec())
-            .context("no certificate found in CA PEM")
+        const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+        const END: &str = "-----END CERTIFICATE-----";
+
+        let start = pem.find(BEGIN).context("no certificate found in CA PEM")? + BEGIN.len();
+        let end = pem[start..]
+            .find(END)
+            .map(|idx| start + idx)
+            .context("unterminated certificate PEM")?;
+        let b64 = pem[start..end]
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+        STANDARD.decode(b64).context("parsing CA cert PEM")
     }
 
     /// Return (or generate and cache) a rustls `ServerConfig` presenting a
@@ -157,6 +159,32 @@ impl CaStore {
             .insert(domain.to_string(), config.clone());
         Ok(config)
     }
+}
+
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    set_private_file_permissions(path)?;
+    Ok(())
+}
+
+fn set_private_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting permissions on {}", path.display()))?;
+    }
+    let _ = path;
+    Ok(())
 }
 
 #[cfg(test)]

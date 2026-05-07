@@ -6,7 +6,10 @@ use tracing::{debug, info, warn};
 
 use crate::activity::{Activity, ActivityState, wait_cancelled};
 use crate::config;
-use crate::proxy::helpers::{container_tls_passthrough_matches, write_error_any};
+use crate::proxy::helpers::{
+    connect_public_tcp, container_tls_passthrough_matches, ensure_host_header_matches_target,
+    proxy_authorization_matches_token, resolve_public_addrs, write_error_any,
+};
 use crate::proxy::http::{
     connect_head_has_proxy_authorization, forward_request_with_activity, parse_connect_target,
     parse_request_line_and_headers, parse_source_from_connect_head, prompt_network, read_body_any,
@@ -94,12 +97,18 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
 
     let (host, port) = parse_connect_target(head_str)
         .ok_or_else(|| anyhow::anyhow!("malformed CONNECT request"))?;
+    let (_, _, connect_headers) = parse_request_line_and_headers(head_str)
+        .ok_or_else(|| anyhow::anyhow!("malformed CONNECT request"))?;
     let (source_project, source_container, source_status, connect_has_proxy_authorization): (
         Option<String>,
         Option<String>,
         SourceIdentityStatus,
         bool,
     ) = if let Some(fixed) = &state.fixed_source {
+        if !proxy_authorization_matches_token(&connect_headers, &fixed.auth_token) {
+            write_error_any(&mut stream, 407, "Proxy Authentication Required").await?;
+            return Ok(());
+        }
         (
             Some(fixed.project.clone()),
             Some(fixed.container.clone()),
@@ -131,27 +140,6 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
     );
     state.activity_line(&connect_activity.id, format!("target {host}:{port}"));
 
-    if container_tls_passthrough_matches(&cfg, source_container.as_deref(), &host) {
-        info!(
-            host = %host,
-            source_project = ?source_project,
-            source_container = ?source_container,
-            source_status = source_status.as_str(),
-            connect_has_proxy_authorization,
-            "proxy CONNECT passthrough"
-        );
-        return tunnel_connect(
-            &state,
-            &connect_activity,
-            &mut stream,
-            &host,
-            port,
-            "CONNECT passthrough tunnel",
-            &connect_remainder,
-        )
-        .await;
-    }
-
     let rules = match config::load_composed_rules_for_workspace(&cfg, source_project.as_deref()) {
         Ok(rules) => rules,
         Err(e) => {
@@ -165,7 +153,18 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
             return Ok(());
         }
     };
-    let preflight_policy = rules.match_network("CONNECT", &host, "/");
+    let preflight_policy = rules.match_connect(&host, port);
+    if preflight_policy != NetworkPolicy::Deny {
+        if let Err(e) = resolve_public_addrs(&host, port).await {
+            state.activity_finished(
+                &connect_activity.id,
+                ActivityState::Denied,
+                Some(e.to_string()),
+            );
+            write_error_any(&mut stream, 403, "Forbidden by harness-hat policy").await?;
+            return Ok(());
+        }
+    }
     let preflight_allowed = match preflight_policy {
         NetworkPolicy::Auto => true,
         NetworkPolicy::Deny => false,
@@ -179,6 +178,7 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
                 &state,
                 "CONNECT",
                 &host,
+                Some(port),
                 "/",
                 source_project.clone(),
                 source_container.clone(),
@@ -202,6 +202,27 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
         );
         write_error_any(&mut stream, 403, "Forbidden by harness-hat policy").await?;
         return Ok(());
+    }
+
+    if container_tls_passthrough_matches(&cfg, source_container.as_deref(), &host) {
+        info!(
+            host = %host,
+            source_project = ?source_project,
+            source_container = ?source_container,
+            source_status = source_status.as_str(),
+            connect_has_proxy_authorization,
+            "proxy CONNECT passthrough"
+        );
+        return tunnel_connect(
+            &state,
+            &connect_activity,
+            &mut stream,
+            &host,
+            port,
+            "CONNECT passthrough tunnel",
+            &connect_remainder,
+        )
+        .await;
     }
 
     if port != 443 {
@@ -280,6 +301,10 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
             return Ok(());
         }
     };
+    if ensure_host_header_matches_target(&headers, &host, port).is_err() {
+        write_error_any(&mut tls_stream, 400, "Bad Request").await?;
+        return Ok(());
+    }
 
     let body = read_body_any(&mut tls_stream, &headers, inner_remainder).await?;
     let activity = state.start_network_activity(
@@ -307,7 +332,7 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
         );
     }
 
-    let policy = rules.match_network(&method, &host, &path);
+    let policy = rules.match_network_for_port(&method, &host, &path, Some(port));
 
     let allowed = match policy {
         NetworkPolicy::Auto => true,
@@ -322,6 +347,7 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
                 &state,
                 &method,
                 &host,
+                Some(port),
                 &path,
                 source_project.clone(),
                 source_container.clone(),
@@ -354,6 +380,7 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
         &activity,
         "https",
         &host,
+        port,
         &path,
         &method,
         &headers,
@@ -377,15 +404,7 @@ async fn tunnel_connect(
         Some(format!("tunneling {host}:{port}")),
     );
 
-    if let Err(e) = stream
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await
-    {
-        state.activity_finished(&activity.id, ActivityState::Failed, Some(e.to_string()));
-        return Err(e.into());
-    }
-
-    let mut upstream = match TcpStream::connect(format!("{host}:{port}")).await {
+    let mut upstream = match connect_public_tcp(host, port).await {
         Ok(upstream) => upstream,
         Err(e) => {
             let message = format!("{label} connect to {host}:{port} failed: {e}");
@@ -393,6 +412,14 @@ async fn tunnel_connect(
             return Err(anyhow::anyhow!(message));
         }
     };
+
+    if let Err(e) = stream
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .await
+    {
+        state.activity_finished(&activity.id, ActivityState::Failed, Some(e.to_string()));
+        return Err(e.into());
+    }
 
     if !connect_remainder.is_empty()
         && let Err(e) = upstream.write_all(connect_remainder).await

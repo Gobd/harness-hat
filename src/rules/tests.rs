@@ -264,6 +264,87 @@ allowlist = ["domain=github.com"]
     }
 
     #[test]
+    fn parses_network_rule_ports() {
+        let rule = parse_network_allowlist_rule("method=GET domain=api.example.com port=443,8443")
+            .expect("parse rule");
+
+        assert_eq!(rule.ports, vec![443, 8443]);
+    }
+
+    #[test]
+    fn port_specific_network_rules_require_matching_port() {
+        let rules = ComposedRules {
+            network_rules: vec![
+                parse_network_allowlist_rule("domain=api.example.com port=8443")
+                    .expect("parse rule"),
+            ],
+            network_default: NetworkPolicy::Prompt,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            rules.match_network_for_port("GET", "api.example.com", "/", Some(8443)),
+            NetworkPolicy::Auto
+        );
+        assert_eq!(
+            rules.match_network_for_port("GET", "api.example.com", "/", Some(443)),
+            NetworkPolicy::Prompt
+        );
+        assert_eq!(
+            rules.match_network("GET", "api.example.com", "/"),
+            NetworkPolicy::Prompt
+        );
+    }
+
+    #[test]
+    fn connect_allow_without_port_only_auto_allows_https() {
+        let rules = ComposedRules {
+            network_rules: vec![
+                parse_network_allowlist_rule("domain=github.com").expect("parse rule"),
+            ],
+            network_default: NetworkPolicy::Prompt,
+            ..Default::default()
+        };
+
+        assert_eq!(rules.match_connect("github.com", 443), NetworkPolicy::Auto);
+        assert_eq!(rules.match_connect("github.com", 22), NetworkPolicy::Prompt);
+    }
+
+    #[test]
+    fn connect_allow_with_port_auto_allows_that_raw_port() {
+        let rules = ComposedRules {
+            network_rules: vec![
+                parse_network_allowlist_rule("domain=github.com port=22").expect("parse rule"),
+            ],
+            network_default: NetworkPolicy::Prompt,
+            ..Default::default()
+        };
+
+        assert_eq!(rules.match_connect("github.com", 22), NetworkPolicy::Auto);
+        assert_eq!(
+            rules.match_connect("github.com", 443),
+            NetworkPolicy::Prompt
+        );
+    }
+
+    #[test]
+    fn connect_deny_without_port_denies_every_port() {
+        let rules = ComposedRules {
+            network_rules: vec![
+                parse_network_allowlist_rule("domain=github.com port=22").expect("parse rule"),
+            ],
+            network_deny_rules: vec![
+                parse_network_allowlist_rule("domain=github.com").expect("parse rule"),
+            ],
+            network_default: NetworkPolicy::Prompt,
+            ..Default::default()
+        };
+
+        assert_eq!(rules.match_connect("github.com", 22), NetworkPolicy::Deny);
+        assert_eq!(rules.match_connect("github.com", 443), NetworkPolicy::Deny);
+    }
+
+    #[test]
     fn composed_network_denylist_precedes_allowlist() {
         let global = ProjectRules {
             network: NetworkRules {

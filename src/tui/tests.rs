@@ -262,6 +262,18 @@ approval_mode = "auto"
 }
 
 #[test]
+fn portable_cwd_maps_host_workspace_paths_to_workspace_placeholder() {
+    let app = build_test_app();
+    let project_root = app.config.get().workspaces[0].canonical_path.clone();
+
+    assert_eq!(app.portable_cwd(&project_root, "project-a"), "$WORKSPACE");
+    assert_eq!(
+        app.portable_cwd(&project_root.join("src/bin"), "project-a"),
+        "$WORKSPACE/src/bin"
+    );
+}
+
+#[test]
 fn persist_network_rule_writes_denylist_entry() {
     let mut app = build_test_app();
     let rules_path = app.config.get().workspaces[0]
@@ -312,6 +324,32 @@ allowlist = ["domain=blocked.example.com"]
 }
 
 #[test]
+fn persist_network_rule_entry_can_include_connect_port() {
+    let mut app = build_test_app();
+    let rules_path = app.config.get().workspaces[0]
+        .canonical_path
+        .join("harness-rules.toml");
+
+    let updated_path = app
+        .persist_network_rule_entry(
+            "domain=github.com port=22",
+            crate::rules::NetworkPolicy::Auto,
+            Some("project-a"),
+        )
+        .expect("persist network allow");
+
+    assert_eq!(updated_path.as_deref(), Some(rules_path.as_path()));
+    let rules = crate::rules::load(&rules_path).expect("load rules");
+    assert!(
+        rules
+            .network
+            .allowlist
+            .iter()
+            .any(|r| r == "domain=github.com port=22")
+    );
+}
+
+#[test]
 fn activity_events_update_history_and_state() {
     let mut app = build_test_app();
     let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -328,7 +366,7 @@ fn activity_events_update_history_and_state() {
     );
     let id = activity.id.clone();
 
-    app.apply_activity_event(ActivityEvent::Started(activity));
+    app.apply_activity_event(ActivityEvent::Started(Box::new(activity)));
     app.apply_activity_event(ActivityEvent::Line {
         id: id.clone(),
         line: "stdout: compiling".to_string(),
@@ -365,7 +403,7 @@ fn hostdo_command_timer_starts_on_running_state() {
     );
     let id = activity.id.clone();
 
-    app.apply_activity_event(ActivityEvent::Started(activity));
+    app.apply_activity_event(ActivityEvent::Started(Box::new(activity)));
     assert!(
         app.activity_by_id(&id)
             .expect("activity exists")
@@ -425,7 +463,7 @@ fn activity_cancel_marks_flag_and_pending_hostdo() {
     let id = activity.id.clone();
     let (tx, _rx) = tokio::sync::oneshot::channel();
 
-    app.apply_activity_event(ActivityEvent::Started(activity));
+    app.apply_activity_event(ActivityEvent::Started(Box::new(activity)));
     app.pending_exec.push(crate::server::PendingItem {
         id: "pending-1".to_string(),
         activity_id: id.clone(),
@@ -496,7 +534,7 @@ fn terminal_activities_wait_to_fade_until_unselected() {
         - Duration::from_secs(crate::activity::ACTIVITY_TERMINAL_TTL_SECS + 1);
     let id = activity.id.clone();
 
-    app.apply_activity_event(ActivityEvent::Started(activity));
+    app.apply_activity_event(ActivityEvent::Started(Box::new(activity)));
     app.active_activity = Some(id.clone());
     app.focus = Focus::Activity;
 
@@ -542,15 +580,92 @@ fn terminal_activities_wait_to_fade_until_unselected() {
 }
 
 #[test]
+fn sidebar_activity_items_collapse_network_rows_per_session() {
+    let hostdo_a = Activity::new(
+        "project-a".to_string(),
+        Some("container-a".to_string()),
+        ActivityKind::Hostdo {
+            argv: vec!["cargo".to_string(), "test".to_string()],
+            image: None,
+            timeout_secs: 60,
+        },
+        ActivityState::Running,
+        Arc::new(AtomicBool::new(false)),
+    );
+    let network_a = Activity::new(
+        "project-a".to_string(),
+        Some("container-a".to_string()),
+        ActivityKind::Network {
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            path: "/one".to_string(),
+            protocol: "https".to_string(),
+            payload_preview: String::new(),
+            payload_truncated: false,
+            content_type: None,
+            content_length: None,
+        },
+        ActivityState::Forwarding,
+        Arc::new(AtomicBool::new(false)),
+    );
+    let network_b = Activity::new(
+        "project-a".to_string(),
+        Some("container-a".to_string()),
+        ActivityKind::Network {
+            method: "POST".to_string(),
+            host: "api.example.com".to_string(),
+            path: "/two".to_string(),
+            protocol: "https".to_string(),
+            payload_preview: String::new(),
+            payload_truncated: false,
+            content_type: None,
+            content_length: None,
+        },
+        ActivityState::Complete,
+        Arc::new(AtomicBool::new(false)),
+    );
+    let hostdo_b = Activity::new(
+        "project-a".to_string(),
+        Some("container-a".to_string()),
+        ActivityKind::Hostdo {
+            argv: vec!["git".to_string(), "status".to_string()],
+            image: None,
+            timeout_secs: 60,
+        },
+        ActivityState::Complete,
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    let items = App::sidebar_activity_items_for_session(
+        7,
+        vec![&hostdo_a, &network_a, &network_b, &hostdo_b],
+    );
+
+    assert_eq!(
+        items,
+        vec![
+            SidebarItem::Activity(hostdo_a.id.clone()),
+            SidebarItem::NetworkGroup(7),
+            SidebarItem::Activity(hostdo_b.id.clone()),
+        ]
+    );
+}
+
+#[test]
 fn sidebar_selection_tracks_session_preview() {
     let mut app = build_test_app();
     let items = vec![
         SidebarItem::Workspace(0),
         SidebarItem::Launch(0),
         SidebarItem::Session(2),
+        SidebarItem::NetworkGroup(2),
     ];
 
     app.sidebar_idx = 2;
+    app.update_sidebar_preview(&items);
+    assert_eq!(app.preview_session, Some(2));
+
+    app.sidebar_idx = 3;
     app.update_sidebar_preview(&items);
     assert_eq!(app.preview_session, Some(2));
 
@@ -655,6 +770,17 @@ fn image_build_status_bar_only_shows_live_shortcuts() {
     assert!(!running_keys.contains("[c]"));
     assert!(running_keys.contains("[^C]cancel build"));
     assert!(running_keys.contains("[Esc/^B]sidebar"));
+}
+
+#[test]
+fn network_status_bar_exposes_request_navigation() {
+    let mut app = build_test_app();
+    app.focus = Focus::Network;
+
+    let keys = super::render::status_bar_keys(&app);
+
+    assert!(keys.contains("[↑↓/jk]select request"));
+    assert!(keys.contains("[^C]cancel selected"));
 }
 
 #[test]

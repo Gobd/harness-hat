@@ -27,3 +27,6 @@ target
 
 # Stray literal-tilde directory created by pre-fix claw-cage builds
 /~/
+
+# Runtime helper temp files created by older container launch code
+/docker/scripts/harness-hat-hostdo-*

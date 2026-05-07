@@ -120,18 +120,19 @@ impl App {
         if idx >= self.pending_net.len() {
             return;
         }
-        let host = self.pending_net[idx].host.clone();
+        let entry = pending_network_rule_entry(&self.pending_net[idx], NetworkPolicy::Auto);
         let project_name = self.pending_net[idx].source_project.clone();
         if project_name.is_none() {
             self.log_missing_network_project_context(idx, "allow");
         }
-        match self.persist_network_rule(&host, NetworkPolicy::Auto, project_name.as_deref()) {
+        match self.persist_network_rule_entry(&entry, NetworkPolicy::Auto, project_name.as_deref())
+        {
             Ok(updated_path) => {
                 if let Some(path) = &updated_path {
                     self.push_log(
                         format!(
                             "added permanent allow rule for '{}' in {}",
-                            host,
+                            entry,
                             path.display()
                         ),
                         false,
@@ -141,7 +142,7 @@ impl App {
                     }
                 } else {
                     self.push_log(
-                        format!("network host '{}' already permanently allowed", host),
+                        format!("network rule '{}' already permanently allowed", entry),
                         false,
                     );
                 }
@@ -150,7 +151,7 @@ impl App {
                 self.push_log(
                     format!(
                         "failed to persist permanent allow rule for '{}': {}",
-                        host, e
+                        entry, e
                     ),
                     true,
                 );
@@ -163,15 +164,16 @@ impl App {
         if idx >= self.pending_net.len() {
             return;
         }
-        let host = self.pending_net[idx].host.clone();
+        let entry = pending_network_rule_entry(&self.pending_net[idx], NetworkPolicy::Deny);
         let project_name = self.resolve_pending_network_project(idx);
-        match self.persist_network_rule(&host, NetworkPolicy::Deny, project_name.as_deref()) {
+        match self.persist_network_rule_entry(&entry, NetworkPolicy::Deny, project_name.as_deref())
+        {
             Ok(updated_path) => {
                 if let Some(path) = &updated_path {
                     self.push_log(
                         format!(
                             "added permanent deny rule for '{}' in {}",
-                            host,
+                            entry,
                             path.display()
                         ),
                         false,
@@ -181,7 +183,7 @@ impl App {
                     }
                 } else {
                     self.push_log(
-                        format!("network host '{}' already permanently denied", host),
+                        format!("network rule '{}' already permanently denied", entry),
                         false,
                     );
                 }
@@ -190,7 +192,7 @@ impl App {
                 self.push_log(
                     format!(
                         "failed to persist permanent deny rule for '{}': {}",
-                        host, e
+                        entry, e
                     ),
                     true,
                 );
@@ -274,9 +276,20 @@ impl App {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn persist_network_rule(
         &mut self,
         host: &str,
+        policy: NetworkPolicy,
+        project_name: Option<&str>,
+    ) -> Result<Option<std::path::PathBuf>> {
+        let entry = format!("domain={host}");
+        self.persist_network_rule_entry(&entry, policy, project_name)
+    }
+
+    pub(crate) fn persist_network_rule_entry(
+        &mut self,
+        entry: &str,
         policy: NetworkPolicy,
         project_name: Option<&str>,
     ) -> Result<Option<std::path::PathBuf>> {
@@ -297,7 +310,7 @@ impl App {
         let mut rules = crate::rules::load(&rules_path)
             .with_context(|| format!("loading rules file '{}'", rules_path.display()))?;
 
-        let entry = format!("domain={host}");
+        let entry = entry.trim().to_string();
         let mut changed = false;
         let entries = match policy {
             NetworkPolicy::Auto => {
@@ -353,17 +366,22 @@ impl App {
 
     pub(crate) fn portable_cwd(&self, cwd: &Path, project_name: &str) -> String {
         let cfg = self.config.get();
-        let mount_target = cfg
-            .workspaces
-            .iter()
-            .find(|p| p.name == project_name)
-            .and_then(|_| Some("/workspace"))
-            .unwrap_or("/workspace");
+        let project = cfg.workspaces.iter().find(|p| p.name == project_name);
+        let mount_target = "/workspace";
         let cwd_str = cwd.display().to_string();
         if cwd_str == mount_target {
             "$WORKSPACE".to_string()
         } else if let Some(rest) = cwd_str.strip_prefix(&format!("{}/", mount_target)) {
             format!("$WORKSPACE/{rest}")
+        } else if let Some(project) = project {
+            let root = project.canonical_path.display().to_string();
+            if cwd_str == root {
+                "$WORKSPACE".to_string()
+            } else if let Some(rest) = cwd_str.strip_prefix(&format!("{}/", root)) {
+                format!("$WORKSPACE/{rest}")
+            } else {
+                cwd_str
+            }
         } else {
             cwd_str
         }
@@ -380,6 +398,20 @@ impl App {
     pub(crate) fn sync_rules_to_workspace(&mut self, project_name: &str) {
         let _ = project_name;
     }
+}
+
+fn pending_network_rule_entry(
+    item: &crate::proxy::PendingNetworkItem,
+    policy: NetworkPolicy,
+) -> String {
+    if matches!(policy, NetworkPolicy::Auto)
+        && item.method.eq_ignore_ascii_case("CONNECT")
+        && let Some(port) = item.port
+        && port != 443
+    {
+        return format!("domain={} port={port}", item.host);
+    }
+    format!("domain={}", item.host)
 }
 
 fn format_exec_rule_label(argv: &[String], image: Option<&str>, timeout_secs: u64) -> String {

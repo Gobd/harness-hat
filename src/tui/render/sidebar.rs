@@ -1,5 +1,8 @@
 use super::*;
 
+const NETWORK_PAYLOAD_PREVIEW_LINES: usize = 8;
+const NETWORK_RECENT_HISTORY_LINES: usize = 6;
+
 pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.focus == Focus::Sidebar {
         let selected = app.sidebar_items().get(app.sidebar_idx).cloned();
@@ -15,6 +18,9 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             Some(SidebarItem::Activity(id)) => {
                 render_activity_detail(frame, app, area, id.as_str(), true);
+            }
+            Some(SidebarItem::NetworkGroup(si)) => {
+                render_network_group_detail(frame, app, area, si, true);
             }
             Some(SidebarItem::Settings(pi)) => {
                 render_project_settings(frame, app, area, pi, true);
@@ -56,6 +62,15 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.focus == Focus::Activity {
         if let Some(id) = app.active_activity.clone() {
             render_activity_detail(frame, app, area, id.as_str(), false);
+        } else {
+            render_idle(frame, area);
+        }
+        return;
+    }
+
+    if app.focus == Focus::Network {
+        if let Some(si) = app.active_network_session {
+            render_network_group_detail(frame, app, area, si, false);
         } else {
             render_idle(frame, area);
         }
@@ -145,34 +160,10 @@ pub(crate) fn render_activity_detail(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(tone(Color::Cyan)));
 
-    let elapsed = activity.elapsed_duration().as_secs();
     let status_color = activity_status_color(&activity.state);
     let mut lines = Vec::new();
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("  State   : ", Style::default().fg(tone(Color::DarkGray))),
-        Span::styled(
-            activity.state.label(),
-            Style::default()
-                .fg(tone(status_color))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  total: {elapsed}s"),
-            Style::default().fg(tone(Color::DarkGray)),
-        ),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  Source  : ", Style::default().fg(tone(Color::DarkGray))),
-        Span::styled(
-            format!(
-                "workspace={}  container={}",
-                activity.project,
-                activity.container.as_deref().unwrap_or("unknown-container")
-            ),
-            Style::default().fg(tone(Color::White)),
-        ),
-    ]));
+    append_activity_summary_lines(&mut lines, activity, &tone);
 
     match &activity.kind {
         crate::activity::ActivityKind::Hostdo {
@@ -216,86 +207,12 @@ pub(crate) fn render_activity_detail(
                 )));
             }
         }
-        crate::activity::ActivityKind::Network {
-            method,
-            host,
-            path,
-            protocol,
-            payload_preview,
-            payload_truncated,
-            content_type,
-            content_length,
-        } => {
-            lines.push(Line::from(vec![
-                Span::styled("  Method  : ", Style::default().fg(tone(Color::DarkGray))),
-                Span::styled(method.clone(), Style::default().fg(tone(Color::White))),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("  Domain  : ", Style::default().fg(tone(Color::DarkGray))),
-                Span::styled(host.clone(), Style::default().fg(tone(Color::White))),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("  Path    : ", Style::default().fg(tone(Color::DarkGray))),
-                Span::styled(path.clone(), Style::default().fg(tone(Color::White))),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("  Protocol: ", Style::default().fg(tone(Color::DarkGray))),
-                Span::styled(protocol.clone(), Style::default().fg(tone(Color::White))),
-            ]));
-            if let Some(content_type) = content_type {
-                lines.push(Line::from(vec![
-                    Span::styled("  Type    : ", Style::default().fg(tone(Color::DarkGray))),
-                    Span::styled(
-                        content_type.clone(),
-                        Style::default().fg(tone(Color::White)),
-                    ),
-                ]));
-            }
-            if let Some(content_length) = content_length {
-                lines.push(Line::from(vec![
-                    Span::styled("  Payload : ", Style::default().fg(tone(Color::DarkGray))),
-                    Span::styled(
-                        format!(
-                            "{content_length} bytes{}",
-                            if *payload_truncated {
-                                " (preview truncated)"
-                            } else {
-                                ""
-                            }
-                        ),
-                        Style::default().fg(tone(Color::White)),
-                    ),
-                ]));
-            }
-            if !payload_preview.is_empty() {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "  Payload preview",
-                    Style::default()
-                        .fg(tone(Color::Magenta))
-                        .add_modifier(Modifier::BOLD),
-                )));
-                for line in payload_preview.lines().take(8) {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {line}"),
-                        Style::default().fg(tone(Color::DarkGray)),
-                    )));
-                }
-            }
+        crate::activity::ActivityKind::Network { .. } => {
+            append_network_detail_lines(&mut lines, activity, &tone);
         }
     }
 
-    if let Some(status) = &activity.status {
-        lines.push(Line::from(vec![
-            Span::styled("  Status  : ", Style::default().fg(tone(Color::DarkGray))),
-            Span::styled(
-                status.clone(),
-                Style::default()
-                    .fg(tone(status_color))
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-    }
+    append_activity_status_line(&mut lines, activity, &tone);
 
     lines.push(Line::from(""));
 
@@ -340,6 +257,305 @@ pub(crate) fn render_activity_detail(
     }
 }
 
+pub(crate) fn render_network_group_detail(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    session_idx: usize,
+    dimmed: bool,
+) {
+    let activities = app.network_activities_for_session(session_idx);
+    let tone = |c| maybe_dim(c, dimmed);
+    let count = activities.len();
+    let title = format!(" ({count}) ");
+    let block = Block::default()
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(tone(Color::Magenta))
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(tone(Color::Cyan)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    if activities.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  No retained network requests.",
+                Style::default().fg(tone(Color::DarkGray)),
+            ))),
+            inner,
+        );
+        return;
+    }
+
+    let cursor = app.network_cursor_for_len(session_idx, activities.len());
+    let focused = app.focus == Focus::Network && app.active_network_session == Some(session_idx);
+    let mut lines = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "  #   State      Method  ",
+            Style::default().fg(tone(Color::DarkGray)),
+        ),
+        Span::styled("Request", Style::default().fg(tone(Color::DarkGray))),
+    ]));
+
+    let max_request_rows = (inner.height as usize)
+        .saturating_sub(16)
+        .max(3)
+        .min(activities.len());
+    let start = if activities.len() <= max_request_rows {
+        0
+    } else {
+        cursor
+            .saturating_sub(max_request_rows / 2)
+            .min(activities.len().saturating_sub(max_request_rows))
+    };
+    let end = (start + max_request_rows).min(activities.len());
+    if start > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("      ... {start} earlier request(s)"),
+            Style::default().fg(tone(Color::DarkGray)),
+        )));
+    }
+
+    for (idx, activity) in activities.iter().enumerate().skip(start).take(end - start) {
+        let selected = idx == cursor;
+        let marker = if selected && focused { "▶" } else { " " };
+        let status_color = activity_status_color(&activity.state);
+        let request = match &activity.kind {
+            crate::activity::ActivityKind::Network {
+                method, host, path, ..
+            } => {
+                let target = truncate_middle(&format!("{host}{path}"), 58);
+                format!("{method:<7} {target}")
+            }
+            crate::activity::ActivityKind::Hostdo { .. } => activity.title(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {marker}{:>2} ", idx + 1),
+                Style::default().fg(tone(if selected {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                })),
+            ),
+            Span::styled(
+                format!("{:<10}", activity.state.label()),
+                Style::default()
+                    .fg(tone(status_color))
+                    .add_modifier(if selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                request,
+                Style::default().fg(tone(if selected { Color::White } else { Color::Gray })),
+            ),
+        ]));
+    }
+    if end < activities.len() {
+        lines.push(Line::from(Span::styled(
+            format!("      ... {} later request(s)", activities.len() - end),
+            Style::default().fg(tone(Color::DarkGray)),
+        )));
+    }
+
+    if let Some(activity) = activities.get(cursor) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Selected",
+            Style::default()
+                .fg(tone(Color::Magenta))
+                .add_modifier(Modifier::BOLD),
+        )));
+        append_activity_summary_lines(&mut lines, activity, &tone);
+        append_network_detail_lines(&mut lines, activity, &tone);
+        append_activity_status_line(&mut lines, activity, &tone);
+        append_recent_activity_history_lines(&mut lines, activity, &tone);
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        if focused {
+            "  [↑↓/jk] Select request   [^C] Cancel selected   [Esc/^B] Back to sidebar"
+        } else {
+            "  [↵/l] Open network list   [Esc/^B] Back to sidebar"
+        },
+        Style::default().fg(tone(Color::DarkGray)),
+    )));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn append_activity_summary_lines(
+    lines: &mut Vec<Line>,
+    activity: &crate::activity::Activity,
+    tone: &impl Fn(Color) -> Color,
+) {
+    lines.push(Line::from(vec![
+        Span::styled("  State   : ", Style::default().fg(tone(Color::DarkGray))),
+        Span::styled(
+            activity.state.label(),
+            Style::default()
+                .fg(tone(activity_status_color(&activity.state)))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  total: {}s", activity.elapsed_duration().as_secs()),
+            Style::default().fg(tone(Color::DarkGray)),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Source  : ", Style::default().fg(tone(Color::DarkGray))),
+        Span::styled(
+            format!(
+                "workspace={}  container={}",
+                activity.project,
+                activity.container.as_deref().unwrap_or("<unknown>")
+            ),
+            Style::default().fg(tone(Color::White)),
+        ),
+    ]));
+}
+
+fn append_network_detail_lines(
+    lines: &mut Vec<Line>,
+    activity: &crate::activity::Activity,
+    tone: &impl Fn(Color) -> Color,
+) {
+    let crate::activity::ActivityKind::Network {
+        method,
+        host,
+        path,
+        protocol,
+        payload_preview,
+        payload_truncated,
+        content_type,
+        content_length,
+    } = &activity.kind
+    else {
+        return;
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled("  Method  : ", Style::default().fg(tone(Color::DarkGray))),
+        Span::styled(method.clone(), Style::default().fg(tone(Color::White))),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Domain  : ", Style::default().fg(tone(Color::DarkGray))),
+        Span::styled(host.clone(), Style::default().fg(tone(Color::White))),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Path    : ", Style::default().fg(tone(Color::DarkGray))),
+        Span::styled(path.clone(), Style::default().fg(tone(Color::White))),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Protocol: ", Style::default().fg(tone(Color::DarkGray))),
+        Span::styled(protocol.clone(), Style::default().fg(tone(Color::White))),
+    ]));
+    if let Some(content_type) = content_type {
+        lines.push(Line::from(vec![
+            Span::styled("  Type    : ", Style::default().fg(tone(Color::DarkGray))),
+            Span::styled(
+                content_type.clone(),
+                Style::default().fg(tone(Color::White)),
+            ),
+        ]));
+    }
+    if let Some(content_length) = content_length {
+        lines.push(Line::from(vec![
+            Span::styled("  Payload : ", Style::default().fg(tone(Color::DarkGray))),
+            Span::styled(
+                format!(
+                    "{content_length} bytes{}",
+                    if *payload_truncated {
+                        " (preview truncated)"
+                    } else {
+                        ""
+                    }
+                ),
+                Style::default().fg(tone(Color::White)),
+            ),
+        ]));
+    }
+    if !payload_preview.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Payload preview",
+            Style::default()
+                .fg(tone(Color::Magenta))
+                .add_modifier(Modifier::BOLD),
+        )));
+        for line in payload_preview.lines().take(NETWORK_PAYLOAD_PREVIEW_LINES) {
+            lines.push(Line::from(Span::styled(
+                format!("  {line}"),
+                Style::default().fg(tone(Color::DarkGray)),
+            )));
+        }
+    }
+}
+
+fn append_activity_status_line(
+    lines: &mut Vec<Line>,
+    activity: &crate::activity::Activity,
+    tone: &impl Fn(Color) -> Color,
+) {
+    let Some(status) = &activity.status else {
+        return;
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  Status  : ", Style::default().fg(tone(Color::DarkGray))),
+        Span::styled(
+            status.clone(),
+            Style::default()
+                .fg(tone(activity_status_color(&activity.state)))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+}
+
+fn append_recent_activity_history_lines(
+    lines: &mut Vec<Line>,
+    activity: &crate::activity::Activity,
+    tone: &impl Fn(Color) -> Color,
+) {
+    let history = activity
+        .lines
+        .iter()
+        .rev()
+        .take(NETWORK_RECENT_HISTORY_LINES)
+        .cloned()
+        .collect::<Vec<_>>();
+    if history.is_empty() {
+        return;
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Recent history",
+        Style::default()
+            .fg(tone(Color::Cyan))
+            .add_modifier(Modifier::BOLD),
+    )));
+    for line in history.iter().rev() {
+        lines.push(Line::from(Span::styled(
+            format!("  {line}"),
+            Style::default().fg(tone(Color::DarkGray)),
+        )));
+    }
+}
+
 fn hostdo_timeout_label(activity: &crate::activity::Activity, timeout_secs: u64) -> String {
     if activity.command_started_at.is_some() {
         return format!("{timeout_secs}s command-only");
@@ -369,63 +585,6 @@ fn activity_status_color(state: &crate::activity::ActivityState) -> Color {
         crate::activity::ActivityState::Failed => Color::Red,
         crate::activity::ActivityState::Denied => Color::Red,
         crate::activity::ActivityState::Cancelled => Color::Red,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::activity::{Activity, ActivityKind, ActivityState};
-    use std::sync::{Arc, atomic::AtomicBool};
-
-    #[test]
-    fn activity_status_color_uses_progress_success_failure_palette() {
-        assert_eq!(
-            activity_status_color(&ActivityState::PendingApproval),
-            Color::Yellow
-        );
-        assert_eq!(
-            activity_status_color(&ActivityState::PullingImage),
-            Color::Yellow
-        );
-        assert_eq!(
-            activity_status_color(&ActivityState::Running),
-            Color::Yellow
-        );
-        assert_eq!(
-            activity_status_color(&ActivityState::Forwarding),
-            Color::Yellow
-        );
-        assert_eq!(
-            activity_status_color(&ActivityState::Complete),
-            Color::Green
-        );
-        assert_eq!(activity_status_color(&ActivityState::Failed), Color::Red);
-        assert_eq!(activity_status_color(&ActivityState::Denied), Color::Red);
-        assert_eq!(activity_status_color(&ActivityState::Cancelled), Color::Red);
-    }
-
-    #[test]
-    fn hostdo_timeout_label_explains_command_only_timer() {
-        let mut activity = Activity::new(
-            "project".to_string(),
-            Some("container".to_string()),
-            ActivityKind::Hostdo {
-                argv: vec!["cargo".to_string(), "test".to_string()],
-                image: Some("rust".to_string()),
-                timeout_secs: 120,
-            },
-            ActivityState::PullingImage,
-            Arc::new(AtomicBool::new(false)),
-        );
-
-        assert_eq!(
-            hostdo_timeout_label(&activity, 120),
-            "120s command-only, starts after image is ready"
-        );
-
-        activity.mark_command_started(std::time::Instant::now());
-        assert_eq!(hostdo_timeout_label(&activity, 120), "120s command-only");
     }
 }
 
@@ -623,4 +782,61 @@ pub(crate) fn render_terminal_title_hint(frame: &mut Frame, area: Rect, in_scrol
         Paragraph::new(Span::styled(hint, hint_style)).alignment(Alignment::Right),
         hint_area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::activity::{Activity, ActivityKind, ActivityState};
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    #[test]
+    fn activity_status_color_uses_progress_success_failure_palette() {
+        assert_eq!(
+            activity_status_color(&ActivityState::PendingApproval),
+            Color::Yellow
+        );
+        assert_eq!(
+            activity_status_color(&ActivityState::PullingImage),
+            Color::Yellow
+        );
+        assert_eq!(
+            activity_status_color(&ActivityState::Running),
+            Color::Yellow
+        );
+        assert_eq!(
+            activity_status_color(&ActivityState::Forwarding),
+            Color::Yellow
+        );
+        assert_eq!(
+            activity_status_color(&ActivityState::Complete),
+            Color::Green
+        );
+        assert_eq!(activity_status_color(&ActivityState::Failed), Color::Red);
+        assert_eq!(activity_status_color(&ActivityState::Denied), Color::Red);
+        assert_eq!(activity_status_color(&ActivityState::Cancelled), Color::Red);
+    }
+
+    #[test]
+    fn hostdo_timeout_label_explains_command_only_timer() {
+        let mut activity = Activity::new(
+            "project".to_string(),
+            Some("container".to_string()),
+            ActivityKind::Hostdo {
+                argv: vec!["cargo".to_string(), "test".to_string()],
+                image: Some("rust".to_string()),
+                timeout_secs: 120,
+            },
+            ActivityState::PullingImage,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert_eq!(
+            hostdo_timeout_label(&activity, 120),
+            "120s command-only, starts after image is ready"
+        );
+
+        activity.mark_command_started(std::time::Instant::now());
+        assert_eq!(hostdo_timeout_label(&activity, 120), "120s command-only");
+    }
 }

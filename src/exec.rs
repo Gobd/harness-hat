@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 use std::sync::{
     Arc,
@@ -231,29 +232,15 @@ pub async fn run_command(
     env_vars: &HashMap<String, String>,
     timeout_secs: u64,
 ) -> Result<ExecResult> {
-    anyhow::ensure!(!argv.is_empty(), "argv must not be empty");
-
-    let mut cmd = tokio::process::Command::new(&argv[0]);
-    cmd.args(&argv[1..]);
-    cmd.current_dir(cwd);
-    cmd.envs(env_vars);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let started = Instant::now();
-
-    let output = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output())
-        .await
-        .map_err(|_| anyhow::anyhow!("command timed out after {timeout_secs}s"))??;
-
-    let duration_ms = started.elapsed().as_millis() as u64;
-
-    Ok(ExecResult {
-        exit_code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        duration_ms,
-    })
+    run_command_streaming(
+        argv,
+        cwd,
+        env_vars,
+        timeout_secs,
+        Arc::new(AtomicBool::new(false)),
+        |_, _| {},
+    )
+    .await
 }
 
 pub async fn run_command_streaming<F>(
@@ -309,13 +296,7 @@ where
         tokio::select! {
             line = line_rx.recv() => {
                 if let Some((is_stderr, line)) = line {
-                    if is_stderr {
-                        stderr.push_str(&line);
-                        stderr.push('\n');
-                    } else {
-                        stdout.push_str(&line);
-                        stdout.push('\n');
-                    }
+                    append_output_capped(if is_stderr { &mut stderr } else { &mut stdout }, &line);
                     on_output(is_stderr, line);
                 }
             }
@@ -329,13 +310,7 @@ where
         let _ = task.await;
     }
     while let Ok((is_stderr, line)) = line_rx.try_recv() {
-        if is_stderr {
-            stderr.push_str(&line);
-            stderr.push('\n');
-        } else {
-            stdout.push_str(&line);
-            stdout.push('\n');
-        }
+        append_output_capped(if is_stderr { &mut stderr } else { &mut stdout }, &line);
         on_output(is_stderr, line);
     }
 
@@ -395,7 +370,7 @@ pub async fn docker_image_present(image: &str) -> Result<bool> {
 pub async fn pull_docker_image<F>(
     image: &str,
     timeout_secs: u64,
-    mut on_progress: F,
+    on_progress: F,
 ) -> Result<ExecResult>
 where
     F: FnMut(DockerPullProgress) + Send,
@@ -404,7 +379,7 @@ where
         image,
         timeout_secs,
         Arc::new(AtomicBool::new(false)),
-        move |progress| on_progress(progress),
+        on_progress,
     )
     .await
 }
@@ -459,18 +434,17 @@ where
         }
 
         tokio::select! {
-            maybe_line = line_rx.recv() => match maybe_line {
-                Some((is_stderr, line)) => {
-                    let capture = if is_stderr { &mut stderr } else { &mut stdout };
-                    append_capped(capture, &line);
-                    if let Some(progress) = parse_docker_pull_progress_line(&line)
-                        && should_emit_pull_progress(&progress, &mut last_progress_emit)
-                    {
-                        on_progress(progress);
-                    }
+            maybe_line = line_rx.recv() => {
+                if let Some((is_stderr, line)) = maybe_line {
+                let capture = if is_stderr { &mut stderr } else { &mut stdout };
+                append_capped(capture, &line);
+                if let Some(progress) = parse_docker_pull_progress_line(&line)
+                    && should_emit_pull_progress(&progress, &mut last_progress_emit)
+                {
+                    on_progress(progress);
                 }
-                None => {}
-            },
+                }
+            }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
     };
@@ -542,7 +516,7 @@ async fn read_process_progress<R>(
                     }
                     pending.clear();
                 }
-            } else {
+            } else if pending.len() < MAX_PROCESS_LINE_BYTES {
                 pending.push(*byte);
             }
         }
@@ -550,24 +524,78 @@ async fn read_process_progress<R>(
 
     if !pending.is_empty() {
         let line = String::from_utf8_lossy(&pending).into_owned();
-        if tx.send((is_stderr, line)).is_err() {
-            return;
-        }
+        let _ = tx.send((is_stderr, line));
     }
 }
 
-fn append_capped(buf: &mut String, line: &str) {
-    const MAX_CAPTURE_BYTES: usize = 64 * 1024;
+const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+const MAX_PROCESS_LINE_BYTES: usize = 64 * 1024;
+
+fn append_output_capped(buf: &mut String, line: &str) {
     if buf.len() >= MAX_CAPTURE_BYTES {
         return;
     }
     let remaining = MAX_CAPTURE_BYTES - buf.len();
-    if line.len() + 1 <= remaining {
+    if line.len() < remaining {
         buf.push_str(line);
         buf.push('\n');
     } else {
         buf.push_str(&line[..remaining.min(line.len())]);
     }
+}
+
+fn append_capped(buf: &mut String, line: &str) {
+    if buf.len() >= MAX_CAPTURE_BYTES {
+        return;
+    }
+    let remaining = MAX_CAPTURE_BYTES - buf.len();
+    if line.len() < remaining {
+        buf.push_str(line);
+        buf.push('\n');
+    } else {
+        buf.push_str(&line[..remaining.min(line.len())]);
+    }
+}
+
+fn append_docker_env_file(
+    cmd: &mut tokio::process::Command,
+    env_vars: &HashMap<String, String>,
+) -> Result<Option<tempfile::NamedTempFile>> {
+    if env_vars.is_empty() {
+        return Ok(None);
+    }
+
+    let mut file = tempfile::Builder::new()
+        .prefix("harness-hat-runner-env-")
+        .tempfile()?;
+    for (key, value) in env_vars {
+        validate_env_file_entry(key, value)?;
+        writeln!(file, "{key}={value}")?;
+    }
+    file.flush()?;
+    cmd.arg("--env-file").arg(file.path());
+    Ok(Some(file))
+}
+
+fn validate_env_file_entry(key: &str, value: &str) -> Result<()> {
+    anyhow::ensure!(
+        is_valid_env_name(key),
+        "invalid environment variable name in env profile: {key}"
+    );
+    anyhow::ensure!(
+        !value.contains('\n') && !value.contains('\r'),
+        "environment variable value for {key} must not contain newlines"
+    );
+    Ok(())
+}
+
+fn is_valid_env_name(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 pub fn parse_docker_pull_progress_line(line: &str) -> Option<DockerPullProgress> {
@@ -726,66 +754,18 @@ pub async fn run_docker_command(
     env_vars: &HashMap<String, String>,
     timeout_secs: u64,
 ) -> Result<ExecResult> {
-    anyhow::ensure!(!argv.is_empty(), "argv must not be empty");
-    anyhow::ensure!(
-        workspace_host_path.is_absolute(),
-        "workspace host path must be absolute: {}",
-        workspace_host_path.display()
-    );
-    anyhow::ensure!(
-        workspace_container_path.is_absolute(),
-        "workspace container path must be absolute: {}",
-        workspace_container_path.display()
-    );
-    anyhow::ensure!(
-        container_cwd.is_absolute(),
-        "container cwd must be absolute: {}",
-        container_cwd.display()
-    );
-
-    let mut cmd = tokio::process::Command::new("docker");
-    cmd.arg("run")
-        .arg("--rm")
-        .arg("--pull=never")
-        .arg("-v")
-        .arg(format!(
-            "{}:{}",
-            workspace_host_path.display(),
-            workspace_container_path.display()
-        ))
-        .arg("-w")
-        .arg(container_cwd);
-
-    #[cfg(unix)]
-    {
-        let uid = unsafe { libc::geteuid() };
-        let gid = unsafe { libc::getegid() };
-        cmd.arg("--user").arg(format!("{uid}:{gid}"));
-    }
-
-    for (key, value) in env_vars {
-        cmd.arg("-e").arg(format!("{key}={value}"));
-    }
-
-    cmd.arg(image);
-    cmd.args(argv);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let started = Instant::now();
-
-    let output = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output())
-        .await
-        .map_err(|_| anyhow::anyhow!("docker command timed out after {timeout_secs}s"))??;
-
-    let duration_ms = started.elapsed().as_millis() as u64;
-
-    Ok(ExecResult {
-        exit_code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        duration_ms,
-    })
+    run_docker_command_streaming(
+        image,
+        argv,
+        env_vars,
+        timeout_secs,
+        workspace_host_path,
+        workspace_container_path,
+        container_cwd,
+        Arc::new(AtomicBool::new(false)),
+        |_, _| {},
+    )
+    .await
 }
 
 pub async fn run_docker_command_streaming<F>(
@@ -832,16 +812,13 @@ where
         ))
         .arg("-w")
         .arg(container_cwd);
+    let _env_file = append_docker_env_file(&mut cmd, env_vars)?;
 
     #[cfg(unix)]
     {
         let uid = unsafe { libc::geteuid() };
         let gid = unsafe { libc::getegid() };
         cmd.arg("--user").arg(format!("{uid}:{gid}"));
-    }
-
-    for (key, value) in env_vars {
-        cmd.arg("-e").arg(format!("{key}={value}"));
     }
 
     cmd.arg(image);
@@ -883,13 +860,7 @@ where
         tokio::select! {
             line = line_rx.recv() => {
                 if let Some((is_stderr, line)) = line {
-                    if is_stderr {
-                        stderr.push_str(&line);
-                        stderr.push('\n');
-                    } else {
-                        stdout.push_str(&line);
-                        stdout.push('\n');
-                    }
+                    append_output_capped(if is_stderr { &mut stderr } else { &mut stdout }, &line);
                     on_output(is_stderr, line);
                 }
             }
@@ -901,13 +872,7 @@ where
         let _ = task.await;
     }
     while let Ok((is_stderr, line)) = line_rx.try_recv() {
-        if is_stderr {
-            stderr.push_str(&line);
-            stderr.push('\n');
-        } else {
-            stdout.push_str(&line);
-            stdout.push('\n');
-        }
+        append_output_capped(if is_stderr { &mut stderr } else { &mut stdout }, &line);
         on_output(is_stderr, line);
     }
 

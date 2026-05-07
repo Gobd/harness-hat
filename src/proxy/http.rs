@@ -8,11 +8,13 @@ use tracing::warn;
 use crate::activity::{Activity, ActivityState, wait_cancelled};
 use crate::config;
 use crate::proxy::helpers::{
-    extract_host, parse_source_from_headers, strip_scheme_and_host, write_error_any,
-    write_response_any,
+    extract_host_port, parse_source_from_headers, proxy_authorization_matches_token,
+    resolve_public_addrs, strip_scheme_and_host, write_error_any, write_response_any,
 };
 use crate::proxy::{NetworkDecision, PendingNetworkItem, ProxyState, SourceIdentityStatus};
 use crate::rules::NetworkPolicy;
+
+const MAX_PROXY_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 // ── Plain HTTP ────────────────────────────────────────────────────────────────
 
@@ -41,6 +43,10 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
         SourceIdentityStatus,
         bool,
     ) = if let Some(fixed) = &state.fixed_source {
+        if !proxy_authorization_matches_token(&headers, &fixed.auth_token) {
+            write_error_any(&mut stream, 407, "Proxy Authentication Required").await?;
+            return Ok(());
+        }
         (
             Some(fixed.project.clone()),
             Some(fixed.container.clone()),
@@ -56,7 +62,10 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
         (project, container, status, has_auth)
     };
 
-    let host = extract_host(&headers, &path).unwrap_or_default();
+    let Some((host, port)) = extract_host_port(&headers, &path, 80) else {
+        write_error_any(&mut stream, 400, "Missing destination host").await?;
+        return Ok(());
+    };
     let path = strip_scheme_and_host(&path);
 
     let body = read_body_any(&mut stream, &headers, body_remainder).await?;
@@ -93,7 +102,15 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
             return Ok(());
         }
     };
-    let policy = rules.match_network(&method, &host, &path);
+    let policy = rules.match_network_for_port(&method, &host, &path, Some(port));
+
+    if policy != NetworkPolicy::Deny {
+        if let Err(e) = resolve_public_addrs(&host, port).await {
+            state.activity_finished(&activity.id, ActivityState::Denied, Some(e.to_string()));
+            write_error_any(&mut stream, 403, "Forbidden by harness-hat policy").await?;
+            return Ok(());
+        }
+    }
 
     let allowed = match policy {
         NetworkPolicy::Auto => true,
@@ -108,6 +125,7 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
                 &state,
                 &method,
                 &host,
+                Some(port),
                 &path,
                 source_project.clone(),
                 source_container.clone(),
@@ -149,6 +167,7 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
         &activity,
         "http",
         &host,
+        port,
         &path,
         &method,
         &headers,
@@ -161,6 +180,7 @@ pub(crate) async fn prompt_network(
     state: &ProxyState,
     method: &str,
     host: &str,
+    port: Option<u16>,
     path: &str,
     source_project: Option<String>,
     source_container: Option<String>,
@@ -186,6 +206,7 @@ pub(crate) async fn prompt_network(
         has_proxy_authorization,
         method: method.to_string(),
         host: host.to_string(),
+        port,
         path: path.to_string(),
         response_tx: tx,
     };
@@ -204,6 +225,7 @@ pub(crate) async fn forward_request_with_activity<W>(
     activity: &Activity,
     scheme: &str,
     host: &str,
+    port: u16,
     path: &str,
     method: &str,
     headers: &[(String, String)],
@@ -221,7 +243,7 @@ where
         return Ok(());
     }
 
-    let url = format!("{scheme}://{host}{path}");
+    let url = build_url(scheme, host, port, path);
     state.activity_state(
         &activity.id,
         ActivityState::Forwarding,
@@ -229,7 +251,7 @@ where
     );
 
     let response = tokio::select! {
-        response = forward_request(&state.client, method, &url, headers, body) => match response {
+        response = forward_request(method, scheme, host, port, path, headers, body) => match response {
             Ok(response) => response,
             Err(e) => {
                 state.activity_finished(&activity.id, ActivityState::Failed, Some(e.to_string()));
@@ -268,17 +290,27 @@ where
 }
 
 pub(crate) async fn forward_request(
-    client: &reqwest::Client,
     method: &str,
-    url: &str,
+    scheme: &str,
+    host: &str,
+    port: u16,
+    path: &str,
     headers: &[(String, String)],
     body: Vec<u8>,
 ) -> Result<reqwest::Response> {
     let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
+    let addrs = resolve_public_addrs(host, port).await?;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve_to_addrs(host, &addrs)
+        .build()?;
+    let url = build_url(scheme, host, port, path);
 
     let mut req = client.request(method, url);
     for (name, value) in headers {
-        if !is_hop_by_hop(name) {
+        if !is_hop_by_hop(name) && !name.eq_ignore_ascii_case("host") {
             req = req.header(name.as_str(), value.as_str());
         }
     }
@@ -287,6 +319,28 @@ pub(crate) async fn forward_request(
     }
     let response = req.send().await?;
     Ok(response)
+}
+
+fn build_url(scheme: &str, host: &str, port: u16, path: &str) -> String {
+    format!(
+        "{scheme}://{}{}",
+        authority_for_url(scheme, host, port),
+        path
+    )
+}
+
+fn authority_for_url(scheme: &str, host: &str, port: u16) -> String {
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let default_port = (scheme == "http" && port == 80) || (scheme == "https" && port == 443);
+    if default_port {
+        host
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 pub(crate) fn is_hop_by_hop(name: &str) -> bool {
@@ -350,6 +404,11 @@ where
     let content_length = content_length_from_headers(headers);
     if content_length == 0 {
         return Ok(vec![]);
+    }
+    if content_length > MAX_PROXY_REQUEST_BODY_BYTES {
+        anyhow::bail!(
+            "request body too large: {content_length} bytes exceeds {MAX_PROXY_REQUEST_BODY_BYTES}"
+        );
     }
     let mut body = Vec::with_capacity(content_length);
     body.extend_from_slice(&initial[..initial.len().min(content_length)]);

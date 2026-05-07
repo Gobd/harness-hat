@@ -136,12 +136,13 @@ impl Default for NetworkRules {
 }
 
 /// One parsed network rule in Coder Agent Firewall style:
-/// `method=GET,POST domain=api.example.com path=/api/*,/auth/*`.
+/// `method=GET,POST domain=api.example.com path=/api/*,/auth/* port=443,8443`.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NetworkRule {
     pub methods: Vec<String>,
     pub domains: Vec<String>,
     pub paths: Vec<String>,
+    pub ports: Vec<u16>,
 }
 
 // ── ComposedRules ────────────────────────────────────────────────────────────
@@ -225,17 +226,52 @@ impl ComposedRules {
 
     /// Find the effective network policy for a given request.
     pub fn match_network(&self, method: &str, host: &str, path: &str) -> NetworkPolicy {
+        self.match_network_for_port(method, host, path, None)
+    }
+
+    /// Find the effective network policy for a request with a known destination port.
+    pub fn match_network_for_port(
+        &self,
+        method: &str,
+        host: &str,
+        path: &str,
+        port: Option<u16>,
+    ) -> NetworkPolicy {
         if self
             .network_deny_rules
             .iter()
-            .any(|r| network_rule_matches(r, method, host, path))
+            .any(|r| network_rule_matches(r, method, host, path, port))
         {
             return NetworkPolicy::Deny;
         }
         if self
             .network_rules
             .iter()
-            .any(|r| network_rule_matches(r, method, host, path))
+            .any(|r| network_rule_matches(r, method, host, path, port))
+        {
+            NetworkPolicy::Auto
+        } else {
+            self.network_default.clone()
+        }
+    }
+
+    /// Find the effective policy for CONNECT preflight.
+    ///
+    /// Domain-only allow rules approve HTTPS CONNECT on 443. Raw TCP CONNECT to
+    /// other ports must be explicitly allowed with `port=...`. Domain-only deny
+    /// rules remain broad and deny every port for that host.
+    pub fn match_connect(&self, host: &str, port: u16) -> NetworkPolicy {
+        if self
+            .network_deny_rules
+            .iter()
+            .any(|r| connect_rule_matches(r, host, port, true))
+        {
+            return NetworkPolicy::Deny;
+        }
+        if self
+            .network_rules
+            .iter()
+            .any(|r| connect_rule_matches(r, host, port, false))
         {
             NetworkPolicy::Auto
         } else {
@@ -276,10 +312,24 @@ impl ComposedRules {
     }
 }
 
-fn network_rule_matches(rule: &NetworkRule, method: &str, host: &str, path: &str) -> bool {
+fn network_rule_matches(
+    rule: &NetworkRule,
+    method: &str,
+    host: &str,
+    path: &str,
+    port: Option<u16>,
+) -> bool {
     method_matches(&rule.methods, method)
         && domain_matches(&rule.domains, host)
         && path_matches(&rule.paths, path)
+        && port_matches(&rule.ports, port)
+}
+
+fn connect_rule_matches(rule: &NetworkRule, host: &str, port: u16, deny_rule: bool) -> bool {
+    method_matches(&rule.methods, "CONNECT")
+        && domain_matches(&rule.domains, host)
+        && path_matches(&rule.paths, "/")
+        && connect_port_matches(&rule.ports, port, deny_rule)
 }
 
 fn method_matches(patterns: &[String], method: &str) -> bool {
@@ -317,6 +367,17 @@ fn path_matches(patterns: &[String], path: &str) -> bool {
         return true;
     }
     patterns.iter().any(|pattern| wildcard_match(pattern, path))
+}
+
+fn port_matches(patterns: &[u16], port: Option<u16>) -> bool {
+    patterns.is_empty() || port.is_some_and(|port| patterns.contains(&port))
+}
+
+fn connect_port_matches(patterns: &[u16], port: u16, deny_rule: bool) -> bool {
+    if patterns.is_empty() {
+        return deny_rule || port == 443;
+    }
+    patterns.contains(&port)
 }
 
 fn wildcard_match(pattern: &str, text: &str) -> bool {
@@ -360,6 +421,7 @@ pub fn parse_network_allowlist_rule(raw: &str) -> Result<NetworkRule> {
     let mut methods = Vec::new();
     let mut domains = Vec::new();
     let mut paths = Vec::new();
+    let mut ports = Vec::new();
 
     let trimmed = raw.trim();
     anyhow::ensure!(!trimmed.is_empty(), "network rule entry must not be empty");
@@ -390,6 +452,17 @@ pub fn parse_network_allowlist_rule(raw: &str) -> Result<NetworkRule> {
                 anyhow::ensure!(paths.is_empty(), "duplicate path key in '{raw}'");
                 paths = values;
             }
+            "port" => {
+                anyhow::ensure!(ports.is_empty(), "duplicate port key in '{raw}'");
+                ports = values
+                    .into_iter()
+                    .map(|value| {
+                        value.parse::<u16>().with_context(|| {
+                            format!("invalid port '{value}' in network entry '{raw}'")
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+            }
             _ => anyhow::bail!("unknown key '{key}' in network entry '{raw}'"),
         }
     }
@@ -401,6 +474,7 @@ pub fn parse_network_allowlist_rule(raw: &str) -> Result<NetworkRule> {
         methods,
         domains,
         paths,
+        ports,
     })
 }
 
@@ -534,7 +608,7 @@ const RULES_FILE_HEADER: &str = "\
 # Coder-style network rules. Deny matches win over allow matches; if no rule
 # matches, request is prompted.
 # Rule format:
-#   method=GET,POST domain=api.example.com path=/v1/*,/health
+#   method=GET,POST domain=api.example.com path=/v1/*,/health port=443,8443
 #
 # Use [network].allowlist for permanent allows and [network].denylist for
 # permanent denies.
@@ -546,5 +620,10 @@ const RULES_FILE_HEADER: &str = "\
 # Path matching:
 # - exact (`/v1/users`)
 # - wildcard (`/v1/*`)
+#
+# Port matching:
+# - omitted port matches normal HTTP/HTTPS requests on any port
+# - CONNECT allow rules without `port=` only auto-approve port 443
+# - raw CONNECT to other ports requires an explicit `port=...` allow rule
 
 ";

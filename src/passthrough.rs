@@ -144,13 +144,15 @@ pub async fn run_and_get_exit_code() -> Result<i32> {
 
     let proxy_state =
         crate::proxy::ProxyState::new(ca, shared_config.clone(), net_pending_tx, activity_tx)?;
+    let session_token = uuid::Uuid::new_v4().simple().to_string();
     let scoped_proxy = crate::proxy::spawn_scoped_listener(
         &proxy_state,
         &proxy_bind_host,
         &project_name,
         &runtime.container_name,
+        &session_token,
     )?;
-    let proxy_url = format!("http://{}", scoped_proxy.addr);
+    let proxy_url = scoped_proxy.proxy_url();
     let hostdo_script_host_path = config.docker_dir.join("scripts/hostdo.py");
 
     let ctr = crate::config::ContainerDef {
@@ -165,7 +167,6 @@ pub async fn run_and_get_exit_code() -> Result<i32> {
         bypass_proxy: runtime.bypass_proxy.clone(),
     };
 
-    let session_token = uuid::Uuid::new_v4().simple().to_string();
     session_registry.insert(
         session_token.clone(),
         crate::server::SessionIdentity {
