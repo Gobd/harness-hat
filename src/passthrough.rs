@@ -107,6 +107,9 @@ pub async fn run_and_get_exit_code() -> Result<i32> {
 
     let (exec_pending_tx, exec_pending_rx) = mpsc::channel::<crate::server::PendingItem>(64);
     let (stop_pending_tx, stop_pending_rx) = mpsc::channel::<crate::server::ContainerStopItem>(64);
+    let (agent_control_tx, agent_control_rx) = mpsc::channel::<crate::server::AgentControlRequest>(
+        crate::server::AGENT_CONTROL_CHANNEL_CAPACITY,
+    );
     let (net_pending_tx, net_pending_rx) = mpsc::channel::<crate::proxy::PendingNetworkItem>(64);
     let (activity_tx, activity_rx) = mpsc::unbounded_channel::<crate::activity::ActivityEvent>();
     let (audit_tx, audit_rx) = mpsc::channel(256);
@@ -130,6 +133,7 @@ pub async fn run_and_get_exit_code() -> Result<i32> {
         state: state.clone(),
         pending_tx: exec_pending_tx,
         stop_tx: stop_pending_tx,
+        agent_tx: agent_control_tx,
         audit_tx,
         token: token.clone(),
         sessions: session_registry.clone(),
@@ -151,6 +155,7 @@ pub async fn run_and_get_exit_code() -> Result<i32> {
         &project_name,
         &runtime.container_name,
         &session_token,
+        crate::proxy::SourcePriority::Primary,
     )?;
     let proxy_url = scoped_proxy.proxy_url();
     let hostdo_script_host_path = config.docker_dir.join("scripts/hostdo.py");
@@ -190,7 +195,9 @@ pub async fn run_and_get_exit_code() -> Result<i32> {
         &ca_cert_path_str,
         Some(hostdo_script_host_path.as_path()),
         Some(scoped_proxy),
+        crate::proxy::SourcePriority::Primary,
         config.defaults.proxy.strict_network,
+        &[],
         term_rows.max(6),
         term_cols.max(20),
     )?;
@@ -210,6 +217,7 @@ pub async fn run_and_get_exit_code() -> Result<i32> {
         session_registry,
         exec_pending_rx,
         stop_pending_rx,
+        agent_control_rx,
         net_pending_rx,
         activity_rx,
         audit_rx,

@@ -58,6 +58,9 @@ pub async fn run() -> Result<()> {
 
     let (exec_pending_tx, exec_pending_rx) = mpsc::channel::<crate::server::PendingItem>(64);
     let (stop_pending_tx, stop_pending_rx) = mpsc::channel::<crate::server::ContainerStopItem>(64);
+    let (agent_control_tx, agent_control_rx) = mpsc::channel::<crate::server::AgentControlRequest>(
+        crate::server::AGENT_CONTROL_CHANNEL_CAPACITY,
+    );
     let (net_pending_tx, net_pending_rx) = mpsc::channel::<crate::proxy::PendingNetworkItem>(64);
     let (activity_tx, activity_rx) = mpsc::unbounded_channel::<crate::activity::ActivityEvent>();
     let (audit_tx, audit_rx) = mpsc::channel(256);
@@ -72,6 +75,7 @@ pub async fn run() -> Result<()> {
         state: state.clone(),
         pending_tx: exec_pending_tx,
         stop_tx: stop_pending_tx,
+        agent_tx: agent_control_tx,
         audit_tx,
         token: token.clone(),
         sessions: session_registry.clone(),
@@ -112,6 +116,7 @@ pub async fn run() -> Result<()> {
         session_registry,
         exec_pending_rx,
         stop_pending_rx,
+        agent_control_rx,
         net_pending_rx,
         activity_rx,
         audit_rx,

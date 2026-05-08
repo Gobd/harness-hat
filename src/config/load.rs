@@ -162,6 +162,7 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
             .unwrap_or(AgentKind::None);
         let mut mounts = merge_mounts(&defaults.mounts, &profile.mounts, &[]);
         add_existing_agent_session_mounts(&mut mounts, &agent);
+        let agent_bypass_proxy = agent_default_bypass_proxy(&agent);
 
         resolved.push(crate::config::ContainerDef {
             name: profile_name.clone(),
@@ -179,13 +180,33 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
                 &profile.env_passthrough,
                 &[],
             ),
-            bypass_proxy: merge_unique_strings(&defaults.bypass_proxy, &profile.bypass_proxy, &[]),
+            bypass_proxy: merge_unique_strings(
+                &defaults.bypass_proxy,
+                &profile.bypass_proxy,
+                &agent_bypass_proxy,
+            ),
             image_stem,
         });
     }
     config.containers = resolved;
 
     Ok(())
+}
+
+fn agent_default_bypass_proxy(agent: &AgentKind) -> Vec<String> {
+    match agent {
+        AgentKind::Codex => vec![
+            // Codex uses Rust TLS stacks for ChatGPT Apps/MCP and model
+            // WebSocket traffic. Passthrough avoids harness-hat MITM certs for
+            // endpoints the CLI expects to verify against public roots.
+            "chatgpt.com".to_string(),
+            "*.chatgpt.com".to_string(),
+            "*.openai.com".to_string(),
+            "api.openai.com".to_string(),
+            "auth.openai.com".to_string(),
+        ],
+        _ => Vec::new(),
+    }
 }
 
 fn add_existing_agent_session_mounts(mounts: &mut Vec<ContainerMount>, agent: &AgentKind) {

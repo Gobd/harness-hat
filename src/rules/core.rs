@@ -11,6 +11,9 @@ use std::path::Path;
 use crate::config::AliasValue;
 
 pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
+pub const DEFAULT_AGENTCTL_SPAWN_DELAY_MS: u64 = 500;
+pub const MIN_AGENTCTL_SPAWN_DELAY_MS: u64 = 100;
+pub const DEFAULT_AGENTCTL_MAX_SUBAGENTS: usize = 10;
 
 // ── Enums (re-used across config and rules) ──────────────────────────────────
 
@@ -67,9 +70,43 @@ pub struct ProjectRules {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_instructions: Option<String>,
     #[serde(default)]
+    pub agentctl: AgentctlRules,
+    #[serde(default)]
     pub hostdo: HostdoRules,
     #[serde(default)]
     pub network: NetworkRules,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct AgentctlRules {
+    #[serde(default = "default_agentctl_spawn_delay_ms")]
+    pub spawn_delay_ms: u64,
+    #[serde(default = "default_agentctl_max_subagents")]
+    pub max_subagents: usize,
+}
+
+impl AgentctlRules {
+    pub fn effective_spawn_delay_ms(&self) -> u64 {
+        self.spawn_delay_ms.max(MIN_AGENTCTL_SPAWN_DELAY_MS)
+    }
+}
+
+impl Default for AgentctlRules {
+    fn default() -> Self {
+        Self {
+            spawn_delay_ms: DEFAULT_AGENTCTL_SPAWN_DELAY_MS,
+            max_subagents: DEFAULT_AGENTCTL_MAX_SUBAGENTS,
+        }
+    }
+}
+
+fn default_agentctl_spawn_delay_ms() -> u64 {
+    DEFAULT_AGENTCTL_SPAWN_DELAY_MS
+}
+
+fn default_agentctl_max_subagents() -> usize {
+    DEFAULT_AGENTCTL_MAX_SUBAGENTS
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -151,6 +188,7 @@ pub struct NetworkRule {
 /// Global rules and all project rules are unioned together.
 #[derive(Debug, Clone, Default)]
 pub struct ComposedRules {
+    pub agentctl: AgentctlRules,
     pub hostdo: HostdoRules,
     pub network_rules: Vec<NetworkRule>,
     pub network_deny_rules: Vec<NetworkRule>,
@@ -164,9 +202,11 @@ impl ComposedRules {
         let mut commands = global.hostdo.commands.clone();
         let mut network_allowlist = global.network.allowlist.clone();
         let mut network_denylist = global.network.denylist.clone();
+        let mut agentctl = global.agentctl.clone();
 
         // Union: add project rules that don't duplicate a global argv.
         for proj in projects {
+            agentctl = proj.agentctl.clone();
             for cmd in &proj.hostdo.commands {
                 if !commands
                     .iter()
@@ -212,6 +252,7 @@ impl ComposedRules {
         }
 
         Self {
+            agentctl,
             hostdo: HostdoRules {
                 default_policy: hostdo_default,
                 commands,
@@ -570,6 +611,44 @@ const RULES_FILE_HEADER: &str = "\
 #
 # Preferred place for *human/LLM instructions*:
 # llm_instructions = \"\"\"\n\
+# Environment:
+# - You are operating inside a Linux Docker container managed by harness-hat.
+# - Your workspace is mounted into the container; edits usually persist to the host.
+# - Do not assume host tools, credentials, or services are directly available in the container.
+#
+# Host-side commands:
+# - Use `hostdo ...` when you need host-side build/package tooling such as cargo,
+#   npm, pnpm, yarn, go, make, pytest, or similar commands.
+# - Examples: `hostdo cargo test`, `hostdo npm install`, `hostdo go test ./...`.
+# - Only use `hostdo --image <docker-image> ...` when the user explicitly asks
+#   you to run against a Docker image or containerized runner.
+# - `hostdo --image` runs a command in a short-lived Docker runner instead of
+#   directly on the host.
+# - Examples: `hostdo --image node:20 npm test`,
+#   `hostdo --image rust:1.88 cargo test`.
+# - `hostdo` requests are policy checked against the `[hostdo]` rules below and may
+#   prompt the developer.
+#
+# Subagents:
+# - Use `agentctl spawn <agent> [--name <name>]` to start a same-workspace
+#   subagent, where `<agent>` is `claude`, `codex`, `gemini`, or `opencode`.
+# - Use `agentctl spawn-many <agent> <count> --prefix <name>` for larger
+#   batches; launches are paced by `[agentctl].spawn_delay_ms` and never below
+#   100ms between spawn requests.
+# - Codex subagent launches additionally wait for the previous Codex launch to
+#   fail MCP startup, clear MCP startup, sit waiting without MCP diagnostics for
+#   a short stable window, or reach the 35s diagnostic timeout.
+# - `[agentctl].max_subagents` caps live descendants under a single top-level
+#   agent, including subagents, sub-subagents, and deeper descendants.
+# - Use `agentctl status <child>`, `agentctl tail <child> --rows 30`,
+#   `agentctl tail <child> --all`, `agentctl send <child> \"text\" --enter`,
+#   `agentctl send <child> --key enter`, and `agentctl stop <child>` to inspect
+#   and control direct child agents.
+# - Subagent names are scoped to the parent that created them; duplicate names
+#   may exist elsewhere in the tree.
+#
+# Container lifecycle:
+# - Use `killme` only when the user explicitly asks you to end this container.
 # \"\"\"
 #
 # ── Hostdo (host-side command execution) ─────────────────────────────────────
@@ -600,6 +679,15 @@ const RULES_FILE_HEADER: &str = "\
 #   build = { cmd = \"cargo build --release\", cwd = \"$WORKSPACE\" }
 #
 # $WORKSPACE = workspace path on the host.
+#
+# ── Agentctl helper defaults ────────────────────────────────────────────────
+#
+# `agentctl spawn` and `spawn-many` read this value from the workspace rules file
+# when `--delay-ms` is omitted. The effective delay is clamped to at least 100ms.
+# `max_subagents` limits live descendants under a single top-level agent.
+#   [agentctl]
+#   spawn_delay_ms = 500
+#   max_subagents = 10
 
 # ── Network (HTTP/HTTPS proxy policy) ────────────────────────────────────────
 #

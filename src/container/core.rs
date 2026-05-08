@@ -2,6 +2,7 @@ use alacritty_terminal::event::{Event, EventListener, Notify, OnResize, WindowSi
 use alacritty_terminal::event_loop::Msg;
 use alacritty_terminal::event_loop::Notifier;
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Term;
 /// Container session management.
@@ -15,22 +16,31 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 use std::time::Instant;
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
 
 use crate::config::{ContainerMount, MountMode};
 use crate::container::helpers::{blend_toward_bg, luma_u8, xterm_256_index_to_rgb};
 use tracing::instrument;
 
+const INPUT_ECHO_GRACE: Duration = Duration::from_millis(350);
+
 /// Live container session state and PTY plumbing for a launched container.
 pub struct ContainerSession {
     pub container_name: String,
+    pub agent_kind: crate::config::AgentKind,
     pub container_id: String,
     pub docker_name: String,
     pub project: String,
     pub session_token: String,
+    pub parent_session_token: Option<String>,
+    pub subagent_name: Option<String>,
     pub mount_target: String,
     pub launched_at: Instant,
+    pub terminal_snapshot_hash: u64,
+    pub terminal_changed_at: Instant,
+    pub last_input_at: Arc<Mutex<Option<Instant>>>,
     pub term: Arc<FairMutex<Term<SessionEventProxy>>>,
     pub(crate) notifier: Notifier,
     pub(crate) window_size: Arc<Mutex<WindowSize>>,
@@ -41,6 +51,7 @@ pub struct ContainerSession {
     pub(crate) _cred_tempfile: Option<NamedTempFile>,
     pub(crate) _env_tempfile: Option<NamedTempFile>,
     pub(crate) _hostdo_tempfile: Option<NamedTempFile>,
+    pub(crate) _agent_config_tempdir: Option<TempDir>,
 }
 
 /// Event sink that keeps the Alacritty-backed PTY state synchronized with the
@@ -163,7 +174,64 @@ impl ContainerSession {
     }
     /// Sends input bytes to the container's PTY, mimicking user input.
     pub fn send_input(&self, bytes: Vec<u8>) {
+        if let Ok(mut last_input_at) = self.last_input_at.lock() {
+            *last_input_at = Some(Instant::now());
+        }
         self.notifier.notify(bytes);
+    }
+
+    pub fn is_subagent(&self) -> bool {
+        self.parent_session_token.is_some()
+    }
+
+    pub fn display_name(&self) -> &str {
+        self.subagent_name
+            .as_deref()
+            .unwrap_or(self.container_name.as_str())
+    }
+
+    pub fn terminal_stable_for(&self) -> Duration {
+        self.terminal_changed_at.elapsed()
+    }
+
+    pub fn refresh_terminal_snapshot(&mut self) {
+        let hash = self.terminal_visible_hash();
+        if hash != self.terminal_snapshot_hash {
+            self.terminal_snapshot_hash = hash;
+            if !self.recent_input_may_have_echoed() {
+                self.terminal_changed_at = Instant::now();
+            }
+        }
+    }
+
+    pub fn terminal_bottom_lines(&self, rows: usize) -> Vec<String> {
+        let term = self.term.lock();
+        terminal_bottom_lines(&*term, rows)
+    }
+
+    pub fn terminal_visible_rows(&self) -> usize {
+        self.term.lock().screen_lines()
+    }
+
+    pub fn terminal_total_rows(&self) -> usize {
+        self.term.lock().total_lines()
+    }
+
+    fn terminal_visible_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let lines = {
+            let term = self.term.lock();
+            terminal_bottom_lines(&*term, term.screen_lines())
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        lines.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn recent_input_may_have_echoed(&self) -> bool {
+        let last_input_at = self.last_input_at.lock().ok().and_then(|last| *last);
+        recent_input_may_have_echoed(last_input_at, Instant::now())
     }
 
     /// Forcibly terminates the Docker container associated with this session.
@@ -216,8 +284,53 @@ impl ContainerSession {
 
     /// Generates a human-readable label for the TUI tab, combining container and project names.
     pub fn tab_label(&self) -> String {
-        format!("{} @ {}", self.container_name, self.project)
+        format!("{} @ {}", self.display_name(), self.project)
     }
+}
+
+fn recent_input_may_have_echoed(last_input_at: Option<Instant>, now: Instant) -> bool {
+    last_input_at.is_some_and(|last_input_at| now.duration_since(last_input_at) <= INPUT_ECHO_GRACE)
+}
+
+fn terminal_bottom_lines<T: EventListener>(term: &Term<T>, rows: usize) -> Vec<String> {
+    let total_rows = term.total_lines();
+    if total_rows == 0 || term.columns() == 0 {
+        return Vec::new();
+    }
+    let rows = if rows == 0 {
+        total_rows
+    } else {
+        rows.min(total_rows).max(1)
+    };
+    let cols = term.columns();
+    let bottom = term.bottommost_line().0;
+    let start = bottom - rows as i32 + 1;
+    let grid = term.grid();
+
+    (start..=bottom)
+        .map(|line| {
+            let mut out = String::with_capacity(cols);
+            for col in 0..cols {
+                let cell = &grid[Point::new(Line(line), Column(col))];
+                if cell
+                    .flags
+                    .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                let ch = if cell
+                    .flags
+                    .contains(alacritty_terminal::term::cell::Flags::HIDDEN)
+                {
+                    ' '
+                } else {
+                    cell.c
+                };
+                out.push(ch);
+            }
+            out.trim_end().to_string()
+        })
+        .collect()
 }
 
 /// Rewrites loopback addresses (127.0.0.1, localhost, 0.0.0.0) to `host.docker.internal`
@@ -298,6 +411,14 @@ pub(crate) fn find_gemini_home_container_path(mounts: &[ContainerMount]) -> Opti
     })
 }
 
+pub(crate) fn find_gemini_home_mount(mounts: &[ContainerMount]) -> Option<(&Path, &MountMode)> {
+    mounts.iter().find_map(|mount| {
+        (mount.container == PathBuf::from("/home/ubuntu/.gemini")
+            || mount.container == PathBuf::from("/root/.gemini"))
+        .then_some((mount.host.as_path(), &mount.mode))
+    })
+}
+
 pub(crate) fn mounts_include_gemini_session_state(mounts: &[ContainerMount]) -> bool {
     mounts.iter().any(|mount| {
         let container = mount.container.to_string_lossy();
@@ -323,11 +444,33 @@ pub(crate) fn append_gemini_home_args(
     Ok(())
 }
 
+pub(crate) fn append_missing_gemini_home_mount_args(
+    docker_args: &mut Vec<String>,
+    mounts: &[ContainerMount],
+    host_path: &Path,
+    mode: &MountMode,
+) {
+    for container_path in ["/home/ubuntu/.gemini", "/root/.gemini"] {
+        let target = PathBuf::from(container_path);
+        if mounts.iter().any(|mount| mount.container == target) {
+            continue;
+        }
+        docker_args.push("-v".to_string());
+        docker_args.push(format!(
+            "{}:{container_path}:{}",
+            host_path.display(),
+            mount_mode_arg(mode)
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::append_gemini_home_args;
+    use super::{append_gemini_home_args, append_missing_gemini_home_mount_args};
+    use crate::config::{ContainerMount, MountMode};
     use alacritty_terminal::event::{Event, EventListener, WindowSize};
     use alacritty_terminal::vte::ansi::Rgb;
+    use std::path::PathBuf;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -357,6 +500,49 @@ mod tests {
                 .any(|m| m.ends_with(":/home/ubuntu/.gemini:rw"))
         );
         assert!(mounts.iter().any(|m| m.ends_with(":/root/.gemini:rw")));
+    }
+
+    #[test]
+    fn missing_gemini_home_mount_args_mirror_existing_home_mount_to_root() {
+        let host = PathBuf::from("/host/.gemini");
+        let configured_mounts = vec![ContainerMount {
+            host: host.clone(),
+            container: PathBuf::from("/home/ubuntu/.gemini"),
+            mode: MountMode::Rw,
+        }];
+        let mut args = Vec::new();
+
+        append_missing_gemini_home_mount_args(&mut args, &configured_mounts, &host, &MountMode::Rw);
+
+        assert_eq!(
+            args,
+            vec![
+                "-v".to_string(),
+                "/host/.gemini:/root/.gemini:rw".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_gemini_home_mount_args_do_not_duplicate_existing_targets() {
+        let host = PathBuf::from("/host/.gemini");
+        let configured_mounts = vec![
+            ContainerMount {
+                host: host.clone(),
+                container: PathBuf::from("/home/ubuntu/.gemini"),
+                mode: MountMode::Rw,
+            },
+            ContainerMount {
+                host: host.clone(),
+                container: PathBuf::from("/root/.gemini"),
+                mode: MountMode::Rw,
+            },
+        ];
+        let mut args = Vec::new();
+
+        append_missing_gemini_home_mount_args(&mut args, &configured_mounts, &host, &MountMode::Rw);
+
+        assert!(args.is_empty());
     }
 
     #[test]
@@ -421,6 +607,72 @@ mod tests {
         assert!(!has_bell.load(Ordering::Relaxed));
         proxy.send_event(Event::Bell);
         assert!(has_bell.load(Ordering::Relaxed));
+    }
+
+    #[derive(Clone)]
+    struct NoopListener;
+
+    impl EventListener for NoopListener {
+        fn send_event(&self, _event: Event) {}
+    }
+
+    fn test_term(
+        cols: usize,
+        lines: usize,
+        history: usize,
+    ) -> alacritty_terminal::term::Term<NoopListener> {
+        let mut term_cfg = alacritty_terminal::term::Config::default();
+        term_cfg.scrolling_history = history;
+        alacritty_terminal::term::Term::new(
+            term_cfg,
+            &super::TermSize { cols, lines },
+            NoopListener,
+        )
+    }
+
+    fn write_to_term(term: &mut alacritty_terminal::term::Term<NoopListener>, bytes: &[u8]) {
+        let mut parser = alacritty_terminal::vte::ansi::Processor::<
+            alacritty_terminal::vte::ansi::StdSyncHandler,
+        >::new();
+        parser.advance(term, bytes);
+    }
+
+    #[test]
+    fn terminal_bottom_lines_can_include_scrollback() {
+        let mut term = test_term(12, 3, 10);
+        write_to_term(&mut term, b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+
+        assert_eq!(
+            super::terminal_bottom_lines(&term, 5),
+            vec!["one", "two", "three", "four", "five"]
+        );
+    }
+
+    #[test]
+    fn terminal_bottom_lines_zero_requests_available_buffer() {
+        let mut term = test_term(12, 3, 10);
+        write_to_term(&mut term, b"one\r\ntwo\r\nthree\r\nfour");
+
+        assert_eq!(
+            super::terminal_bottom_lines(&term, 0),
+            vec!["one", "two", "three", "four"]
+        );
+    }
+
+    #[test]
+    fn recent_input_echo_window_is_short_lived() {
+        let now = std::time::Instant::now();
+
+        assert!(super::recent_input_may_have_echoed(Some(now), now));
+        assert!(super::recent_input_may_have_echoed(
+            Some(now - super::INPUT_ECHO_GRACE),
+            now,
+        ));
+        assert!(!super::recent_input_may_have_echoed(
+            Some(now - super::INPUT_ECHO_GRACE - std::time::Duration::from_millis(1)),
+            now,
+        ));
+        assert!(!super::recent_input_may_have_echoed(None, now));
     }
 }
 

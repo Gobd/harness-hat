@@ -134,6 +134,7 @@ image = "missing-image"
 
     let (_exec_tx, exec_rx) = mpsc::channel(8);
     let (_stop_tx, stop_rx) = mpsc::channel(8);
+    let (_agent_tx, agent_rx) = mpsc::channel(8);
     let (net_tx, net_rx) = mpsc::channel(8);
     let (activity_tx, activity_rx) = mpsc::unbounded_channel();
     let (_audit_tx, audit_rx) = mpsc::channel(8);
@@ -150,6 +151,7 @@ image = "missing-image"
         crate::server::SessionRegistry::default(),
         exec_rx,
         stop_rx,
+        agent_rx,
         net_rx,
         activity_rx,
         audit_rx,
@@ -511,6 +513,44 @@ fn activity_container_identity_matching_accepts_id_prefixes_and_names() {
 }
 
 #[test]
+fn network_activity_session_token_prevents_shared_container_name_bleed() {
+    let mut first = Activity::new(
+        "project-a".to_string(),
+        Some("codex".to_string()),
+        ActivityKind::Network {
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            path: "/".to_string(),
+            protocol: "https".to_string(),
+            payload_preview: String::new(),
+            payload_truncated: false,
+            content_type: None,
+            content_length: None,
+        },
+        ActivityState::Forwarding,
+        Arc::new(AtomicBool::new(false)),
+    );
+    first.session_token = Some("session-a".to_string());
+
+    assert!(App::activity_matches_session_identity(
+        &first,
+        "project-a",
+        "session-a",
+        "container-a",
+        "codex",
+        "harness-codex-a",
+    ));
+    assert!(!App::activity_matches_session_identity(
+        &first,
+        "project-a",
+        "session-b",
+        "container-b",
+        "codex",
+        "harness-codex-b",
+    ));
+}
+
+#[test]
 fn terminal_activities_wait_to_fade_until_unselected() {
     let mut app = build_test_app();
     let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -746,6 +786,17 @@ fn escape_returns_terminal_to_sidebar_without_quitting() {
     app.handle_terminal_key(key(KeyCode::Esc, KeyModifiers::NONE));
     assert!(!app.should_quit);
     assert_eq!(app.focus, Focus::Sidebar);
+}
+
+#[test]
+fn repeated_ctrl_c_does_not_quit_manager() {
+    let mut app = build_test_app();
+
+    for _ in 0..8 {
+        app.handle_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    }
+
+    assert!(!app.should_quit);
 }
 
 #[test]

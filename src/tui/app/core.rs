@@ -97,6 +97,7 @@ impl App {
         session_registry: SessionRegistry,
         exec_pending_rx: mpsc::Receiver<PendingItem>,
         stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
+        agent_control_rx: mpsc::Receiver<AgentControlRequest>,
         net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
         activity_rx: mpsc::UnboundedReceiver<ActivityEvent>,
         audit_rx: mpsc::Receiver<AuditEntry>,
@@ -206,6 +207,11 @@ impl App {
             base_rules_changed: None,
             exec_pending_rx,
             stop_pending_rx,
+            agent_control_rx,
+            pending_agent_sends: VecDeque::new(),
+            subagent_first_output_at: HashMap::new(),
+            ready_subagent_tokens: HashSet::new(),
+            last_agent_spawn_at: HashMap::new(),
             net_pending_rx,
             activity_rx,
             audit_rx,
@@ -217,7 +223,6 @@ impl App {
             passthrough_exit_code_slot: None,
             log_fullscreen: false,
             terminal_fullscreen: false,
-            ctrl_c_times: Vec::new(),
             last_terminal_esc: None,
             scroll_mode: false,
             scroll_mouse_passthrough: false,
@@ -327,13 +332,22 @@ impl App {
         let mut items = Vec::new();
         for (pi, proj) in cfg.workspaces.iter().enumerate() {
             items.push(SidebarItem::Workspace(pi));
+            let mut seen_sessions = std::collections::HashSet::new();
             for (si, session) in self.sessions.iter().enumerate() {
-                if session.project == proj.name {
-                    items.push(SidebarItem::Session(si));
-                    items.extend(Self::sidebar_activity_items_for_session(
-                        si,
-                        self.activities_for_session(si),
-                    ));
+                if session.project != proj.name || session.is_subagent() {
+                    continue;
+                }
+                self.append_session_tree_items(si, &mut items, &mut seen_sessions);
+            }
+            for (si, session) in self.sessions.iter().enumerate() {
+                if session.project == proj.name
+                    && session.is_subagent()
+                    && !seen_sessions.contains(&si)
+                    && !self.sessions.iter().any(|parent| {
+                        session.parent_session_token.as_deref() == Some(&parent.session_token)
+                    })
+                {
+                    self.append_session_tree_items(si, &mut items, &mut seen_sessions);
                 }
             }
             if self.build_project_idx == Some(pi) && self.build_is_running() {
@@ -344,6 +358,28 @@ impl App {
         }
         items.push(SidebarItem::NewWorkspace);
         items
+    }
+
+    fn append_session_tree_items(
+        &self,
+        session_idx: usize,
+        items: &mut Vec<SidebarItem>,
+        seen_sessions: &mut std::collections::HashSet<usize>,
+    ) {
+        if !seen_sessions.insert(session_idx) {
+            return;
+        }
+        items.push(SidebarItem::Session(session_idx));
+        items.extend(Self::sidebar_activity_items_for_session(
+            session_idx,
+            self.activities_for_session(session_idx),
+        ));
+        let Some(session) = self.sessions.get(session_idx) else {
+            return;
+        };
+        for child_idx in self.direct_children(&session.session_token) {
+            self.append_session_tree_items(child_idx, items, seen_sessions);
+        }
     }
 
     pub fn selected_project_idx(&self) -> Option<usize> {
@@ -402,10 +438,14 @@ impl App {
         self.activities
             .iter()
             .filter(|activity| {
-                activity.project == session.project
-                    && activity.container.as_deref().is_some_and(|container| {
-                        Self::container_matches_session(container, session)
-                    })
+                Self::activity_matches_session_identity(
+                    activity,
+                    &session.project,
+                    &session.session_token,
+                    &session.container_id,
+                    &session.container_name,
+                    &session.docker_name,
+                )
             })
             .collect()
     }
@@ -485,21 +525,15 @@ impl App {
     pub(crate) fn session_for_activity(&self, id: &str) -> Option<usize> {
         let activity = self.activity_by_id(id)?;
         self.sessions.iter().position(|session| {
-            activity.project == session.project
-                && activity
-                    .container
-                    .as_deref()
-                    .is_some_and(|container| Self::container_matches_session(container, session))
+            Self::activity_matches_session_identity(
+                activity,
+                &session.project,
+                &session.session_token,
+                &session.container_id,
+                &session.container_name,
+                &session.docker_name,
+            )
         })
-    }
-
-    fn container_matches_session(container: &str, session: &ContainerSession) -> bool {
-        Self::container_identity_matches(
-            container,
-            &session.container_id,
-            &session.container_name,
-            &session.docker_name,
-        )
     }
 
     pub(crate) fn container_identity_matches(
@@ -516,6 +550,25 @@ impl App {
                     || normalized.starts_with(container_id)))
                 || container_name == normalized
                 || docker_name == normalized)
+    }
+
+    pub(crate) fn activity_matches_session_identity(
+        activity: &Activity,
+        project: &str,
+        session_token: &str,
+        container_id: &str,
+        container_name: &str,
+        docker_name: &str,
+    ) -> bool {
+        if activity.project != project {
+            return false;
+        }
+        if let Some(activity_session_token) = activity.session_token.as_deref() {
+            return !activity_session_token.is_empty() && activity_session_token == session_token;
+        }
+        activity.container.as_deref().is_some_and(|container| {
+            Self::container_identity_matches(container, container_id, container_name, docker_name)
+        })
     }
 
     pub(crate) fn apply_activity_event(&mut self, event: ActivityEvent) {
@@ -612,6 +665,7 @@ impl App {
             self.sessions.get(si).map(|session| {
                 (
                     session.project.clone(),
+                    session.session_token.clone(),
                     session.container_id.clone(),
                     session.container_name.clone(),
                     session.docker_name.clone(),
@@ -625,19 +679,18 @@ impl App {
             }
             let selected_by_network_group = if let (
                 crate::activity::ActivityKind::Network { .. },
-                Some((project, container_id, container_name, docker_name)),
+                Some((project, session_token, container_id, container_name, docker_name)),
             ) =
                 (&activity.kind, selected_network_identity.as_ref())
             {
-                activity.project == *project
-                    && activity.container.as_deref().is_some_and(|container| {
-                        Self::container_identity_matches(
-                            container,
-                            container_id,
-                            container_name,
-                            docker_name,
-                        )
-                    })
+                Self::activity_matches_session_identity(
+                    activity,
+                    project,
+                    session_token,
+                    container_id,
+                    container_name,
+                    docker_name,
+                )
             } else {
                 false
             };
@@ -690,19 +743,93 @@ impl App {
         if idx >= self.sessions.len() {
             return;
         }
-        if let Some(tok) = self.sessions.get(idx).map(|s| s.session_token.clone()) {
-            self.session_registry.remove(&tok);
-        }
-        if let Some(session) = self.sessions.get(idx) {
-            if !session.is_exited() {
-                session.terminate();
+
+        let mut indices = self.session_tree_indices(idx);
+        indices.sort_unstable();
+        let tokens = indices
+            .iter()
+            .filter_map(|idx| {
+                self.sessions
+                    .get(*idx)
+                    .map(|session| session.session_token.clone())
+            })
+            .collect::<std::collections::HashSet<_>>();
+        self.fail_pending_agent_sends_for_sessions(&tokens);
+
+        for remove_idx in indices.into_iter().rev() {
+            if let Some(tok) = self
+                .sessions
+                .get(remove_idx)
+                .map(|s| s.session_token.clone())
+            {
+                self.session_registry.remove(&tok);
+                self.subagent_first_output_at.remove(&tok);
+                self.ready_subagent_tokens.remove(&tok);
             }
+            if let Some(session) = self.sessions.get(remove_idx) {
+                if !session.is_exited() {
+                    session.terminate();
+                }
+            }
+            self.sessions.remove(remove_idx);
+            self.remap_session_indices_after_removal(remove_idx);
         }
-        self.sessions.remove(idx);
-        self.remap_session_indices_after_removal(idx);
+
         let items = self.sidebar_items();
         if self.sidebar_idx >= items.len() {
             self.sidebar_idx = items.len().saturating_sub(1);
+        }
+    }
+
+    fn session_tree_indices(&self, idx: usize) -> Vec<usize> {
+        let mut indices = Vec::new();
+        self.collect_session_tree_indices(idx, &mut indices);
+        indices
+    }
+
+    fn collect_session_tree_indices(&self, idx: usize, indices: &mut Vec<usize>) {
+        if idx >= self.sessions.len() || indices.contains(&idx) {
+            return;
+        }
+        indices.push(idx);
+        let token = self.sessions[idx].session_token.clone();
+        for child_idx in self.direct_children(&token) {
+            self.collect_session_tree_indices(child_idx, indices);
+        }
+    }
+
+    fn fail_pending_agent_sends_for_sessions(
+        &mut self,
+        tokens: &std::collections::HashSet<String>,
+    ) {
+        let mut i = 0;
+        while i < self.pending_agent_sends.len() {
+            if tokens.contains(&self.pending_agent_sends[i].session_token) {
+                if let Some(pending) = self.pending_agent_sends.remove(i) {
+                    let _ = pending
+                        .response_tx
+                        .send(Err("subagent is no longer running".to_string()));
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    pub(crate) fn mark_session_stopped(&mut self, idx: usize) {
+        if idx >= self.sessions.len() {
+            return;
+        }
+        for idx in self.session_tree_indices(idx) {
+            let Some(session) = self.sessions.get(idx) else {
+                continue;
+            };
+            if !session.is_exited() {
+                session.terminate();
+            }
+            session
+                .exited
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -792,10 +919,7 @@ impl App {
         }
 
         self.push_log(format!("killme requested for '{}'", label), false);
-        self.sessions[idx].terminate();
-        self.sessions[idx]
-            .exited
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.mark_session_stopped(idx);
         if self.active_session == Some(idx) {
             self.active_session = None;
             self.focus = Focus::Sidebar;

@@ -779,32 +779,6 @@ pub(crate) fn render_terminal_fullscreen_header(
     );
 }
 
-pub(crate) fn render_terminal_title_hint(frame: &mut Frame, area: Rect, in_scroll_mode: bool) {
-    if area.width <= 2 || area.height == 0 {
-        return;
-    }
-    let hint = if in_scroll_mode {
-        "[Esc/q] exit scroll"
-    } else {
-        "[^S] scroll  [Esc/^B] sidebar"
-    };
-    let hint_style = if in_scroll_mode {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let hint_area = Rect::new(
-        area.x.saturating_add(1),
-        area.y,
-        area.width.saturating_sub(2),
-        1,
-    );
-    frame.render_widget(
-        Paragraph::new(Span::styled(hint, hint_style)).alignment(Alignment::Right),
-        hint_area,
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -15,9 +15,13 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::instrument;
 
 use crate::activity::ActivityEvent;
-use crate::config::AliasValue;
+use crate::config::{AgentKind, AliasValue};
 use crate::shared_config::SharedConfig;
 use crate::state::{AuditEntry, StateManager};
+
+pub const AGENT_CONTROL_CHANNEL_CAPACITY: usize = 65_536;
+const AGENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(900);
+const AGENT_SEND_MANY_LIMIT: usize = 4096;
 
 /// A command request waiting for developer approval in the TUI.
 pub struct PendingItem {
@@ -142,6 +146,160 @@ pub struct StopResponse {
     pub ok: bool,
 }
 
+/// Request payload accepted by the subagent spawn endpoint.
+#[derive(Debug, Deserialize)]
+pub struct AgentSpawnRequest {
+    pub agent: AgentKind,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub codex_connectors_token: Option<String>,
+}
+
+/// Request payload accepted by the subagent send endpoint.
+#[derive(Debug, Deserialize)]
+pub struct AgentSendRequest {
+    pub input: String,
+}
+
+/// Request payload accepted by the batched subagent send endpoint.
+#[derive(Debug, Deserialize)]
+pub struct AgentSendManyRequest {
+    pub items: Vec<AgentSendManyItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentSendManyItem {
+    pub child: String,
+    pub input: String,
+}
+
+/// Response payload returned for a spawned subagent.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentSpawnResponse {
+    pub id: String,
+    pub name: String,
+    pub agent: AgentKind,
+    pub container_id: String,
+}
+
+/// Terminal-settled state exposed to parent agents.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTerminalState {
+    Launching,
+    Working,
+    Waiting,
+    Exited,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMcpStartupState {
+    Pending,
+    Clean,
+    Failed,
+    DiagnosticTimeout,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentDiagnostic {
+    pub source: String,
+    pub kind: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentMcpDiagnostics {
+    pub state: AgentMcpStartupState,
+    pub elapsed_ms: u128,
+    pub diagnostic_timeout_ms: u128,
+    pub diagnostics: Vec<AgentDiagnostic>,
+}
+
+/// Response payload returned by the subagent status endpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentStatusResponse {
+    pub id: String,
+    pub name: String,
+    pub agent: AgentKind,
+    pub state: AgentTerminalState,
+    pub stable_for_ms: u128,
+    pub rows: usize,
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<AgentMcpDiagnostics>,
+}
+
+/// Response payload returned by the subagent tail endpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTailResponse {
+    pub id: String,
+    pub available_rows: usize,
+    pub rows: Vec<String>,
+}
+
+/// Response payload returned by the subagent send/stop endpoints.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentOkResponse {
+    pub ok: bool,
+}
+
+/// Response payload returned by batched subagent operations.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentBatchResponse {
+    pub ok: bool,
+    pub results: Vec<AgentBatchItemResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentBatchItemResponse {
+    pub child: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Internal control requests handled by the TUI, which owns live PTYs.
+pub enum AgentControlRequest {
+    Spawn {
+        parent_session_token: String,
+        project: String,
+        agent: AgentKind,
+        name: Option<String>,
+        codex_connectors_token: Option<String>,
+        response_tx: oneshot::Sender<Result<AgentSpawnResponse, String>>,
+    },
+    Status {
+        parent_session_token: String,
+        child: String,
+        include_log_diagnostics: bool,
+        response_tx: oneshot::Sender<Result<AgentStatusResponse, String>>,
+    },
+    Tail {
+        parent_session_token: String,
+        child: String,
+        rows: usize,
+        response_tx: oneshot::Sender<Result<AgentTailResponse, String>>,
+    },
+    Send {
+        parent_session_token: String,
+        child: String,
+        input: String,
+        response_tx: oneshot::Sender<Result<AgentOkResponse, String>>,
+    },
+    SendMany {
+        parent_session_token: String,
+        items: Vec<AgentSendManyItem>,
+        response_tx: oneshot::Sender<Result<AgentBatchResponse, String>>,
+    },
+    Stop {
+        parent_session_token: String,
+        child: String,
+        response_tx: oneshot::Sender<Result<AgentOkResponse, String>>,
+    },
+}
+
 // ── Server state ─────────────────────────────────────────────────────────────
 
 /// Represents the identity of a running container session.
@@ -196,6 +354,8 @@ pub struct ServerState {
     pub pending_tx: mpsc::Sender<PendingItem>,
     /// Channel to send `ContainerStopItem`s to the TUI to handle container termination.
     pub stop_tx: mpsc::Sender<ContainerStopItem>,
+    /// Channel to send subagent control requests to the TUI, which owns PTYs.
+    pub agent_tx: mpsc::Sender<AgentControlRequest>,
     /// Channel to send `AuditEntry` events for logging and display in the TUI.
     pub audit_tx: mpsc::Sender<AuditEntry>,
     /// The secret token used for authenticating requests from containers.
@@ -271,6 +431,12 @@ pub async fn run_with_listener(
         .route("/exec", post(super::core::exec_handler))
         .route("/exec/jobs/:job_id", get(exec_job_handler))
         .route("/container/stop", post(stop_handler))
+        .route("/agents/spawn", post(agent_spawn_handler))
+        .route("/agents/:child/status", get(agent_status_handler))
+        .route("/agents/:child/tail", get(agent_tail_handler))
+        .route("/agents/:child/send", post(agent_send_handler))
+        .route("/agents/send_many", post(agent_send_many_handler))
+        .route("/agents/:child/stop", post(agent_stop_handler))
         .with_state(Arc::new(server_state));
 
     axum::serve(listener, router).await?;
@@ -356,6 +522,222 @@ pub(super) async fn stop_handler(
     }
 }
 
+pub(super) async fn agent_spawn_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<AgentSpawnRequest>,
+) -> Response {
+    let (parent_session_token, identity) = match require_session_context(&state, &headers) {
+        Ok(ctx) => ctx,
+        Err(resp) => return resp,
+    };
+
+    if req.agent == AgentKind::None {
+        return deny("agent must be claude, gemini, opencode, or codex".into());
+    }
+
+    let (response_tx, response_rx) = oneshot::channel();
+    let item = AgentControlRequest::Spawn {
+        parent_session_token,
+        project: identity.project,
+        agent: req.agent,
+        name: req.name,
+        codex_connectors_token: req.codex_connectors_token,
+        response_tx,
+    };
+    dispatch_agent_request(&state, item, response_rx).await
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct AgentStatusQuery {
+    #[serde(default)]
+    pub diagnostics: Option<String>,
+}
+
+impl AgentStatusQuery {
+    fn include_log_diagnostics(&self) -> bool {
+        matches!(self.diagnostics.as_deref(), Some("full" | "logs" | "log"))
+    }
+}
+
+pub(super) async fn agent_status_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(child): AxumPath<String>,
+    Query(query): Query<AgentStatusQuery>,
+) -> Response {
+    let (parent_session_token, _identity) = match require_session_context(&state, &headers) {
+        Ok(ctx) => ctx,
+        Err(resp) => return resp,
+    };
+
+    let (response_tx, response_rx) = oneshot::channel();
+    let item = AgentControlRequest::Status {
+        parent_session_token,
+        child,
+        include_log_diagnostics: query.include_log_diagnostics(),
+        response_tx,
+    };
+    dispatch_agent_request(&state, item, response_rx).await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentTailQuery {
+    #[serde(default)]
+    pub rows: Option<usize>,
+}
+
+pub(super) async fn agent_tail_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(child): AxumPath<String>,
+    Query(query): Query<AgentTailQuery>,
+) -> Response {
+    let (parent_session_token, _identity) = match require_session_context(&state, &headers) {
+        Ok(ctx) => ctx,
+        Err(resp) => return resp,
+    };
+
+    let rows = query.rows.unwrap_or(24);
+    let (response_tx, response_rx) = oneshot::channel();
+    let item = AgentControlRequest::Tail {
+        parent_session_token,
+        child,
+        rows,
+        response_tx,
+    };
+    dispatch_agent_request(&state, item, response_rx).await
+}
+
+pub(super) async fn agent_send_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(child): AxumPath<String>,
+    Json(req): Json<AgentSendRequest>,
+) -> Response {
+    let (parent_session_token, _identity) = match require_session_context(&state, &headers) {
+        Ok(ctx) => ctx,
+        Err(resp) => return resp,
+    };
+
+    let (response_tx, response_rx) = oneshot::channel();
+    let item = AgentControlRequest::Send {
+        parent_session_token,
+        child,
+        input: req.input,
+        response_tx,
+    };
+    dispatch_agent_request(&state, item, response_rx).await
+}
+
+pub(super) async fn agent_send_many_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<AgentSendManyRequest>,
+) -> Response {
+    let (parent_session_token, _identity) = match require_session_context(&state, &headers) {
+        Ok(ctx) => ctx,
+        Err(resp) => return resp,
+    };
+
+    if req.items.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "empty_items".into(),
+                reason: "send_many requires at least one item".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    if req.items.len() > AGENT_SEND_MANY_LIMIT {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ErrorResponse {
+                error: "too_many_items".into(),
+                reason: format!(
+                    "send_many accepts at most {AGENT_SEND_MANY_LIMIT} items per request"
+                ),
+            }),
+        )
+            .into_response();
+    }
+
+    let (response_tx, response_rx) = oneshot::channel();
+    let item = AgentControlRequest::SendMany {
+        parent_session_token,
+        items: req.items,
+        response_tx,
+    };
+    dispatch_agent_request(&state, item, response_rx).await
+}
+
+pub(super) async fn agent_stop_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(child): AxumPath<String>,
+) -> Response {
+    let (parent_session_token, _identity) = match require_session_context(&state, &headers) {
+        Ok(ctx) => ctx,
+        Err(resp) => return resp,
+    };
+
+    let (response_tx, response_rx) = oneshot::channel();
+    let item = AgentControlRequest::Stop {
+        parent_session_token,
+        child,
+        response_tx,
+    };
+    dispatch_agent_request(&state, item, response_rx).await
+}
+
+async fn dispatch_agent_request<T>(
+    state: &ServerState,
+    item: AgentControlRequest,
+    response_rx: oneshot::Receiver<Result<T, String>>,
+) -> Response
+where
+    T: Serialize,
+{
+    match state.agent_tx.try_send(item) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "manager_overloaded".into(),
+                    reason: "manager control queue is full; retry the request".into(),
+                }),
+            )
+                .into_response();
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "manager_shutting_down".into(),
+                    reason: "manager is shutting down".into(),
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    match tokio::time::timeout(AGENT_REQUEST_TIMEOUT, response_rx).await {
+        Ok(Ok(Ok(payload))) => Json(payload).into_response(),
+        Ok(Ok(Err(reason))) => deny(reason),
+        Ok(Err(_)) | Err(_) => (
+            StatusCode::REQUEST_TIMEOUT,
+            Json(ErrorResponse {
+                error: "timeout".into(),
+                reason: "timed out waiting for the subagent request".into(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 /// Creates a standard HTTP 403 Forbidden response with a JSON error payload.
 pub(super) fn deny(reason: String) -> Response {
     (
@@ -382,6 +764,14 @@ pub(super) fn require_session_identity(
     state: &ServerState,
     headers: &HeaderMap,
 ) -> Result<SessionIdentity, Response> {
+    require_session_context(state, headers).map(|(_, identity)| identity)
+}
+
+#[allow(clippy::result_large_err)]
+pub(super) fn require_session_context(
+    state: &ServerState,
+    headers: &HeaderMap,
+) -> Result<(String, SessionIdentity), Response> {
     // Extract and validate the Authorization header.
     let auth = headers
         .get("authorization")
@@ -417,7 +807,7 @@ pub(super) fn require_session_identity(
     }
 
     // Look up the session in the registry.
-    state.sessions.get(session_token).ok_or_else(|| {
+    let identity = state.sessions.get(session_token).ok_or_else(|| {
         (
             StatusCode::UNAUTHORIZED,
             Json(ErrorResponse {
@@ -426,7 +816,8 @@ pub(super) fn require_session_identity(
             }),
         )
             .into_response()
-    })
+    })?;
+    Ok((session_token.to_string(), identity))
 }
 
 /// Records an audit entry.
@@ -583,11 +974,12 @@ mod tests {
         confine_host_cwd_to_workspace, resolve_exec_argv_aliases, resolve_host_cwd,
         resolve_host_cwd_in_workspace,
     };
-    use crate::config::AliasValue;
+    use crate::config::{AgentKind, AliasValue};
     use crate::server::SessionRegistry;
     use crate::shared_config::SharedConfig;
     use crate::state::StateManager;
     use axum::{
+        Json,
         body::to_bytes,
         extract::{Path as AxumPath, State},
         http::{HeaderMap, StatusCode},
@@ -827,6 +1219,7 @@ mod tests {
             state: test_state_manager(),
             pending_tx: mpsc::channel(1).0,
             stop_tx: mpsc::channel(1).0,
+            agent_tx: mpsc::channel(1).0,
             audit_tx: mpsc::channel(1).0,
             token: "test_token".to_string(),
             sessions,
@@ -860,6 +1253,172 @@ mod tests {
         assert_eq!(updated.message, "done");
         assert_eq!(updated.exit_code, Some(0));
         assert_eq!(updated.stdout.as_deref(), Some("ok\n"));
+    }
+
+    #[test]
+    fn agent_terminal_state_serializes_launching() {
+        let value = serde_json::to_value(super::AgentTerminalState::Launching).unwrap();
+        assert_eq!(value, serde_json::json!("launching"));
+    }
+
+    #[tokio::test]
+    async fn agent_spawn_handler_dispatches_parent_scoped_request() {
+        let sessions = SessionRegistry::default();
+        sessions.insert(
+            "parent-session".to_string(),
+            super::SessionIdentity {
+                project: "workspace-a".to_string(),
+                container_id: "parent-container".to_string(),
+                mount_target: "/workspace".to_string(),
+            },
+        );
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+        let state = super::ServerState {
+            config: SharedConfig::new(Arc::new(crate::config::Config::default())),
+            state: test_state_manager(),
+            pending_tx: mpsc::channel(1).0,
+            stop_tx: mpsc::channel(1).0,
+            agent_tx,
+            audit_tx: mpsc::channel(1).0,
+            token: "test_token".to_string(),
+            sessions,
+            exec_jobs: super::ExecJobRegistry::default(),
+            activity_tx: mpsc::unbounded_channel().0,
+        };
+
+        let task = tokio::spawn(super::agent_spawn_handler(
+            State(Arc::new(state)),
+            auth_headers("test_token", "parent-session"),
+            Json(super::AgentSpawnRequest {
+                agent: AgentKind::Claude,
+                name: Some("reviewer".to_string()),
+                codex_connectors_token: None,
+            }),
+        ));
+
+        let request = agent_rx.recv().await.expect("agent request");
+        match request {
+            super::AgentControlRequest::Spawn {
+                parent_session_token,
+                project,
+                agent,
+                name,
+                codex_connectors_token,
+                response_tx,
+            } => {
+                assert_eq!(parent_session_token, "parent-session");
+                assert_eq!(project, "workspace-a");
+                assert_eq!(agent, AgentKind::Claude);
+                assert_eq!(name.as_deref(), Some("reviewer"));
+                assert_eq!(codex_connectors_token, None);
+                response_tx
+                    .send(Ok(super::AgentSpawnResponse {
+                        id: "child-session".to_string(),
+                        name: "reviewer".to_string(),
+                        agent: AgentKind::Claude,
+                        container_id: "child-container".to_string(),
+                    }))
+                    .unwrap();
+            }
+            _ => panic!("expected spawn request"),
+        }
+
+        let response = task.await.expect("handler task");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn agent_send_many_handler_rejects_empty_batches() {
+        let sessions = SessionRegistry::default();
+        sessions.insert(
+            "parent-session".to_string(),
+            super::SessionIdentity {
+                project: "workspace-a".to_string(),
+                container_id: "parent-container".to_string(),
+                mount_target: "/workspace".to_string(),
+            },
+        );
+        let state = server_state(sessions, super::ExecJobRegistry::default());
+
+        let response = super::agent_send_many_handler(
+            State(Arc::new(state)),
+            auth_headers("test_token", "parent-session"),
+            Json(super::AgentSendManyRequest { items: vec![] }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "empty_items");
+    }
+
+    #[tokio::test]
+    async fn agent_send_many_handler_dispatches_non_empty_batches() {
+        let sessions = SessionRegistry::default();
+        sessions.insert(
+            "parent-session".to_string(),
+            super::SessionIdentity {
+                project: "workspace-a".to_string(),
+                container_id: "parent-container".to_string(),
+                mount_target: "/workspace".to_string(),
+            },
+        );
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+        let state = super::ServerState {
+            config: SharedConfig::new(Arc::new(crate::config::Config::default())),
+            state: test_state_manager(),
+            pending_tx: mpsc::channel(1).0,
+            stop_tx: mpsc::channel(1).0,
+            agent_tx,
+            audit_tx: mpsc::channel(1).0,
+            token: "test_token".to_string(),
+            sessions,
+            exec_jobs: super::ExecJobRegistry::default(),
+            activity_tx: mpsc::unbounded_channel().0,
+        };
+
+        let task = tokio::spawn(super::agent_send_many_handler(
+            State(Arc::new(state)),
+            auth_headers("test_token", "parent-session"),
+            Json(super::AgentSendManyRequest {
+                items: vec![super::AgentSendManyItem {
+                    child: "child-a".to_string(),
+                    input: "hello".to_string(),
+                }],
+            }),
+        ));
+
+        let request = agent_rx.recv().await.expect("agent request");
+        match request {
+            super::AgentControlRequest::SendMany {
+                parent_session_token,
+                items,
+                response_tx,
+            } => {
+                assert_eq!(parent_session_token, "parent-session");
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].child, "child-a");
+                assert_eq!(items[0].input, "hello");
+                response_tx
+                    .send(Ok(super::AgentBatchResponse {
+                        ok: true,
+                        results: vec![super::AgentBatchItemResponse {
+                            child: "child-a".to_string(),
+                            ok: true,
+                            reason: None,
+                        }],
+                    }))
+                    .unwrap();
+            }
+            _ => panic!("expected send_many request"),
+        }
+
+        let response = task.await.expect("handler task");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["results"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -939,6 +1498,7 @@ mod tests {
             state: test_state_manager(),
             pending_tx: mpsc::channel(1).0,
             stop_tx: mpsc::channel(1).0,
+            agent_tx: mpsc::channel(1).0,
             audit_tx: mpsc::channel(1).0,
             token: "test_token".to_string(),
             sessions: SessionRegistry::default(),
@@ -960,6 +1520,7 @@ mod tests {
             state: test_state_manager(),
             pending_tx: mpsc::channel(1).0,
             stop_tx: mpsc::channel(1).0,
+            agent_tx: mpsc::channel(1).0,
             audit_tx: mpsc::channel(1).0,
             token: "valid_token".to_string(),
             sessions: SessionRegistry::default(),
@@ -986,6 +1547,7 @@ mod tests {
             state: test_state_manager(),
             pending_tx: mpsc::channel(1).0,
             stop_tx: mpsc::channel(1).0,
+            agent_tx: mpsc::channel(1).0,
             audit_tx: mpsc::channel(1).0,
             token: "test_token".to_string(),
             sessions: SessionRegistry::default(),
@@ -1008,6 +1570,7 @@ mod tests {
             state: test_state_manager(),
             pending_tx: mpsc::channel(1).0,
             stop_tx: mpsc::channel(1).0,
+            agent_tx: mpsc::channel(1).0,
             audit_tx: mpsc::channel(1).0,
             token: "test_token".to_string(),
             sessions: SessionRegistry::default(),
@@ -1043,6 +1606,7 @@ mod tests {
             state: test_state_manager(),
             pending_tx: mpsc::channel(1).0,
             stop_tx: mpsc::channel(1).0,
+            agent_tx: mpsc::channel(1).0,
             audit_tx: mpsc::channel(1).0,
             token: "test_token".to_string(),
             sessions,

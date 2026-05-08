@@ -9,10 +9,12 @@
 /// Network policy (auto/prompt/deny) is determined by matching the composed
 /// rules against method + host + path of each request.
 use anyhow::Result;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 
@@ -23,8 +25,9 @@ use crate::ca::CaStore;
 use crate::config;
 use crate::proxy::connect::{handle_connect, parse_sni_from_tls_client_hello};
 use crate::proxy::helpers::{
-    connect_public_tcp, container_tls_passthrough_matches, ensure_host_header_matches_target,
-    format_byte_count, is_expected_disconnect, resolve_public_addrs, write_error_any,
+    connect_public_tcp_with_priority, container_tls_passthrough_match,
+    ensure_host_header_matches_target, format_byte_count, is_expected_disconnect,
+    resolve_public_addrs_with_priority, write_error_any,
 };
 use crate::proxy::http::{
     forward_request_with_activity, handle_plain_http, parse_request_line_and_headers,
@@ -33,6 +36,14 @@ use crate::proxy::http::{
 use crate::rules::NetworkPolicy;
 use crate::shared_config::SharedConfig;
 use tracing::instrument;
+
+const FIRST_BYTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const ROOT_PROXY_CONNECTION_LIMIT: usize = 256;
+const SCOPED_PROXY_CONNECTION_LIMIT: usize = 128;
+const SCOPED_PROXY_TOTAL_CONNECTION_LIMIT: usize = 192;
+const SCOPED_PROXY_SUBAGENT_CONNECTION_LIMIT: usize = 64;
+const ROOT_SOURCE_PROXY_CONNECTION_LIMIT: usize = 32;
+const SUBAGENT_SOURCE_PROXY_CONNECTION_LIMIT: usize = 32;
 
 /// A network request waiting on the TUI for an allow/deny decision.
 pub struct PendingNetworkItem {
@@ -61,6 +72,14 @@ pub(crate) struct FixedSourceIdentity {
     pub(crate) project: String,
     pub(crate) container: String,
     pub(crate) auth_token: String,
+    pub(crate) limiter_key: String,
+    pub(crate) priority: SourcePriority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourcePriority {
+    Primary,
+    Subagent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +127,21 @@ pub struct ProxyState {
     pub pending_tx: mpsc::Sender<PendingNetworkItem>,
     pub activity_tx: mpsc::UnboundedSender<ActivityEvent>,
     pub(crate) fixed_source: Option<FixedSourceIdentity>,
+    connection_limiter: Arc<Semaphore>,
+    connection_limit: usize,
+    scoped_connection_limiter: Arc<Semaphore>,
+    scoped_subagent_connection_limiter: Arc<Semaphore>,
+    source_connection_limiters: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+}
+
+pub(crate) struct ProxyConnectionPermit {
+    _listener: Option<tokio::sync::OwnedSemaphorePermit>,
+    _scoped_total: Option<tokio::sync::OwnedSemaphorePermit>,
+    _scoped_subagent: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+pub(crate) struct SourceConnectionPermit {
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl ProxyState {
@@ -123,18 +157,136 @@ impl ProxyState {
             pending_tx,
             activity_tx,
             fixed_source: None,
+            connection_limiter: Arc::new(Semaphore::new(ROOT_PROXY_CONNECTION_LIMIT)),
+            connection_limit: ROOT_PROXY_CONNECTION_LIMIT,
+            scoped_connection_limiter: Arc::new(Semaphore::new(
+                SCOPED_PROXY_TOTAL_CONNECTION_LIMIT,
+            )),
+            scoped_subagent_connection_limiter: Arc::new(Semaphore::new(
+                SCOPED_PROXY_SUBAGENT_CONNECTION_LIMIT,
+            )),
+            source_connection_limiters: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
-    fn with_fixed_source(&self, project: &str, container: &str, auth_token: &str) -> Self {
+    pub(crate) fn with_fixed_source(
+        &self,
+        project: &str,
+        container: &str,
+        auth_token: &str,
+        priority: SourcePriority,
+    ) -> Self {
         let mut cloned = self.clone();
         cloned.fixed_source = Some(FixedSourceIdentity {
             project: project.to_string(),
             container: container.to_string(),
             auth_token: auth_token.to_string(),
+            limiter_key: auth_token.to_string(),
+            priority,
         });
+        cloned.connection_limiter = Arc::new(Semaphore::new(SCOPED_PROXY_CONNECTION_LIMIT));
+        cloned.connection_limit = SCOPED_PROXY_CONNECTION_LIMIT;
         cloned
     }
+
+    pub(crate) fn try_acquire_connection(&self) -> Option<ProxyConnectionPermit> {
+        let listener = if self.is_primary_source() {
+            None
+        } else {
+            Some(self.connection_limiter.clone().try_acquire_owned().ok()?)
+        };
+        let scoped_subagent = if self.is_subagent_source() {
+            Some(
+                self.scoped_subagent_connection_limiter
+                    .clone()
+                    .try_acquire_owned()
+                    .ok()?,
+            )
+        } else {
+            None
+        };
+        let scoped_total = if self.is_subagent_source() {
+            Some(
+                self.scoped_connection_limiter
+                    .clone()
+                    .try_acquire_owned()
+                    .ok()?,
+            )
+        } else {
+            None
+        };
+        Some(ProxyConnectionPermit {
+            _listener: listener,
+            _scoped_total: scoped_total,
+            _scoped_subagent: scoped_subagent,
+        })
+    }
+
+    pub(crate) fn try_acquire_source_connection(
+        &self,
+        source_project: Option<&str>,
+        source_container: Option<&str>,
+    ) -> Option<SourceConnectionPermit> {
+        if self.is_primary_source() {
+            return Some(SourceConnectionPermit { _permit: None });
+        }
+
+        let key = self
+            .fixed_source
+            .as_ref()
+            .map(|fixed| source_connection_key(Some(&fixed.project), Some(&fixed.limiter_key)))
+            .unwrap_or_else(|| source_connection_key(source_project, source_container));
+        let limiter = {
+            let mut limiters = self.source_connection_limiters.lock().ok()?;
+            limiters
+                .entry(key)
+                .or_insert_with(|| Arc::new(Semaphore::new(self.source_connection_limit())))
+                .clone()
+        };
+        Some(SourceConnectionPermit {
+            _permit: Some(limiter.try_acquire_owned().ok()?),
+        })
+    }
+
+    fn source_connection_limit(&self) -> usize {
+        match self.fixed_source.as_ref().map(|fixed| fixed.priority) {
+            Some(SourcePriority::Subagent) => SUBAGENT_SOURCE_PROXY_CONNECTION_LIMIT,
+            Some(SourcePriority::Primary) => usize::MAX,
+            None => ROOT_SOURCE_PROXY_CONNECTION_LIMIT,
+        }
+    }
+
+    fn is_primary_source(&self) -> bool {
+        self.fixed_source
+            .as_ref()
+            .is_some_and(|fixed| fixed.priority == SourcePriority::Primary)
+    }
+
+    fn is_subagent_source(&self) -> bool {
+        self.fixed_source
+            .as_ref()
+            .is_some_and(|fixed| fixed.priority == SourcePriority::Subagent)
+    }
+
+    pub(crate) async fn resolve_public_addrs(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Vec<std::net::SocketAddr>> {
+        resolve_public_addrs_with_priority(host, port, self.is_primary_source()).await
+    }
+
+    pub(crate) async fn connect_public_tcp(&self, host: &str, port: u16) -> Result<TcpStream> {
+        connect_public_tcp_with_priority(host, port, self.is_primary_source()).await
+    }
+}
+
+fn source_connection_key(source_project: Option<&str>, source_container: Option<&str>) -> String {
+    format!(
+        "{}\0{}",
+        source_project.unwrap_or("<unknown-project>"),
+        source_container.unwrap_or("<unknown-container>")
+    )
 }
 
 impl ProxyState {
@@ -160,7 +312,7 @@ impl ProxyState {
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
             .and_then(|(_, value)| value.trim().parse::<usize>().ok());
-        let activity = Activity::new(
+        let mut activity = Activity::new(
             source_project.unwrap_or_else(|| "unknown-workspace".to_string()),
             source_container,
             ActivityKind::Network {
@@ -176,6 +328,10 @@ impl ProxyState {
             state,
             cancel_flag,
         );
+        activity.session_token = self
+            .fixed_source
+            .as_ref()
+            .map(|source| source.auth_token.clone());
         let _ = self
             .activity_tx
             .send(ActivityEvent::Started(Box::new(activity.clone())));
@@ -251,18 +407,37 @@ pub async fn run(state: ProxyState, addr: String) -> Result<()> {
 
 #[instrument(skip(state, listener))]
 async fn run_with_listener(state: ProxyState, listener: TcpListener) -> Result<()> {
+    let mut tasks = JoinSet::new();
     loop {
-        let (stream, _peer) = listener.accept().await?;
-        let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, state).await {
-                if is_expected_disconnect(&e) {
-                    debug!("proxy: {e}");
-                } else {
-                    error!("proxy: {e}");
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (mut stream, _peer) = accepted?;
+                let Some(permit) = state.try_acquire_connection() else {
+                    warn!(
+                        limit = state.connection_limit,
+                        "proxy connection limit reached; rejecting connection"
+                    );
+                    let _ = write_error_any(&mut stream, 503, "Proxy connection limit reached").await;
+                    continue;
+                };
+                let state = state.clone();
+                tasks.spawn(async move {
+                    let _permit = permit;
+                    if let Err(e) = handle_connection(stream, state).await {
+                        if is_expected_disconnect(&e) {
+                            debug!("proxy: {e}");
+                        } else {
+                            error!("proxy: {e}");
+                        }
+                    }
+                });
+            }
+            joined = tasks.join_next(), if !tasks.is_empty() => {
+                if let Some(Err(e)) = joined {
+                    debug!("proxy connection task ended: {e}");
                 }
             }
-        });
+        }
     }
 }
 
@@ -274,6 +449,7 @@ pub fn spawn_scoped_listener(
     project: &str,
     container: &str,
     auth_token: &str,
+    priority: SourcePriority,
 ) -> Result<ScopedProxyListener> {
     let bind_addr = format!("{bind_host}:0");
     let std_listener = std::net::TcpListener::bind(&bind_addr)
@@ -284,7 +460,7 @@ pub fn spawn_scoped_listener(
     let local_addr = std_listener.local_addr()?;
     let listener = TcpListener::from_std(std_listener)?;
     let addr = format!("{}:{}", bind_host, local_addr.port());
-    let fixed_state = state.with_fixed_source(project, container, auth_token);
+    let fixed_state = state.with_fixed_source(project, container, auth_token, priority);
     let task = tokio::spawn(async move {
         if let Err(e) = run_with_listener(fixed_state, listener).await {
             error!("scoped proxy server error: {e}");
@@ -301,7 +477,9 @@ pub fn spawn_scoped_listener(
 
 async fn handle_connection(stream: TcpStream, state: ProxyState) -> Result<()> {
     let mut peek = [0u8; 8];
-    let n = stream.peek(&mut peek).await?;
+    let n = tokio::time::timeout(FIRST_BYTE_TIMEOUT, stream.peek(&mut peek))
+        .await
+        .map_err(|_| anyhow::anyhow!("proxy connection timed out waiting for first byte"))??;
 
     // Prefer explicit CONNECT first, then fall back to sniffing for raw TLS.
     // This lets the same listener handle both proxy-aware clients and clients
@@ -387,6 +565,11 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
         SourceIdentityStatus::MissingProxyAuthorization,
         false,
     );
+    let Some(_source_permit) =
+        state.try_acquire_source_connection(source_project.as_deref(), source_container.as_deref())
+    else {
+        return Ok(());
+    };
 
     let cfg = state.config.get();
 
@@ -423,7 +606,7 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
     };
     let preflight_policy = rules.match_connect(&host, 443);
     if preflight_policy != NetworkPolicy::Deny {
-        if let Err(e) = resolve_public_addrs(&host, 443).await {
+        if let Err(e) = state.resolve_public_addrs(&host, 443).await {
             state.activity_finished(
                 &connect_activity.id,
                 ActivityState::Denied,
@@ -470,15 +653,18 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
         return Ok(());
     }
 
-    if container_tls_passthrough_matches(&cfg, source_container.as_deref(), &host) {
+    if let Some(bypass_pattern) =
+        container_tls_passthrough_match(&cfg, source_container.as_deref(), &host)
+    {
         info!(
             host = %host,
+            bypass_pattern = %bypass_pattern,
             source_project = ?source_project,
             source_container = ?source_container,
             source_status = source_status.as_str(),
             "proxy transparent TLS passthrough"
         );
-        let mut upstream = connect_public_tcp(&host, 443).await.map_err(|e| {
+        let mut upstream = state.connect_public_tcp(&host, 443).await.map_err(|e| {
             anyhow::anyhow!("transparent passthrough connect to {host}:443 failed: {e}")
         })?;
         upstream.write_all(&prefix).await?;

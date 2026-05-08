@@ -7,6 +7,44 @@
 #
 # Preferred place for *human/LLM instructions*:
 # llm_instructions = """
+# Environment:
+# - You are operating inside a Linux Docker container managed by harness-hat.
+# - Your workspace is mounted into the container; edits usually persist to the host.
+# - Do not assume host tools, credentials, or services are directly available in the container.
+#
+# Host-side commands:
+# - Use `hostdo ...` when you need host-side build/package tooling such as cargo,
+#   npm, pnpm, yarn, go, make, pytest, or similar commands.
+# - Examples: `hostdo cargo test`, `hostdo npm install`, `hostdo go test ./...`.
+# - Only use `hostdo --image <docker-image> ...` when the user explicitly asks
+#   you to run against a Docker image or containerized runner.
+# - `hostdo --image` runs a command in a short-lived Docker runner instead of
+#   directly on the host.
+# - Examples: `hostdo --image node:20 npm test`,
+#   `hostdo --image rust:1.88 cargo test`.
+# - `hostdo` requests are policy checked against the `[hostdo]` rules below and may
+#   prompt the developer.
+#
+# Subagents:
+# - Use `agentctl spawn <agent> [--name <name>]` to start a same-workspace
+#   subagent, where `<agent>` is `claude`, `codex`, `gemini`, or `opencode`.
+# - Use `agentctl spawn-many <agent> <count> --prefix <name>` for larger
+#   batches; launches are paced by `[agentctl].spawn_delay_ms` and never below
+#   100ms between spawn requests.
+# - Codex subagent launches additionally wait for the previous Codex launch to
+#   fail MCP startup, clear MCP startup, sit waiting without MCP diagnostics for
+#   a short stable window, or reach the 35s diagnostic timeout.
+# - `[agentctl].max_subagents` caps live descendants under a single top-level
+#   agent, including subagents, sub-subagents, and deeper descendants.
+# - Use `agentctl status <child>`, `agentctl tail <child> --rows 30`,
+#   `agentctl tail <child> --all`, `agentctl send <child> "text" --enter`,
+#   `agentctl send <child> --key enter`, and `agentctl stop <child>` to inspect
+#   and control direct child agents.
+# - Subagent names are scoped to the parent that created them; duplicate names
+#   may exist elsewhere in the tree.
+#
+# Container lifecycle:
+# - Use `killme` only when the user explicitly asks you to end this container.
 # """
 #
 # ── Hostdo (host-side command execution) ─────────────────────────────────────
@@ -37,6 +75,15 @@
 #   build = { cmd = "cargo build --release", cwd = "$WORKSPACE" }
 #
 # $WORKSPACE = workspace path on the host.
+#
+# ── Agentctl helper defaults ────────────────────────────────────────────────
+#
+# `agentctl spawn` and `spawn-many` read this value from the workspace rules file
+# when `--delay-ms` is omitted. The effective delay is clamped to at least 100ms.
+# `max_subagents` limits live descendants under a single top-level agent.
+#   [agentctl]
+#   spawn_delay_ms = 500
+#   max_subagents = 10
 
 # ── Network (HTTP/HTTPS proxy policy) ────────────────────────────────────────
 #
@@ -60,6 +107,10 @@
 # - omitted port matches normal HTTP/HTTPS requests on any port
 # - CONNECT allow rules without `port=` only auto-approve port 443
 # - raw CONNECT to other ports requires an explicit `port=...` allow rule
+
+[agentctl]
+spawn_delay_ms = 500
+max_subagents = 50
 
 [hostdo]
 default_policy = "prompt"
@@ -483,16 +534,55 @@ timeout_secs = 60
 concurrency = "queue"
 approval_mode = "auto"
 
-[hostdo.command_aliases.build]
-cmd = "cargo build"
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "--list",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "test",
+    "gemini_home",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "test",
+    "terminal_bottom_lines",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "test",
+    "sidebar_child_indent",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+concurrency = "queue"
+approval_mode = "auto"
+
+[hostdo.command_aliases.check]
+cmd = "cargo check"
 cwd = "$WORKSPACE"
 
 [hostdo.command_aliases.lint]
 cmd = "cargo clippy"
-cwd = "$WORKSPACE"
-
-[hostdo.command_aliases.check]
-cmd = "cargo check"
 cwd = "$WORKSPACE"
 
 [hostdo.command_aliases.test]
@@ -503,6 +593,10 @@ cwd = "$WORKSPACE"
 cmd = "cargo fmt"
 cwd = "$WORKSPACE"
 
+[hostdo.command_aliases.build]
+cmd = "cargo build"
+cwd = "$WORKSPACE"
+
 [network]
 allowlist = [
     "domain=raw.githubusercontent.com",
@@ -511,5 +605,9 @@ allowlist = [
     "domain=api.github.com",
     "domain=chatgpt.com",
     "domain=ab.chatgpt.com",
+    "domain=play.googleapis.com",
+    "domain=cloudcode-pa.googleapis.com",
+    "domain=oauth2.googleapis.com",
+    "domain=api.openai.com",
 ]
 denylist = ["domain=*.example.com"]

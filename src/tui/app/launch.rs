@@ -12,6 +12,29 @@ impl App {
     }
 
     pub(crate) fn do_launch_container_on_project(&mut self, pi: usize, ctr_idx: usize) {
+        self.do_launch_container_on_project_with_priority(
+            pi,
+            ctr_idx,
+            crate::proxy::SourcePriority::Primary,
+        );
+    }
+
+    pub(crate) fn do_launch_container_on_project_with_priority(
+        &mut self,
+        pi: usize,
+        ctr_idx: usize,
+        proxy_priority: crate::proxy::SourcePriority,
+    ) {
+        self.do_launch_container_on_project_with_priority_and_env(pi, ctr_idx, proxy_priority, &[]);
+    }
+
+    pub(crate) fn do_launch_container_on_project_with_priority_and_env(
+        &mut self,
+        pi: usize,
+        ctr_idx: usize,
+        proxy_priority: crate::proxy::SourcePriority,
+        extra_env: &[(String, String)],
+    ) {
         let cfg = self.config.get();
         let exec_host = cfg.defaults.hostdo.server_host.trim();
         if host_bind_is_loopback(exec_host) {
@@ -94,6 +117,7 @@ impl App {
             &proj.name,
             &ctr.name,
             &session_token,
+            proxy_priority,
         ) {
             Ok(listener) => listener,
             Err(e) => {
@@ -230,7 +254,9 @@ impl App {
             &self.ca_cert_path,
             Some(hostdo_script_host_path.as_path()),
             Some(scoped_proxy),
+            proxy_priority,
             cfg.defaults.proxy.strict_network,
+            extra_env,
             pty_rows,
             pty_cols,
         ) {

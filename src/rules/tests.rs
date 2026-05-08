@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use crate::rules::{
-        ApprovalMode, ComposedRules, ConcurrencyPolicy, HostdoRules, NetworkPolicy, NetworkRules,
-        ProjectRules, RuleCommand, append_auto_approval, host_matches, load,
+        AgentctlRules, ApprovalMode, ComposedRules, ConcurrencyPolicy, HostdoRules, NetworkPolicy,
+        NetworkRules, ProjectRules, RuleCommand, append_auto_approval, host_matches, load,
         parse_network_allowlist_rule, write_rules_file,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,6 +12,10 @@ mod tests {
         let raw = r#"
 [hostdo]
 default_policy = "prompt"
+
+[agentctl]
+spawn_delay_ms = 500
+max_subagents = 20
 
 [[hostdo.commands]]
 argv = ["cargo", "check"]
@@ -30,6 +34,9 @@ denylist = ["domain=blocked.example.com"]
 
         let parsed: Result<ProjectRules, toml::de::Error> = toml::from_str(raw);
         let rules = parsed.expect("expected current schema to parse");
+        assert_eq!(rules.agentctl.spawn_delay_ms, 500);
+        assert_eq!(rules.agentctl.max_subagents, 20);
+        assert_eq!(rules.agentctl.effective_spawn_delay_ms(), 500);
         assert_eq!(rules.hostdo.command_aliases.len(), 2);
         assert_eq!(rules.hostdo.command_aliases["lint"].cmd(), "cargo clippy");
         assert_eq!(rules.hostdo.command_aliases["tests"].cmd(), "cargo test");
@@ -37,6 +44,46 @@ denylist = ["domain=blocked.example.com"]
             rules.network.denylist,
             vec!["domain=blocked.example.com".to_string()]
         );
+    }
+
+    #[test]
+    fn agentctl_spawn_delay_has_100ms_floor() {
+        let rules: ProjectRules = toml::from_str(
+            r#"
+[agentctl]
+spawn_delay_ms = 0
+"#,
+        )
+        .expect("parse rules");
+
+        assert_eq!(rules.agentctl.spawn_delay_ms, 0);
+        assert_eq!(rules.agentctl.max_subagents, 10);
+        assert_eq!(rules.agentctl.effective_spawn_delay_ms(), 100);
+        assert_eq!(AgentctlRules::default().effective_spawn_delay_ms(), 500);
+        assert_eq!(AgentctlRules::default().max_subagents, 10);
+    }
+
+    #[test]
+    fn composed_agentctl_uses_project_agentctl_defaults() {
+        let global = ProjectRules {
+            agentctl: AgentctlRules {
+                spawn_delay_ms: 250,
+                max_subagents: 10,
+            },
+            ..Default::default()
+        };
+        let project = ProjectRules {
+            agentctl: AgentctlRules {
+                spawn_delay_ms: 750,
+                max_subagents: 15,
+            },
+            ..Default::default()
+        };
+
+        let composed = ComposedRules::compose(&global, &[project]);
+
+        assert_eq!(composed.agentctl.spawn_delay_ms, 750);
+        assert_eq!(composed.agentctl.max_subagents, 15);
     }
 
     #[test]
@@ -103,6 +150,7 @@ allowlist = ["domain=github.com"]
     #[test]
     fn hostdo_command_match_ignores_cwd() {
         let rules = ComposedRules {
+            agentctl: AgentctlRules::default(),
             hostdo: HostdoRules {
                 default_policy: ApprovalMode::Prompt,
                 commands: vec![RuleCommand {

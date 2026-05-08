@@ -1,5 +1,6 @@
 use super::*;
 
+mod agents;
 mod approvals;
 mod build;
 mod core;

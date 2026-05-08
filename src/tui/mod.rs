@@ -19,20 +19,22 @@ use crossterm::{
 };
 use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicI32, Ordering},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::activity::{Activity, ActivityEvent, ActivityId};
 use crate::container::ContainerSession;
 use crate::proxy::{NetworkDecision, PendingNetworkItem, ProxyState};
 use crate::rules::NetworkPolicy;
 use crate::server::SessionRegistry;
-use crate::server::{ApprovalDecision, ContainerStopDecision, ContainerStopItem, PendingItem};
+use crate::server::{
+    AgentControlRequest, ApprovalDecision, ContainerStopDecision, ContainerStopItem, PendingItem,
+};
 use crate::shared_config::SharedConfig;
 use crate::state::{AuditEntry, StateManager};
 
@@ -122,6 +124,12 @@ pub struct PendingBaseRulesInternalWrite {
     pub expires_at: std::time::Instant,
 }
 
+pub struct PendingAgentSend {
+    pub session_token: String,
+    pub input: String,
+    pub response_tx: oneshot::Sender<Result<crate::server::AgentOkResponse, String>>,
+}
+
 /// Top-level TUI application state and event loop ownership.
 pub struct App {
     pub config: SharedConfig,
@@ -163,6 +171,11 @@ pub struct App {
 
     pub exec_pending_rx: mpsc::Receiver<PendingItem>,
     pub stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
+    pub agent_control_rx: mpsc::Receiver<AgentControlRequest>,
+    pub pending_agent_sends: VecDeque<PendingAgentSend>,
+    pub subagent_first_output_at: HashMap<String, std::time::Instant>,
+    pub ready_subagent_tokens: HashSet<String>,
+    pub last_agent_spawn_at: HashMap<String, std::time::Instant>,
     pub net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
     pub activity_rx: mpsc::UnboundedReceiver<ActivityEvent>,
     pub audit_rx: mpsc::Receiver<AuditEntry>,
@@ -175,7 +188,6 @@ pub struct App {
     pub passthrough_exit_code_slot: Option<Arc<AtomicI32>>,
     pub log_fullscreen: bool,
     pub terminal_fullscreen: bool,
-    ctrl_c_times: Vec<std::time::Instant>,
     last_terminal_esc: Option<std::time::Instant>,
     pub scroll_mode: bool,
     pub scroll_mouse_passthrough: bool,

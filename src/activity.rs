@@ -135,6 +135,7 @@ impl ActivityTerminal {
 pub struct Activity {
     pub id: ActivityId,
     pub project: String,
+    pub session_token: Option<String>,
     pub container: Option<String>,
     pub kind: ActivityKind,
     pub state: ActivityState,
@@ -163,6 +164,7 @@ impl Activity {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             project,
+            session_token: None,
             container,
             kind,
             state,

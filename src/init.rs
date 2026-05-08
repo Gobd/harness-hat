@@ -14,6 +14,7 @@ const GITHUB_DOCKER_BASE_URL: &str =
 const BUILTIN_DOCKERFILES: &[&str] = &["harness-hat-base.dockerfile"];
 
 const HOSTDO_SCRIPT: &str = include_str!("../docker/scripts/hostdo.py");
+const AGENTCTL_SCRIPT: &str = include_str!("../docker/scripts/agentctl.py");
 const KILLME_SCRIPT: &str = include_str!("../docker/scripts/killme.py");
 
 #[instrument(skip(output))]
@@ -137,6 +138,7 @@ fn missing_helper_scripts(docker_dir: &Path) -> Vec<PathBuf> {
 fn helper_script_paths(docker_dir: &Path) -> Vec<PathBuf> {
     vec![
         docker_dir.join("scripts/hostdo.py"),
+        docker_dir.join("scripts/agentctl.py"),
         docker_dir.join("scripts/killme.py"),
     ]
 }
@@ -154,6 +156,7 @@ pub fn ensure_helper_scripts(docker_dir: &Path) -> Result<()> {
     let scripts_dir = docker_dir.join("scripts");
     fs::create_dir_all(&scripts_dir)?;
     write_text_file(&scripts_dir.join("hostdo.py"), HOSTDO_SCRIPT)?;
+    write_text_file(&scripts_dir.join("agentctl.py"), AGENTCTL_SCRIPT)?;
     write_text_file(&scripts_dir.join("killme.py"), KILLME_SCRIPT)?;
     Ok(())
 }

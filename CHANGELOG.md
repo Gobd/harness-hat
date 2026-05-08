@@ -11,6 +11,7 @@ This changelog is derived from git history and the current working tree.
 - Proxy forwarding pins the resolved public addresses used for each outbound HTTP(S) request to reduce DNS rebinding exposure.
 - HTTPS MITM forwarding now validates the inner `Host` header against the CONNECT/SNI target and rejects duplicate or mismatched `Host` headers.
 - Network activity rows are now collapsed into a per-session `Network [X]` group with request navigation, selected-request detail, and selected-request cancellation.
+- Agent containers now include an `agentctl` helper for same-workspace subagent spawning and terminal control through `spawn`, `status`, `tail`, `send`, and `stop`.
 - Host-side `hostdo` execution now canonicalizes and confines request and rule CWDs to the configured workspace before running commands.
 - Proxy tests now cover restricted-address blocking, IPv4-mapped loopback rejection, scoped proxy authentication, Host header mismatch rejection, CONNECT port handling, and oversized request bodies.
 - Hostdo/server tests now cover workspace CWD mapping, parent-directory escape rejection, symlink escape rejection, and persisted `port=...` network rules.
@@ -21,6 +22,10 @@ This changelog is derived from git history and the current working tree.
 - Hostdo Docker runners now validate env-file names and values before writing them.
 - Cargo audit coverage is clean after dependency upgrades for the TUI, PTY, OpenTelemetry, and `time` dependency families.
 - `[defaults.ui].show_log_pane` can show the bottom TUI log pane, which is hidden by default while fullscreen log view remains available.
+- `agentctl tail` now supports `--all` to retrieve all terminal rows retained in the PTY scrollback buffer.
+- `agentctl send` now supports `--enter` and paced chunked delivery for longer prompts.
+- `agentctl spawn-many` now supports paced subagent launches using `[agentctl].spawn_delay_ms` from `harness-rules.toml`, with a 100ms minimum effective delay.
+- `[agentctl].max_subagents` now limits live descendants under a single top-level agent; the default is 10.
 
 ### Changed
 - Direct-mode workspace handling now uses each workspace's `canonical_path` directly instead of routing through legacy effective sync/workspace helper APIs.
@@ -32,6 +37,9 @@ This changelog is derived from git history and the current working tree.
 - CONNECT policy matching is now port-aware: domain-only allow rules auto-allow HTTPS CONNECT on 443, while raw TCP CONNECT on other ports requires an explicit `port=...` rule.
 - CONNECT passthrough and raw tunnel paths now run policy and public-address preflight checks before bypassing MITM inspection.
 - Plain HTTP and HTTPS forwarding now strip caller-supplied `Host` headers so reqwest derives `Host` from the policy-checked URL.
+- Subagent tail responses now read from the terminal scrollback buffer instead of only the visible terminal rows.
+- Scoped per-container proxy listeners now cap active connections, and root/scoped proxy paths share a per-session source cap without blocking `tun2proxy`'s own transport sockets.
+- Closing or stopping an agent now terminates its descendant subagents immediately.
 - Network "always allow" persistence now includes `port=...` for raw non-443 CONNECT decisions.
 - Default credential/session mounts in the example config are now commented examples instead of active mounts.
 - Container launch now writes scoped proxy, `hostdo`, and Claude token values through flushed, validated env files rather than Docker `-e` arguments where possible.
@@ -45,6 +53,7 @@ This changelog is derived from git history and the current working tree.
 - Ratatui, OpenTelemetry, PTY/terminal, and related dependency families were upgraded.
 - Sidebar network group rows now render as `Network [X]` instead of `X Network`.
 - Network group detail panes now use the same `Network [X]` title format.
+- Subagent names are parent-local aliases, and the sidebar now renders nested subagent trees recursively.
 - Large activity start events now box the activity payload to reduce enum size.
 - README and the example config now document that Docker-reachable bind addresses should be narrowed or firewalled on shared networks.
 

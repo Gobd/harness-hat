@@ -38,12 +38,6 @@ impl App {
                 }
             }
 
-            let running = self.sessions.iter().any(|s| !s.is_exited());
-            if !running {
-                self.should_quit = true;
-                return;
-            }
-
             if self.focus == Focus::Terminal {
                 if let Some(si) = self.active_session {
                     if let Some(session) = self.sessions.get(si) {
@@ -52,14 +46,6 @@ impl App {
                 }
             }
 
-            let now = std::time::Instant::now();
-            let window = std::time::Duration::from_secs(2);
-            self.ctrl_c_times
-                .retain(|t| now.duration_since(*t) < window);
-            self.ctrl_c_times.push(now);
-            if self.ctrl_c_times.len() >= 4 {
-                self.should_quit = true;
-            }
             return;
         }
 

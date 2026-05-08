@@ -4,13 +4,32 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use futures::StreamExt;
 use globset::Glob;
 use reqwest::StatusCode;
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use tokio::sync::Semaphore;
 
 use crate::config::Config;
 use crate::proxy::SourceIdentityStatus;
 use crate::proxy::http::is_hop_by_hop;
+
+const DNS_LOOKUP_LIMIT: usize = 16;
+const DNS_CACHE_TTL: Duration = Duration::from_secs(300);
+const DNS_STALE_TTL: Duration = Duration::from_secs(1800);
+
+static DNS_LOOKUP_LIMITER: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(DNS_LOOKUP_LIMIT)));
+static DNS_CACHE: LazyLock<Mutex<HashMap<String, DnsCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Clone)]
+struct DnsCacheEntry {
+    addrs: Vec<SocketAddr>,
+    stored_at: Instant,
+}
 
 pub(crate) fn format_byte_count(bytes: u64) -> String {
     if bytes < 1024 {
@@ -157,25 +176,26 @@ pub(crate) fn decode_source_from_proxy_authorization(
     (Some(project), Some(container), SourceIdentityStatus::Ok)
 }
 
-pub(crate) fn container_tls_passthrough_matches(
-    config: &Config,
+pub(crate) fn container_tls_passthrough_match<'a>(
+    config: &'a Config,
     source_container: Option<&str>,
     host: &str,
-) -> bool {
+) -> Option<&'a str> {
     let Some(source_container) = source_container else {
-        return false;
+        return None;
     };
     let Some(container) = config
         .containers
         .iter()
         .find(|c| c.name == source_container)
     else {
-        return false;
+        return None;
     };
     container
         .bypass_proxy
         .iter()
-        .any(|pattern| bypass_host_matches(pattern, host))
+        .find(|pattern| bypass_host_matches(pattern, host))
+        .map(String::as_str)
 }
 
 pub(crate) fn bypass_host_matches(pattern: &str, host: &str) -> bool {
@@ -385,7 +405,16 @@ pub(crate) fn is_expected_disconnect(err: &anyhow::Error) -> bool {
         || msg.contains("broken pipe")
 }
 
+#[cfg(test)]
 pub(crate) async fn resolve_public_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    resolve_public_addrs_with_priority(host, port, false).await
+}
+
+pub(crate) async fn resolve_public_addrs_with_priority(
+    host: &str,
+    port: u16,
+    primary: bool,
+) -> Result<Vec<SocketAddr>> {
     anyhow::ensure!(!host.trim().is_empty(), "destination host is empty");
 
     if let Ok(ip) = host.parse::<IpAddr>() {
@@ -393,23 +422,85 @@ pub(crate) async fn resolve_public_addrs(host: &str, port: u16) -> Result<Vec<So
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
 
-    let addrs = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|e| anyhow::anyhow!("resolving {host}:{port}: {e}"))?
-        .collect::<Vec<_>>();
-    anyhow::ensure!(!addrs.is_empty(), "no addresses resolved for {host}:{port}");
-
-    for addr in &addrs {
-        ensure_public_ip(addr.ip(), host)?;
+    let cache_key = dns_cache_key(host, port);
+    if let Some(addrs) = cached_dns_addrs(&cache_key, DNS_CACHE_TTL) {
+        return Ok(addrs);
     }
-    Ok(addrs)
+
+    let _lookup_permit = if primary {
+        None
+    } else {
+        DNS_LOOKUP_LIMITER.clone().acquire_owned().await.ok()
+    };
+
+    let attempts = if primary { 4 } else { 2 };
+    let mut last_error = None;
+    for attempt in 0..attempts {
+        match tokio::net::lookup_host((host, port)).await {
+            Ok(resolved) => {
+                let addrs = resolved.collect::<Vec<_>>();
+                anyhow::ensure!(!addrs.is_empty(), "no addresses resolved for {host}:{port}");
+                for addr in &addrs {
+                    ensure_public_ip(addr.ip(), host)?;
+                }
+                store_dns_addrs(cache_key, addrs.clone());
+                return Ok(addrs);
+            }
+            Err(e) => {
+                last_error = Some(e);
+                if attempt + 1 < attempts {
+                    let delay_ms = if primary { 25 * (attempt + 1) } else { 75 };
+                    tokio::time::sleep(Duration::from_millis(delay_ms as u64)).await;
+                }
+            }
+        }
+    }
+
+    if let Some(addrs) = cached_dns_addrs(&cache_key, DNS_STALE_TTL) {
+        return Ok(addrs);
+    }
+
+    let error = last_error
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "unknown resolver error".to_string());
+    Err(anyhow::anyhow!("resolving {host}:{port}: {error}"))
 }
 
-pub(crate) async fn connect_public_tcp(host: &str, port: u16) -> Result<TcpStream> {
-    let addrs = resolve_public_addrs(host, port).await?;
+pub(crate) async fn connect_public_tcp_with_priority(
+    host: &str,
+    port: u16,
+    primary: bool,
+) -> Result<TcpStream> {
+    let addrs = resolve_public_addrs_with_priority(host, port, primary).await?;
     TcpStream::connect(addrs.as_slice())
         .await
         .map_err(|e| anyhow::anyhow!("connect to {host}:{port} failed: {e}"))
+}
+
+fn dns_cache_key(host: &str, port: u16) -> String {
+    format!("{}:{port}", host.trim_end_matches('.').to_ascii_lowercase())
+}
+
+fn cached_dns_addrs(key: &str, max_age: Duration) -> Option<Vec<SocketAddr>> {
+    let cache = DNS_CACHE.lock().ok()?;
+    let entry = cache.get(key)?;
+    if entry.stored_at.elapsed() <= max_age {
+        Some(entry.addrs.clone())
+    } else {
+        None
+    }
+}
+
+fn store_dns_addrs(key: String, addrs: Vec<SocketAddr>) {
+    if let Ok(mut cache) = DNS_CACHE.lock() {
+        cache.insert(
+            key,
+            DnsCacheEntry {
+                addrs,
+                stored_at: Instant::now(),
+            },
+        );
+    }
 }
 
 fn ensure_public_ip(ip: IpAddr, host: &str) -> Result<()> {

@@ -7,8 +7,8 @@ use tracing::{debug, info, warn};
 use crate::activity::{Activity, ActivityState, wait_cancelled};
 use crate::config;
 use crate::proxy::helpers::{
-    connect_public_tcp, container_tls_passthrough_matches, ensure_host_header_matches_target,
-    format_byte_count, proxy_authorization_matches_token, resolve_public_addrs, write_error_any,
+    container_tls_passthrough_match, ensure_host_header_matches_target, format_byte_count,
+    proxy_authorization_matches_token, write_error_any,
 };
 use crate::proxy::http::{
     connect_head_has_proxy_authorization, forward_request_with_activity, parse_connect_target,
@@ -120,6 +120,21 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
         let has_auth = connect_head_has_proxy_authorization(head_str);
         (project, container, status, has_auth)
     };
+    let Some(_source_permit) =
+        state.try_acquire_source_connection(source_project.as_deref(), source_container.as_deref())
+    else {
+        warn!(
+            host = %host,
+            port,
+            source_project = ?source_project,
+            source_container = ?source_container,
+            source_status = source_status.as_str(),
+            connect_has_proxy_authorization,
+            "proxy source connection limit reached"
+        );
+        write_error_any(&mut stream, 503, "Proxy connection limit reached").await?;
+        return Ok(());
+    };
 
     let cfg = state.config.get();
     let connect_protocol = if port == 443 {
@@ -155,7 +170,7 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
     };
     let preflight_policy = rules.match_connect(&host, port);
     if preflight_policy != NetworkPolicy::Deny {
-        if let Err(e) = resolve_public_addrs(&host, port).await {
+        if let Err(e) = state.resolve_public_addrs(&host, port).await {
             state.activity_finished(
                 &connect_activity.id,
                 ActivityState::Denied,
@@ -204,9 +219,12 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
         return Ok(());
     }
 
-    if container_tls_passthrough_matches(&cfg, source_container.as_deref(), &host) {
+    if let Some(bypass_pattern) =
+        container_tls_passthrough_match(&cfg, source_container.as_deref(), &host)
+    {
         info!(
             host = %host,
+            bypass_pattern = %bypass_pattern,
             source_project = ?source_project,
             source_container = ?source_container,
             source_status = source_status.as_str(),
@@ -404,7 +422,7 @@ async fn tunnel_connect(
         Some(format!("tunneling {host}:{port}")),
     );
 
-    let mut upstream = match connect_public_tcp(host, port).await {
+    let mut upstream = match state.connect_public_tcp(host, port).await {
         Ok(upstream) => upstream,
         Err(e) => {
             let message = format!("{label} connect to {host}:{port} failed: {e}");

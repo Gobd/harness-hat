@@ -18,12 +18,15 @@ impl App {
                 Err(_) => break,
             }
         }
+        self.drain_agent_control_requests();
         for _ in 0..32 {
             match self.net_pending_rx.try_recv() {
                 Ok(item) => self.pending_net.push(item),
                 Err(_) => break,
             }
         }
+        self.refresh_session_terminal_states();
+        self.flush_pending_agent_sends();
         for _ in 0..128 {
             match self.activity_rx.try_recv() {
                 Ok(event) => self.apply_activity_event(event),
@@ -152,10 +155,7 @@ impl App {
             }
             let label = self.sessions[i].tab_label();
             self.push_log(format!("container '{}' exited", label), false);
-            let tok = self.sessions[i].session_token.clone();
-            self.sessions.remove(i);
-            self.session_registry.remove(&tok);
-            self.remap_session_indices_after_removal(i);
+            self.close_session(i);
             if self.active_session.is_none() && self.focus != Focus::ImageBuild {
                 self.focus = Focus::Sidebar;
             }

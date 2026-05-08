@@ -9,7 +9,7 @@ use crate::activity::{Activity, ActivityState, wait_cancelled};
 use crate::config;
 use crate::proxy::helpers::{
     extract_host_port, parse_source_from_headers, proxy_authorization_matches_token,
-    resolve_public_addrs, strip_scheme_and_host, write_error_any, write_response_any,
+    strip_scheme_and_host, write_error_any, write_response_any,
 };
 use crate::proxy::{NetworkDecision, PendingNetworkItem, ProxyState, SourceIdentityStatus};
 use crate::rules::NetworkPolicy;
@@ -61,9 +61,23 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
             .any(|(n, _)| n.eq_ignore_ascii_case("proxy-authorization"));
         (project, container, status, has_auth)
     };
-
     let Some((host, port)) = extract_host_port(&headers, &path, 80) else {
         write_error_any(&mut stream, 400, "Missing destination host").await?;
+        return Ok(());
+    };
+    let Some(_source_permit) =
+        state.try_acquire_source_connection(source_project.as_deref(), source_container.as_deref())
+    else {
+        tracing::warn!(
+            host = %host,
+            port,
+            source_project = ?source_project,
+            source_container = ?source_container,
+            source_status = source_status.as_str(),
+            has_proxy_authorization,
+            "proxy source connection limit reached"
+        );
+        write_error_any(&mut stream, 503, "Proxy connection limit reached").await?;
         return Ok(());
     };
     let path = strip_scheme_and_host(&path);
@@ -105,7 +119,7 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
     let policy = rules.match_network_for_port(&method, &host, &path, Some(port));
 
     if policy != NetworkPolicy::Deny {
-        if let Err(e) = resolve_public_addrs(&host, port).await {
+        if let Err(e) = state.resolve_public_addrs(&host, port).await {
             state.activity_finished(&activity.id, ActivityState::Denied, Some(e.to_string()));
             write_error_any(&mut stream, 403, "Forbidden by harness-hat policy").await?;
             return Ok(());
@@ -251,7 +265,7 @@ where
     );
 
     let response = tokio::select! {
-        response = forward_request(method, scheme, host, port, path, headers, body) => match response {
+        response = forward_request(state, method, scheme, host, port, path, headers, body) => match response {
             Ok(response) => response,
             Err(e) => {
                 state.activity_finished(&activity.id, ActivityState::Failed, Some(e.to_string()));
@@ -290,6 +304,7 @@ where
 }
 
 pub(crate) async fn forward_request(
+    state: &ProxyState,
     method: &str,
     scheme: &str,
     host: &str,
@@ -299,7 +314,7 @@ pub(crate) async fn forward_request(
     body: Vec<u8>,
 ) -> Result<reqwest::Response> {
     let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
-    let addrs = resolve_public_addrs(host, port).await?;
+    let addrs = state.resolve_public_addrs(host, port).await?;
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(120))

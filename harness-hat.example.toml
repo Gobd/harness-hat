@@ -206,7 +206,8 @@ bypass_proxy = [
   "storage.googleapis.com"
 ]
 
-# Persist Claude auth/session state across launches.
+# Persist Claude auth/session state across primary launches.
+# Subagents receive a startup snapshot instead of a shared writable mount.
 [[container_profiles.claude.mounts]]
 host = "~/.claude.json"
 container = "/home/ubuntu/.claude.json"
@@ -227,11 +228,15 @@ agent = "codex"
 bypass_proxy = [
   "chatgpt.com",
   "*.chatgpt.com",
+  "*.openai.com",
+  "api.openai.com",
   "chat.openai.com",
   "auth.openai.com",
 ]
 
-# Persist Codex auth/session state across launches.
+# Persist Codex auth/session state across primary launches.
+# Subagents receive a private startup snapshot, including Codex state/cache files,
+# instead of a shared writable mount.
 [[container_profiles.codex.mounts]]
 host = "~/.codex"
 container = "/home/ubuntu/.codex"
@@ -258,7 +263,8 @@ bypass_proxy = [
   "www.googleapis.com",
 ]
 
-# Persist Gemini auth/session state across launches.
+# Persist Gemini auth/session state across primary launches.
+# Subagents receive a startup snapshot instead of a shared writable mount.
 [[container_profiles.gemini.mounts]]
 host = "~/.gemini"
 container = "/home/ubuntu/.gemini"
@@ -277,7 +283,8 @@ bypass_proxy = [
   ".githubusercontent.com",
 ]
 
-# Persist opencode auth/session state across launches.
+# Persist opencode auth/session state across primary launches.
+# Subagents receive a startup snapshot instead of a shared writable mount.
 [[container_profiles.opencode.mounts]]
 host = "~/.opencode"
 container = "/home/ubuntu/.opencode"

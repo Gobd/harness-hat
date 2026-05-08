@@ -109,7 +109,7 @@ Harness Hat is designed to be flexible. It ships with first-class support for th
 * **Google Gemini CLI** (`@google/gemini-cli`)
 * **OpenCode** (`opencode-ai`)
 
-For these agents, Harness Hat automatically bind-mounts authentication and session state (e.g., `~/.claude`, `~/.gemini`) so agents authenticate once and stay authenticated across container restarts.
+For primary agents, Harness Hat bind-mounts authentication and session state (e.g., `~/.claude`, `~/.gemini`) so agents authenticate once and stay authenticated across container restarts. Subagents receive a private startup snapshot of that state instead of a writable shared mount, so parallel subagents can use required session/cache files without contending over the host copies.
 
 ### Bring Your Own Agent (BYOA)
 
@@ -136,6 +136,7 @@ Lives on your machine. Defines your environment:
 Lives in your repository. Defines what an agent is allowed to do:
 
 * **`[hostdo]`**: Which host commands the agent may request. Commands can be set to `auto` (always run), `deny` (always block), or `prompt` (ask you each time). Aliases let you map simple agent-facing commands to complex host-side ones.
+* **`[agentctl]`**: Defaults for subagent helper behavior. `spawn_delay_ms = 500` paces `agentctl spawn` and `spawn-many`; the effective delay is never below 100ms. `max_subagents = 10` caps live descendants under a single top-level agent.
 * **`[network]`**: Coder-style allowlist and denylist rules for outbound traffic (`method=... domain=... path=...`). Denylist matches win over allowlist matches; if no rule matches, Harness Hat prompts.
 
 ## Logging
@@ -221,6 +222,15 @@ Lets an agent cleanly terminate its own container.
 
 * **Usage inside container:** `killme`
 * **How it works:** Sends a clean shutdown request to the Harness Hat manager.
+
+### `agentctl` (Subagent Control)
+
+Lets an agent launch and control same-workspace child agents through the manager.
+
+* **Usage inside container:** `agentctl spawn gemini --name docs`, or `agentctl spawn-many gemini 20 --prefix review`.
+* **Pacing:** `spawn` and `spawn-many` read `[agentctl].spawn_delay_ms` from `harness-rules.toml` when `--delay-ms` is omitted. Values below 100ms are clamped to 100ms. Codex launches also wait for the previous Codex subagent to fail MCP startup, clear MCP startup, sit waiting without MCP diagnostics for a short stable window, or reach the 35s diagnostic timeout.
+* **Limit:** `[agentctl].max_subagents` caps live descendants under one top-level agent, including nested subagents at any depth.
+* **Inspection/control:** `agentctl status <child>` includes Codex MCP diagnostics when available; use `agentctl tail <child> --all`, `agentctl send <child> "text" --enter`, and `agentctl stop <child>` for terminal control.
 
 ## License
 MIT

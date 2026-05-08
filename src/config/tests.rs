@@ -911,6 +911,36 @@ agent = "codex"
         assert_eq!(cfg.containers[0].name, "codex");
         assert_eq!(cfg.containers[0].image_stem, "default");
         assert_eq!(cfg.containers[0].image, "harness-hat-default:local");
+        assert!(
+            cfg.containers[0]
+                .bypass_proxy
+                .iter()
+                .any(|host| host == "chatgpt.com")
+        );
+        assert!(
+            cfg.containers[0]
+                .bypass_proxy
+                .iter()
+                .any(|host| host == "*.chatgpt.com")
+        );
+        assert!(
+            cfg.containers[0]
+                .bypass_proxy
+                .iter()
+                .any(|host| host == "*.openai.com")
+        );
+        assert!(
+            cfg.containers[0]
+                .bypass_proxy
+                .iter()
+                .any(|host| host == "api.openai.com")
+        );
+        assert!(
+            cfg.containers[0]
+                .bypass_proxy
+                .iter()
+                .any(|host| host == "auth.openai.com")
+        );
     }
 
     #[test]

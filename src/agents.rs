@@ -76,6 +76,7 @@ pub fn generate_starter_project_rules(agent: &AgentKind) -> ProjectRules {
 
     ProjectRules {
         llm_instructions: None,
+        agentctl: Default::default(),
         hostdo: HostdoRules {
             default_policy: ApprovalMode::Prompt,
             ..HostdoRules::default()
@@ -150,12 +151,21 @@ Environment:\n\
 - You are operating inside a Linux Docker container.\n\
 - Workspace mount path (inside container): {}\n\
 {}\n\
+- Use `hostdo ...` for host-side build/package tooling such as cargo, npm, pnpm, yarn, go, make, pytest, or similar commands.\n\
+- Examples: `hostdo cargo test`, `hostdo npm install`, `hostdo go test ./...`.\n\
+- Only use `hostdo --image <docker-image> ...` when the user explicitly asks you to run against a Docker image or containerized runner; it runs a command in a short-lived Docker runner instead of directly on the host, for example `hostdo --image node:20 npm test` or `hostdo --image rust:1.88 cargo test`.\n\
+- Use `agentctl spawn <agent> [--name <name>]` to start same-workspace subagents (`claude`, `codex`, `gemini`, or `opencode`).\n\
+- Use `agentctl spawn-many <agent> <count> --prefix <name>` for larger batches; launches are paced by `[agentctl].spawn_delay_ms` and never below 100ms between spawn requests.\n\
+- `[agentctl].max_subagents` limits live descendants under a single top-level agent, including subagents, sub-subagents, and deeper descendants.\n\
+- Use `agentctl status <child>`, `agentctl tail <child> --rows 30`, `agentctl tail <child> --all`, `agentctl send <child> \"text\" --enter`, `agentctl send <child> --key enter`, and `agentctl stop <child>` to inspect and control direct child agents.\n\
+- Subagent names are scoped to the parent that created them; duplicate names may exist elsewhere in the tree.\n\
 \n\
 {}\n\
 \n\
 Rules of engagement:\n\
 - Read and follow this file before taking actions.\n\
 - Use `hostdo` only when the user explicitly asks for host activity.\n\
+- Prefer `hostdo` when the requested command needs host tools or host package/build caches.\n\
 - Use `killme` only when the user explicitly asks to end this container.\n\
 - Network access is filtered by harness-hat; allowed destinations are in `[network]`.\n",
             _mount_target.display(),
@@ -196,7 +206,7 @@ The proxy CA was generated.  Containers must trust it.
     # or: update-ca-trust               # RHEL/Fedora
 
   Runtime env vars (included in the docker run snippet):
-    NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE
+    NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, CODEX_CA_CERTIFICATE, SSL_CERT_FILE
 
   Set HARNESS_HAT_CA_CERT_PATH to the cert file location so the snippet works:
     export HARNESS_HAT_CA_CERT_PATH={ca_cert_path}

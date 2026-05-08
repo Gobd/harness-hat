@@ -200,20 +200,27 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             SidebarItem::Session(si) => {
                 let session = &app.sessions[*si];
-                let is_active = app.active_session == Some(*si);
-                let (prefix, name_color) = if session.is_exited() {
-                    ("  ✗ ", Color::DarkGray)
-                } else if is_active {
-                    ("  ▶ ", Color::Cyan)
+                let indent = if session.is_subagent() {
+                    "  ".repeat(app.session_depth(*si) + 1)
                 } else {
-                    ("  · ", Color::White)
+                    "  ".to_string()
+                };
+                let (prefix, name_color) = if session.is_exited() {
+                    (format!("{indent}✗ "), Color::DarkGray)
+                } else if app.session_is_waiting(*si) {
+                    (format!("{indent}? "), Color::Yellow)
+                } else {
+                    (
+                        format!("{indent}{} ", loading_spinner_frame()),
+                        Color::Green,
+                    )
                 };
                 let bell = session.has_bell();
                 let short_id: String = session.docker_name.chars().take(12).collect();
                 let mut spans = vec![
                     Span::styled(prefix, Style::default().fg(name_color)),
                     Span::styled(
-                        session.container_name.clone(),
+                        session.display_name().to_string(),
                         Style::default().fg(name_color),
                     ),
                     Span::styled(format!(" {short_id}"), Style::default().fg(Color::DarkGray)),
@@ -232,14 +239,16 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                 let activities = app.network_activities_for_session(*si);
                 let count = activities.len();
                 let (marker, color) = network_sidebar_marker(&activities);
+                let indent = sidebar_activity_indent_for_session(app, *si);
                 ListItem::new(Line::from(vec![
-                    Span::styled("    ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(indent, Style::default().fg(Color::DarkGray)),
                     Span::styled(marker, Style::default().fg(color)),
                     Span::styled(format!("Network ({count})"), Style::default().fg(color)),
                 ]))
             }
             SidebarItem::Activity(id) => {
                 if let Some(activity) = app.activity_by_id(id) {
+                    let indent = sidebar_activity_indent_for_activity(app, id);
                     let (marker, color) = match &activity.state {
                         crate::activity::ActivityState::PendingApproval => ("? ", Color::Yellow),
                         crate::activity::ActivityState::PullingImage => ("↓ ", Color::Yellow),
@@ -252,7 +261,7 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                     };
                     let title = truncate_middle(&activity.title(), 32);
                     ListItem::new(Line::from(vec![
-                        Span::styled("    ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(indent, Style::default().fg(Color::DarkGray)),
                         Span::styled(marker, Style::default().fg(color)),
                         Span::styled(title, Style::default().fg(color)),
                     ]))
@@ -328,6 +337,20 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+fn sidebar_activity_indent_for_session(app: &App, session_idx: usize) -> String {
+    sidebar_child_indent(app.session_depth(session_idx))
+}
+
+fn sidebar_activity_indent_for_activity(app: &App, activity_id: &str) -> String {
+    app.session_for_activity(activity_id)
+        .map(|session_idx| sidebar_activity_indent_for_session(app, session_idx))
+        .unwrap_or_else(|| sidebar_child_indent(0))
+}
+
+fn sidebar_child_indent(session_depth: usize) -> String {
+    "  ".repeat(session_depth + 2)
+}
+
 fn network_sidebar_marker(activities: &[&crate::activity::Activity]) -> (&'static str, Color) {
     let mut has_pending = false;
     let mut has_active = false;
@@ -394,6 +417,16 @@ fn terminal_activity_background(succeeded: bool, level: usize) -> Color {
         (false, 2) => Color::Rgb(96, 32, 36),
         (false, 1) => Color::Rgb(56, 24, 28),
         (false, _) => Color::Rgb(32, 18, 20),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sidebar_child_indent_tracks_session_depth() {
+        assert_eq!(super::sidebar_child_indent(0), "    ");
+        assert_eq!(super::sidebar_child_indent(1), "      ");
+        assert_eq!(super::sidebar_child_indent(2), "        ");
     }
 }
 

@@ -10,10 +10,10 @@ FROM harness-hat-base:local
 
 USER root
 RUN npm install -g \
-    @openai/codex@0.128.0 \
-    @google/gemini-cli@0.41.2 \
-    opencode-ai@1.14.39 \
-    @anthropic-ai/claude-code@2.1.131
+    @openai/codex \
+    @google/gemini-cli \
+    opencode-ai \
+    @anthropic-ai/claude-code
 USER ubuntu
 
 ENV PATH="/home/ubuntu/.local/bin:${PATH}"
