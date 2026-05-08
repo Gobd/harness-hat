@@ -1,10 +1,8 @@
 #[cfg(test)]
 mod tests {
     use crate::config::{
-        AgentKind, Config, ContainerMount, DefaultsConfig, MountMode,
-        add_existing_agent_session_mounts_for_home, agent_session_mounts_for_home,
-        image_tag_for_stem, load, load_composed_rules_for_workspace, merge_mounts,
-        merge_unique_strings,
+        Config, ContainerMount, DefaultsConfig, MountMode, image_tag_for_stem, load,
+        load_composed_rules_for_workspace, merge_mounts, merge_unique_strings,
     };
     use crate::rules::{ApprovalMode, NetworkPolicy};
     use std::fs;
@@ -65,6 +63,51 @@ canonical_path = "{}"
     #[test]
     fn defaults_hostdo_max_timeout_defaults_to_one_hour() {
         assert_eq!(DefaultsConfig::default().hostdo.max_timeout_secs, 60 * 60);
+    }
+
+    #[test]
+    fn missing_config_version_defaults_to_current() {
+        let cfg: Config = toml::from_str(
+            r#"
+docker_dir = "/tmp"
+
+[workspace]
+
+[manager]
+global_rules_file = "/tmp/harness-rules.toml"
+"#,
+        )
+        .expect("parse config");
+
+        assert_eq!(cfg.version, crate::config::CURRENT_CONFIG_VERSION);
+    }
+
+    #[test]
+    fn load_rejects_future_config_version() {
+        let root = unique_temp_dir("future-config-version");
+        let cfg_path = root.join("harness-hat.toml");
+        let docker_dir = root.join("docker-root");
+        fs::create_dir_all(&docker_dir).expect("create docker dir");
+        let raw = format!(
+            r#"
+version = 999
+docker_dir = "{}"
+
+[workspace]
+
+[manager]
+global_rules_file = "{}"
+"#,
+            docker_dir.display(),
+            root.join("global-rules.toml").display()
+        );
+        fs::write(&cfg_path, raw).expect("write config");
+
+        let err = load(&cfg_path).expect_err("future version should be rejected");
+        assert!(
+            err.to_string().contains("unsupported version 999"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -176,6 +219,100 @@ show_log_pane = true
         fs::write(&cfg_path, raw).expect("write config");
         let cfg = load(&cfg_path).expect("config should load");
         assert!(cfg.defaults.ui.show_log_pane);
+    }
+
+    #[test]
+    fn load_applies_agent_command_override() {
+        let root = unique_temp_dir("agent-command-override");
+        let cfg_path = root.join("harness-hat.toml");
+        let docker_dir = root.join("docker-root");
+        fs::create_dir_all(&docker_dir).expect("create docker dir");
+        let raw = format!(
+            r#"
+docker_dir = "{}"
+
+[workspace]
+
+[manager]
+global_rules_file = "{}"
+
+[container_profiles.claude]
+image = "default"
+command = ["claude", "--dangerously-skip-permissions"]
+"#,
+            docker_dir.display(),
+            root.join("global-rules.toml").display()
+        );
+        fs::write(&cfg_path, raw).expect("write config");
+        let cfg = load(&cfg_path).expect("config should load");
+        assert_eq!(
+            cfg.containers[0].command.clone(),
+            Some(vec![
+                "claude".to_string(),
+                "--dangerously-skip-permissions".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn load_rejects_empty_agent_command_override() {
+        let root = unique_temp_dir("empty-agent-command-override");
+        let cfg_path = root.join("harness-hat.toml");
+        let docker_dir = root.join("docker-root");
+        fs::create_dir_all(&docker_dir).expect("create docker dir");
+        let raw = format!(
+            r#"
+docker_dir = "{}"
+
+[workspace]
+
+[manager]
+global_rules_file = "{}"
+
+[container_profiles.claude]
+image = "default"
+command = []
+"#,
+            docker_dir.display(),
+            root.join("global-rules.toml").display()
+        );
+        fs::write(&cfg_path, raw).expect("write config");
+        let err = load(&cfg_path).expect_err("config load should fail");
+        assert!(
+            err.to_string()
+                .contains("container profile 'claude': command"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_profile_without_explicit_command() {
+        let root = unique_temp_dir("missing-profile-command");
+        let cfg_path = root.join("harness-hat.toml");
+        let docker_dir = root.join("docker-root");
+        fs::create_dir_all(&docker_dir).expect("create docker dir");
+        let raw = format!(
+            r#"
+docker_dir = "{}"
+
+[workspace]
+
+[manager]
+global_rules_file = "{}"
+
+[container_profiles.codex]
+image = "default"
+"#,
+            docker_dir.display(),
+            root.join("global-rules.toml").display()
+        );
+        fs::write(&cfg_path, raw).expect("write config");
+        let err = load(&cfg_path).expect_err("config load should fail");
+        assert!(
+            err.to_string()
+                .contains("container profile 'codex' must define command explicitly"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -730,129 +867,6 @@ mode = "direct"
     }
 
     #[test]
-    fn agent_session_mounts_match_legacy_default_paths() {
-        let home = Path::new("/home/dev");
-        let codex = agent_session_mounts_for_home(&AgentKind::Codex, home);
-        assert!(codex.iter().any(|m| {
-            m.host == home.join(".codex") && m.container == Path::new("/home/ubuntu/.codex")
-        }));
-        assert!(codex.iter().any(|m| {
-            m.host == home.join(".config/codex")
-                && m.container == Path::new("/home/ubuntu/.config/codex")
-        }));
-
-        let claude = agent_session_mounts_for_home(&AgentKind::Claude, home);
-        assert!(claude.iter().any(|m| {
-            m.host == home.join(".claude.json")
-                && m.container == Path::new("/home/ubuntu/.claude.json")
-        }));
-        assert!(claude.iter().any(|m| {
-            m.host == home.join(".claude") && m.container == Path::new("/home/ubuntu/.claude")
-        }));
-
-        let gemini = agent_session_mounts_for_home(&AgentKind::Gemini, home);
-        assert!(gemini.iter().any(|m| {
-            m.host == home.join(".gemini") && m.container == Path::new("/home/ubuntu/.gemini")
-        }));
-
-        let opencode = agent_session_mounts_for_home(&AgentKind::Opencode, home);
-        assert!(opencode.iter().any(|m| {
-            m.host == home.join(".opencode") && m.container == Path::new("/home/ubuntu/.opencode")
-        }));
-        assert!(opencode.iter().any(|m| {
-            m.host == home.join(".config/opencode")
-                && m.container == Path::new("/home/ubuntu/.config/opencode")
-        }));
-    }
-
-    #[test]
-    fn add_existing_agent_session_mounts_imports_only_present_paths() {
-        let home = unique_temp_dir("agent-session-home");
-        fs::create_dir_all(home.join(".codex")).expect("create codex home");
-        let mut mounts = vec![ContainerMount {
-            host: home.join(".custom-codex"),
-            container: "/home/ubuntu/.config/codex".into(),
-            mode: MountMode::Ro,
-        }];
-
-        add_existing_agent_session_mounts_for_home(&mut mounts, &AgentKind::Codex, &home);
-
-        assert!(mounts.iter().any(|m| {
-            m.host == home.join(".codex") && m.container == Path::new("/home/ubuntu/.codex")
-        }));
-        assert!(!mounts.iter().any(|m| m.host == home.join(".config/codex")));
-        assert_eq!(
-            mounts
-                .iter()
-                .filter(|m| m.container == Path::new("/home/ubuntu/.config/codex"))
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn add_existing_agent_session_mounts_imports_present_paths_for_all_agents() {
-        let home = unique_temp_dir("all-agent-session-home");
-        fs::write(home.join(".claude.json"), "{}").expect("create claude json");
-        for path in [
-            ".claude",
-            ".codex",
-            ".config/codex",
-            ".gemini",
-            ".opencode",
-            ".config/opencode",
-        ] {
-            fs::create_dir_all(home.join(path)).expect("create session dir");
-        }
-
-        for (agent, expected) in [
-            (
-                AgentKind::Claude,
-                vec![
-                    (".claude.json", "/home/ubuntu/.claude.json"),
-                    (".claude", "/home/ubuntu/.claude"),
-                ],
-            ),
-            (
-                AgentKind::Codex,
-                vec![
-                    (".codex", "/home/ubuntu/.codex"),
-                    (".config/codex", "/home/ubuntu/.config/codex"),
-                ],
-            ),
-            (AgentKind::Gemini, vec![(".gemini", "/home/ubuntu/.gemini")]),
-            (
-                AgentKind::Opencode,
-                vec![
-                    (".opencode", "/home/ubuntu/.opencode"),
-                    (".config/opencode", "/home/ubuntu/.config/opencode"),
-                ],
-            ),
-        ] {
-            let mut mounts = Vec::new();
-            add_existing_agent_session_mounts_for_home(&mut mounts, &agent, &home);
-
-            assert_eq!(
-                mounts.len(),
-                expected.len(),
-                "unexpected mounts for {agent:?}"
-            );
-            assert!(
-                mounts.iter().all(|m| m.mode == MountMode::Rw),
-                "session mounts should be read-write for {agent:?}"
-            );
-            for (host, container) in expected {
-                assert!(
-                    mounts.iter().any(|m| {
-                        m.host == home.join(host) && m.container == Path::new(container)
-                    }),
-                    "missing {agent:?} session mount {host} -> {container}"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn load_rejects_legacy_containers_section() {
         let root = unique_temp_dir("reject-legacy-containers");
         let cfg_path = root.join("harness-hat.toml");
@@ -900,7 +914,7 @@ global_rules_file = "{}"
 
 [container_profiles.codex]
 image = "default"
-agent = "codex"
+command = ["codex"]
 "#,
             docker_dir.display(),
             root.join("global-rules.toml").display()
@@ -911,35 +925,78 @@ agent = "codex"
         assert_eq!(cfg.containers[0].name, "codex");
         assert_eq!(cfg.containers[0].image_stem, "default");
         assert_eq!(cfg.containers[0].image, "harness-hat-default:local");
-        assert!(
-            cfg.containers[0]
-                .bypass_proxy
-                .iter()
-                .any(|host| host == "chatgpt.com")
+        assert!(cfg.containers[0].bypass_proxy.is_empty());
+    }
+
+    #[test]
+    fn load_applies_profile_starter_network_allowlist() {
+        let root = unique_temp_dir("profile-starter-network-allowlist");
+        let cfg_path = root.join("harness-hat.toml");
+        let docker_dir = root.join("docker-root");
+        fs::create_dir_all(&docker_dir).expect("create docker dir");
+        let raw = format!(
+            r#"
+docker_dir = "{}"
+
+[workspace]
+
+[manager]
+global_rules_file = "{}"
+
+[container_profiles.codex]
+image = "default"
+command = ["codex"]
+starter_network_allowlist = ["domain=api.openai.com"]
+"#,
+            docker_dir.display(),
+            root.join("global-rules.toml").display()
         );
-        assert!(
-            cfg.containers[0]
-                .bypass_proxy
-                .iter()
-                .any(|host| host == "*.chatgpt.com")
+        fs::write(&cfg_path, raw).expect("write config");
+        let cfg = load(&cfg_path).expect("config load should work");
+        assert_eq!(
+            cfg.containers[0].starter_network_allowlist,
+            vec!["domain=api.openai.com".to_string()]
         );
-        assert!(
-            cfg.containers[0]
-                .bypass_proxy
-                .iter()
-                .any(|host| host == "*.openai.com")
+    }
+
+    #[test]
+    fn load_applies_profile_runtime_toggles() {
+        let root = unique_temp_dir("profile-runtime-toggles");
+        let cfg_path = root.join("harness-hat.toml");
+        let docker_dir = root.join("docker-root");
+        fs::create_dir_all(&docker_dir).expect("create docker dir");
+        let raw = format!(
+            r#"
+docker_dir = "{}"
+
+[workspace]
+
+[manager]
+global_rules_file = "{}"
+
+[container_profiles.codex]
+image = "default"
+command = ["codex"]
+grayscale_palette = true
+mcp_log_paths = ["/home/ubuntu/.codex/log/codex-tui.log", "/root/.codex/log/codex-tui.log"]
+mcp_log_pattern = "MCP startup|UnknownIssuer"
+"#,
+            docker_dir.display(),
+            root.join("global-rules.toml").display()
         );
-        assert!(
-            cfg.containers[0]
-                .bypass_proxy
-                .iter()
-                .any(|host| host == "api.openai.com")
+        fs::write(&cfg_path, raw).expect("write config");
+        let cfg = load(&cfg_path).expect("config load should work");
+        assert!(cfg.containers[0].grayscale_palette);
+        assert_eq!(
+            cfg.containers[0].mcp_log_paths,
+            vec![
+                std::path::PathBuf::from("/home/ubuntu/.codex/log/codex-tui.log"),
+                std::path::PathBuf::from("/root/.codex/log/codex-tui.log"),
+            ]
         );
-        assert!(
-            cfg.containers[0]
-                .bypass_proxy
-                .iter()
-                .any(|host| host == "auth.openai.com")
+        assert_eq!(
+            cfg.containers[0].mcp_log_pattern.as_deref(),
+            Some("MCP startup|UnknownIssuer")
         );
     }
 

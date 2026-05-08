@@ -109,11 +109,11 @@ Harness Hat is designed to be flexible. It ships with first-class support for th
 * **Google Gemini CLI** (`@google/gemini-cli`)
 * **OpenCode** (`opencode-ai`)
 
-For primary agents, Harness Hat bind-mounts authentication and session state (e.g., `~/.claude`, `~/.gemini`) so agents authenticate once and stay authenticated across container restarts. Subagents receive a private startup snapshot of that state instead of a writable shared mount, so parallel subagents can use required session/cache files without contending over the host copies.
+The example profiles show explicit mounts for authentication and session state (for example `~/.claude` and `~/.gemini`) so agents authenticate once and stay authenticated across container restarts. Subagents receive private snapshots of configured profile mounts instead of writable shared mounts.
 
 ### Bring Your Own Agent (BYOA)
 
-Any agent that can run in a Docker container works with Harness Hat. Define custom `container_profiles` in `harness-hat.toml`, choose a Dockerfile stem via `image = "<stem>"`, and set `agent = "none"` to skip built-in config injection when needed.
+Any agent that can run in a Docker container works with Harness Hat. Define custom `container_profiles` in `harness-hat.toml`, choose a Dockerfile stem via `image = "<stem>"`, and set `command = [...]` explicitly.
 
 ## Configuration
 
@@ -127,6 +127,11 @@ Lives on your machine. Defines your environment:
   * `container_profiles.<name>.image` resolves `<docker_dir>/<image>.dockerfile`.
   * `image` is a lowercase Dockerfile stem (`a-z`, `0-9`, `-`, `_`, `.`).
   * Profiles are direct launch targets (there is no separate `[[containers]]` list).
+  * Per-profile launch argv is set with `container_profiles.<name>.command`.
+  * Built-in runtime compatibility behavior is inferred from `command[0]`, not a separate agent setting.
+  * Per-profile terminal rendering can be tuned with `container_profiles.<name>.grayscale_palette`.
+  * Per-profile MCP diagnostics can scan configured container logs via `container_profiles.<name>.mcp_log_paths`.
+  * Per-profile starter rules can be extended with `container_profiles.<name>.starter_network_allowlist`.
 * Registered workspaces and their paths.
 * Global network and execution defaults.
 * UI defaults, including `[defaults.ui].show_log_pane = true` to show the bottom log pane.
@@ -228,9 +233,9 @@ Lets an agent cleanly terminate its own container.
 Lets an agent launch and control same-workspace child agents through the manager.
 
 * **Usage inside container:** `agentctl spawn gemini --name docs`, or `agentctl spawn-many gemini 20 --prefix review`.
-* **Pacing:** `spawn` and `spawn-many` read `[agentctl].spawn_delay_ms` from `harness-rules.toml` when `--delay-ms` is omitted. Values below 100ms are clamped to 100ms. Codex launches also wait for the previous Codex subagent to fail MCP startup, clear MCP startup, sit waiting without MCP diagnostics for a short stable window, or reach the 35s diagnostic timeout.
+* **Pacing:** `spawn` and `spawn-many` read `[agentctl].spawn_delay_ms` from `harness-rules.toml` when `--delay-ms` is omitted. Values below 100ms are clamped to 100ms. Profiles with MCP diagnostics configured also wait for the previous subagent to fail MCP startup, clear MCP startup, sit waiting without MCP diagnostics for a short stable window, or reach the 35s diagnostic timeout.
 * **Limit:** `[agentctl].max_subagents` caps live descendants under one top-level agent, including nested subagents at any depth.
-* **Inspection/control:** `agentctl status <child>` includes Codex MCP diagnostics when available; use `agentctl tail <child> --all`, `agentctl send <child> "text" --enter`, and `agentctl stop <child>` for terminal control.
+* **Inspection/control:** `agentctl status <child>` includes MCP diagnostics when the selected profile configures them; use `agentctl tail <child> --all`, `agentctl send <child> "text" --enter`, and `agentctl stop <child>` for terminal control.
 
 ## License
 MIT

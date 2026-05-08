@@ -10,8 +10,6 @@ use alacritty_terminal::term::Term;
 /// Each running container gets a `ContainerSession` that owns a PTY process
 /// (`docker run -it …`) and a `vt100::Parser` screen buffer updated in
 /// real-time by a background reader thread.
-use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -20,7 +18,7 @@ use std::time::Duration;
 use std::time::Instant;
 use tempfile::{NamedTempFile, TempDir};
 
-use crate::config::{ContainerMount, MountMode};
+use crate::config::MountMode;
 use crate::container::helpers::{blend_toward_bg, luma_u8, xterm_256_index_to_rgb};
 use tracing::instrument;
 
@@ -367,183 +365,14 @@ pub(crate) fn mount_mode_arg(mode: &MountMode) -> &'static str {
     }
 }
 
-pub(crate) fn find_codex_home_container_path(mounts: &[ContainerMount]) -> Option<&Path> {
-    mounts.iter().find_map(|mount| {
-        (mount.container == PathBuf::from("/home/ubuntu/.codex")
-            || mount.container == PathBuf::from("/root/.codex"))
-        .then_some(mount.container.as_path())
-    })
-}
-
-pub(crate) fn mounts_include_codex_session_state(mounts: &[ContainerMount]) -> bool {
-    mounts.iter().any(|mount| {
-        let container = mount.container.to_string_lossy();
-        container.contains(".codex")
-            || container.contains(".config/codex")
-            || container.contains("codex")
-    })
-}
-
-pub(crate) fn append_codex_home_args(
-    docker_args: &mut Vec<String>,
-    host_path: &Path,
-) -> Result<()> {
-    let codex_home = host_path.join(".codex");
-    std::fs::create_dir_all(&codex_home).with_context(|| {
-        format!(
-            "failed to create codex home directory at {}",
-            codex_home.display()
-        )
-    })?;
-    let container_path = "/home/ubuntu/.codex";
-    docker_args.push("-e".to_string());
-    docker_args.push(format!("CODEX_HOME={container_path}"));
-    docker_args.push("-v".to_string());
-    docker_args.push(format!("{}:{container_path}:rw", codex_home.display()));
-    Ok(())
-}
-
-pub(crate) fn find_gemini_home_container_path(mounts: &[ContainerMount]) -> Option<&Path> {
-    mounts.iter().find_map(|mount| {
-        (mount.container == PathBuf::from("/home/ubuntu/.gemini")
-            || mount.container == PathBuf::from("/root/.gemini"))
-        .then_some(mount.container.as_path())
-    })
-}
-
-pub(crate) fn find_gemini_home_mount(mounts: &[ContainerMount]) -> Option<(&Path, &MountMode)> {
-    mounts.iter().find_map(|mount| {
-        (mount.container == PathBuf::from("/home/ubuntu/.gemini")
-            || mount.container == PathBuf::from("/root/.gemini"))
-        .then_some((mount.host.as_path(), &mount.mode))
-    })
-}
-
-pub(crate) fn mounts_include_gemini_session_state(mounts: &[ContainerMount]) -> bool {
-    mounts.iter().any(|mount| {
-        let container = mount.container.to_string_lossy();
-        container.contains(".gemini") || container.contains(".config/gemini")
-    })
-}
-
-pub(crate) fn append_gemini_home_args(
-    docker_args: &mut Vec<String>,
-    host_path: &Path,
-) -> Result<()> {
-    let gemini_home = host_path.join(".gemini");
-    std::fs::create_dir_all(&gemini_home).with_context(|| {
-        format!(
-            "failed to create gemini home directory at {}",
-            gemini_home.display()
-        )
-    })?;
-    for container_path in ["/home/ubuntu/.gemini", "/root/.gemini"] {
-        docker_args.push("-v".to_string());
-        docker_args.push(format!("{}:{container_path}:rw", gemini_home.display()));
-    }
-    Ok(())
-}
-
-pub(crate) fn append_missing_gemini_home_mount_args(
-    docker_args: &mut Vec<String>,
-    mounts: &[ContainerMount],
-    host_path: &Path,
-    mode: &MountMode,
-) {
-    for container_path in ["/home/ubuntu/.gemini", "/root/.gemini"] {
-        let target = PathBuf::from(container_path);
-        if mounts.iter().any(|mount| mount.container == target) {
-            continue;
-        }
-        docker_args.push("-v".to_string());
-        docker_args.push(format!(
-            "{}:{container_path}:{}",
-            host_path.display(),
-            mount_mode_arg(mode)
-        ));
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{append_gemini_home_args, append_missing_gemini_home_mount_args};
-    use crate::config::{ContainerMount, MountMode};
     use alacritty_terminal::event::{Event, EventListener, WindowSize};
     use alacritty_terminal::vte::ansi::Rgb;
-    use std::path::PathBuf;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     };
-
-    #[test]
-    fn gemini_home_args_mounts_both_possible_homes() {
-        let root =
-            std::env::temp_dir().join(format!("harness-hat-gemini-home-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).expect("create temp dir");
-        let mut args = Vec::new();
-        append_gemini_home_args(&mut args, &root).expect("append gemini args");
-
-        let mounts: Vec<String> = args
-            .chunks_exact(2)
-            .filter_map(|chunk| {
-                if chunk[0] == "-v" {
-                    Some(chunk[1].clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert!(
-            mounts
-                .iter()
-                .any(|m| m.ends_with(":/home/ubuntu/.gemini:rw"))
-        );
-        assert!(mounts.iter().any(|m| m.ends_with(":/root/.gemini:rw")));
-    }
-
-    #[test]
-    fn missing_gemini_home_mount_args_mirror_existing_home_mount_to_root() {
-        let host = PathBuf::from("/host/.gemini");
-        let configured_mounts = vec![ContainerMount {
-            host: host.clone(),
-            container: PathBuf::from("/home/ubuntu/.gemini"),
-            mode: MountMode::Rw,
-        }];
-        let mut args = Vec::new();
-
-        append_missing_gemini_home_mount_args(&mut args, &configured_mounts, &host, &MountMode::Rw);
-
-        assert_eq!(
-            args,
-            vec![
-                "-v".to_string(),
-                "/host/.gemini:/root/.gemini:rw".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn missing_gemini_home_mount_args_do_not_duplicate_existing_targets() {
-        let host = PathBuf::from("/host/.gemini");
-        let configured_mounts = vec![
-            ContainerMount {
-                host: host.clone(),
-                container: PathBuf::from("/home/ubuntu/.gemini"),
-                mode: MountMode::Rw,
-            },
-            ContainerMount {
-                host: host.clone(),
-                container: PathBuf::from("/root/.gemini"),
-                mode: MountMode::Rw,
-            },
-        ];
-        let mut args = Vec::new();
-
-        append_missing_gemini_home_mount_args(&mut args, &configured_mounts, &host, &MountMode::Rw);
-
-        assert!(args.is_empty());
-    }
 
     #[test]
     fn compose_no_proxy_handles_empty_and_duplicates() {
@@ -570,20 +399,6 @@ mod tests {
         assert_eq!(sanitize_docker_name("my project"), "my-project");
         assert_eq!(sanitize_docker_name("my@proj!ect"), "my-proj-ect");
         assert_eq!(sanitize_docker_name(""), "container");
-    }
-
-    #[test]
-    fn codex_home_args_mounts_correct_paths() {
-        let root =
-            std::env::temp_dir().join(format!("harness-hat-codex-home-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).expect("create temp dir");
-        let mut args = Vec::new();
-        super::append_codex_home_args(&mut args, &root).expect("append codex args");
-
-        assert!(args.contains(&"-e".to_string()));
-        assert!(args.contains(&"CODEX_HOME=/home/ubuntu/.codex".to_string()));
-        assert!(args.contains(&"-v".to_string()));
-        assert!(args.contains(&format!("{}/.codex:/home/ubuntu/.codex:rw", root.display())));
     }
 
     #[test]
@@ -674,56 +489,4 @@ mod tests {
         ));
         assert!(!super::recent_input_may_have_echoed(None, now));
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ClaudeSessionSource {
-    SetupTokenFile,
-    #[cfg(target_os = "macos")]
-    SetupTokenKeychain,
-}
-
-#[cfg(target_os = "macos")]
-fn read_keychain_value(service: &str) -> Option<String> {
-    let output = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", service, "-w"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let val = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    if val.is_empty() { None } else { Some(val) }
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn extract_claude_keychain_credential() -> Option<String> {
-    read_keychain_value("Claude Code-credentials")
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn extract_claude_keychain_credential() -> Option<String> {
-    None
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn read_claude_setup_token() -> Option<(String, ClaudeSessionSource)> {
-    if let Some(token) = read_keychain_value("harness-hat-claude-setup-token") {
-        return Some((token, ClaudeSessionSource::SetupTokenKeychain));
-    }
-    read_setup_token_file().map(|token| (token, ClaudeSessionSource::SetupTokenFile))
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn read_claude_setup_token() -> Option<(String, ClaudeSessionSource)> {
-    read_setup_token_file().map(|token| (token, ClaudeSessionSource::SetupTokenFile))
-}
-
-fn read_setup_token_file() -> Option<String> {
-    let path = dirs::config_dir()?
-        .join("harness-hat")
-        .join("claude-setup-token");
-    let contents = std::fs::read_to_string(path).ok()?;
-    let token = contents.trim().to_string();
-    if token.is_empty() { None } else { Some(token) }
 }

@@ -187,6 +187,7 @@ pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Re
     ]);
 
     let queue_total = app.pending_net.len();
+    let merged_total = crate::tui::app::approvals::pending_network_request_count(item);
     let source_workspace = item
         .source_project
         .clone()
@@ -242,8 +243,9 @@ pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Re
             Span::styled("  Queue   : ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!(
-                    "1/{} (exec total: {}, net total: {})",
+                    "1/{} (merged requests: {}, exec total: {}, net modals: {})",
                     queue_total.max(1),
+                    merged_total,
                     app.pending_exec.len(),
                     app.pending_net.len()
                 ),

@@ -38,7 +38,7 @@ struct PassthroughRuntime {
     mounts: Vec<crate::config::ContainerMount>,
     env_passthrough: Vec<String>,
     bypass_proxy: Vec<String>,
-    agent: crate::config::AgentKind,
+    grayscale_palette: bool,
 }
 
 pub async fn run_and_get_exit_code() -> Result<i32> {
@@ -166,7 +166,11 @@ pub async fn run_and_get_exit_code() -> Result<i32> {
         image_stem: runtime.image_stem.clone(),
         profile: None,
         mount_target: runtime.mount_target.clone(),
-        agent: runtime.agent,
+        command: None,
+        grayscale_palette: runtime.grayscale_palette,
+        starter_network_allowlist: Vec::new(),
+        mcp_log_paths: Vec::new(),
+        mcp_log_pattern: None,
         mounts: runtime.mounts.clone(),
         env_passthrough: runtime.env_passthrough.clone(),
         bypass_proxy: runtime.bypass_proxy.clone(),
@@ -186,8 +190,6 @@ pub async fn run_and_get_exit_code() -> Result<i32> {
         Some(parsed.command.as_slice()),
         &project_name,
         &cwd,
-        None,
-        None,
         &session_token,
         &token,
         &exec_url,
@@ -270,28 +272,8 @@ fn resolve_bind_host_for_container_access(configured: &str, key: &str) -> String
     host.to_string()
 }
 
-fn infer_agent_kind(command: Option<&str>) -> crate::config::AgentKind {
-    match normalize_command_name(command).as_deref() {
-        Some("codex") => crate::config::AgentKind::Codex,
-        Some("claude") => crate::config::AgentKind::Claude,
-        Some("gemini") => crate::config::AgentKind::Gemini,
-        Some("opencode") => crate::config::AgentKind::Opencode,
-        _ => crate::config::AgentKind::None,
-    }
-}
-
 fn normalize_command_name(command: Option<&str>) -> Option<String> {
-    let raw = command?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    Some(
-        Path::new(raw)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(raw)
-            .to_ascii_lowercase(),
-    )
+    crate::config::normalize_command_name(command?)
 }
 
 fn inferred_profile_for_command<'a>(
@@ -308,14 +290,13 @@ fn inferred_profile_for_command<'a>(
         return Some(ctr);
     }
 
-    let inferred_agent = infer_agent_kind(command);
-    if inferred_agent == crate::config::AgentKind::None {
-        return None;
-    }
-    config
-        .containers
-        .iter()
-        .find(|ctr| ctr.agent == inferred_agent)
+    config.containers.iter().find(|ctr| {
+        ctr.command
+            .as_deref()
+            .and_then(|argv| argv.first())
+            .and_then(|value| crate::config::normalize_command_name(value))
+            .is_some_and(|name| name == normalized)
+    })
 }
 
 fn infer_passthrough_runtime(
@@ -352,15 +333,6 @@ fn infer_passthrough_runtime(
         .map(|ctr| ctr.bypass_proxy.clone())
         .unwrap_or_else(|| config.defaults.containers.bypass_proxy.clone());
 
-    let inferred_agent = infer_agent_kind(command);
-    let agent = if inferred_agent != crate::config::AgentKind::None {
-        inferred_agent
-    } else {
-        inferred_profile
-            .map(|ctr| ctr.agent.clone())
-            .unwrap_or(crate::config::AgentKind::None)
-    };
-
     PassthroughRuntime {
         container_name,
         image_stem,
@@ -368,7 +340,9 @@ fn infer_passthrough_runtime(
         mounts,
         env_passthrough,
         bypass_proxy,
-        agent,
+        grayscale_palette: inferred_profile
+            .map(|ctr| ctr.grayscale_palette)
+            .unwrap_or(false),
     }
 }
 
@@ -528,8 +502,8 @@ fn parse_args_from(raw: Vec<OsString>) -> Result<ParsedArgs> {
 #[cfg(test)]
 mod tests {
     use super::{
-        infer_agent_kind, infer_passthrough_runtime, inferred_profile_for_command,
-        normalize_command_name, parse_args_from, resolve_bind_host_for_container_access,
+        infer_passthrough_runtime, inferred_profile_for_command, normalize_command_name,
+        parse_args_from, resolve_bind_host_for_container_access,
     };
     use std::ffi::OsString;
     use std::path::PathBuf;
@@ -537,7 +511,7 @@ mod tests {
     fn sample_container(
         name: &str,
         image_stem: &str,
-        agent: crate::config::AgentKind,
+        command: &[&str],
         mount_target: &str,
         env: &[&str],
         mount_host: &str,
@@ -549,7 +523,11 @@ mod tests {
             image_stem: image_stem.to_string(),
             profile: None,
             mount_target: PathBuf::from(mount_target),
-            agent,
+            command: Some(command.iter().map(|value| (*value).to_string()).collect()),
+            grayscale_palette: false,
+            starter_network_allowlist: Vec::new(),
+            mcp_log_paths: Vec::new(),
+            mcp_log_pattern: None,
             mounts: vec![crate::config::ContainerMount {
                 host: PathBuf::from(mount_host),
                 container: PathBuf::from(mount_container),
@@ -563,27 +541,27 @@ mod tests {
     #[test]
     fn infer_agent_kind_from_command_name() {
         assert_eq!(
-            infer_agent_kind(Some("codex")),
+            crate::config::infer_agent_kind_from_argv(Some(&["codex".to_string()])),
             crate::config::AgentKind::Codex
         );
         assert_eq!(
-            infer_agent_kind(Some("claude")),
+            crate::config::infer_agent_kind_from_argv(Some(&["claude".to_string()])),
             crate::config::AgentKind::Claude
         );
         assert_eq!(
-            infer_agent_kind(Some("gemini")),
+            crate::config::infer_agent_kind_from_argv(Some(&["gemini".to_string()])),
             crate::config::AgentKind::Gemini
         );
         assert_eq!(
-            infer_agent_kind(Some("opencode")),
+            crate::config::infer_agent_kind_from_argv(Some(&["opencode".to_string()])),
             crate::config::AgentKind::Opencode
         );
         assert_eq!(
-            infer_agent_kind(Some("anything-else")),
+            crate::config::infer_agent_kind_from_argv(Some(&["anything-else".to_string()])),
             crate::config::AgentKind::None
         );
         assert_eq!(
-            infer_agent_kind(Some("/usr/local/bin/codex")),
+            crate::config::infer_agent_kind_from_argv(Some(&["/usr/local/bin/codex".to_string()])),
             crate::config::AgentKind::Codex
         );
     }
@@ -648,7 +626,7 @@ mod tests {
             sample_container(
                 "assistant",
                 "default",
-                crate::config::AgentKind::Codex,
+                &["assistant"],
                 "/workspace-a",
                 &["A_ENV"],
                 "/a",
@@ -657,7 +635,7 @@ mod tests {
             sample_container(
                 "codex",
                 "special",
-                crate::config::AgentKind::None,
+                &["codex"],
                 "/workspace-codex",
                 &["CODEX_ENV"],
                 "/c",
@@ -684,7 +662,7 @@ mod tests {
         cfg.containers = vec![sample_container(
             "codex",
             "custom-codex",
-            crate::config::AgentKind::Codex,
+            &["codex"],
             "/workspace-codex",
             &["CODEX_ENV"],
             "/codex",
@@ -696,7 +674,6 @@ mod tests {
         assert_eq!(runtime.image_stem, "custom-codex");
         assert_eq!(runtime.mount_target, PathBuf::from("/workspace-codex"));
         assert_eq!(runtime.env_passthrough, vec!["CODEX_ENV".to_string()]);
-        assert_eq!(runtime.agent, crate::config::AgentKind::Codex);
         assert_eq!(runtime.mounts.len(), 1);
         assert_eq!(runtime.mounts[0].host, PathBuf::from("/codex"));
     }
@@ -707,7 +684,7 @@ mod tests {
         cfg.containers = vec![sample_container(
             "codex",
             "default",
-            crate::config::AgentKind::Codex,
+            &["codex"],
             "/workspace-codex",
             &["CODEX_ENV"],
             "/codex",
@@ -719,7 +696,6 @@ mod tests {
         assert_eq!(runtime.image_stem, "rust");
         assert_eq!(runtime.mount_target, PathBuf::from("/workspace-codex"));
         assert_eq!(runtime.env_passthrough, vec!["CODEX_ENV".to_string()]);
-        assert_eq!(runtime.agent, crate::config::AgentKind::Codex);
     }
 
     #[test]
@@ -738,7 +714,6 @@ mod tests {
         assert_eq!(runtime.image_stem, "default");
         assert_eq!(runtime.mount_target, PathBuf::from("/workspace-default"));
         assert_eq!(runtime.env_passthrough, vec!["DEFAULT_ENV".to_string()]);
-        assert_eq!(runtime.agent, crate::config::AgentKind::None);
         assert_eq!(runtime.mounts.len(), 1);
         assert_eq!(runtime.mounts[0].host, PathBuf::from("/default"));
     }

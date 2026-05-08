@@ -9,8 +9,13 @@ pub use crate::rules::ApprovalMode;
 
 // ── Top-level ────────────────────────────────────────────────────────────────
 
+pub const CURRENT_CONFIG_VERSION: u32 = 1;
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
+    /// Schema version for future harness-hat.toml migrations.
+    #[serde(default = "current_config_version")]
+    pub version: u32,
     pub manager: ManagerConfig,
     /// Directory containing the repository root used for Docker builds.
     /// This is required at startup and is auto-populated by
@@ -19,8 +24,6 @@ pub struct Config {
     pub docker_dir: PathBuf,
     #[serde(default)]
     pub defaults: DefaultsConfig,
-    #[serde(default)]
-    pub agents: AgentsConfig,
     #[serde(default)]
     pub env_profiles: HashMap<String, EnvProfile>,
     #[serde(default, alias = "projects")]
@@ -38,13 +41,13 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            version: CURRENT_CONFIG_VERSION,
             manager: ManagerConfig::default(),
             // `docker_dir` is expected to be populated during
             // `harness-hat-manager --init`.
             // An empty PathBuf here signifies an uninitialized state.
             docker_dir: PathBuf::new(),
             defaults: DefaultsConfig::default(),
-            agents: AgentsConfig::default(),
             env_profiles: HashMap::new(),
             workspaces: Vec::new(),
             container_profiles: HashMap::new(),
@@ -54,40 +57,16 @@ impl Default for Config {
     }
 }
 
+pub(crate) fn current_config_version() -> u32 {
+    CURRENT_CONFIG_VERSION
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct ManagerConfig {
     /// Path to the global harness-rules.toml where auto-approved commands are persisted.
     /// Created on first use if it does not exist.
     #[serde(alias = "rules_file")]
     pub global_rules_file: PathBuf,
-}
-
-// ── Agents ───────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-pub struct AgentsConfig {
-    pub claude: Option<ClaudeAgentConfig>,
-    pub codex: Option<CodexAgentConfig>,
-    pub gemini: Option<GeminiAgentConfig>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ClaudeAgentConfig {
-    /// Where to write the generated `settings.json`.
-    pub settings_path: Option<PathBuf>,
-    /// Additional instructions appended to `CLAUDE.md`.
-    pub extra_instructions: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct CodexAgentConfig {
-    pub config_path: Option<PathBuf>,
-    pub extra_instructions: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct GeminiAgentConfig {
-    pub extra_instructions: Option<String>,
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────────────

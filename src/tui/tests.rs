@@ -2,7 +2,7 @@ use super::{App, Focus, SidebarItem, restore_terminal_output};
 use crate::activity::{Activity, ActivityEvent, ActivityKind, ActivityState};
 use crate::ca::CaStore;
 use crate::config::Config;
-use crate::proxy::ProxyState;
+use crate::proxy::{NetworkDecision, PendingNetworkItem, ProxyState};
 use crate::shared_config::SharedConfig;
 use crate::state::StateManager;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -123,6 +123,7 @@ canonical_path = "{}"
 
 [container_profiles.test]
 image = "missing-image"
+command = ["test-agent"]
 "#,
         docker_dir.display(),
         global_rules_file.display(),
@@ -165,6 +166,81 @@ image = "missing-image"
 
 fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
     KeyEvent::new(code, modifiers)
+}
+
+fn pending_network_item(
+    workspace: &str,
+    method: &str,
+    host: &str,
+    port: Option<u16>,
+    path: &str,
+) -> (
+    PendingNetworkItem,
+    tokio::sync::oneshot::Receiver<NetworkDecision>,
+) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    (
+        PendingNetworkItem {
+            activity_id: uuid::Uuid::new_v4().to_string(),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            source_project: Some(workspace.to_string()),
+            source_container: Some("agent-a".to_string()),
+            source_status: "ok".to_string(),
+            has_proxy_authorization: true,
+            method: method.to_string(),
+            host: host.to_string(),
+            port,
+            path: path.to_string(),
+            response_tx: tx,
+            merged_response_txs: Vec::new(),
+        },
+        rx,
+    )
+}
+
+#[test]
+fn duplicate_network_prompts_merge_within_workspace() {
+    let mut app = build_test_app();
+    let (first, mut first_rx) =
+        pending_network_item("project-a", "GET", "example.com", Some(443), "/v1/models");
+    let (second, mut second_rx) =
+        pending_network_item("project-a", "get", "EXAMPLE.com", Some(443), "/v1/models");
+
+    app.enqueue_pending_network(first);
+    app.enqueue_pending_network(second);
+
+    assert_eq!(app.pending_net.len(), 1);
+    assert_eq!(
+        super::app::approvals::pending_network_request_count(&app.pending_net[0]),
+        2
+    );
+
+    app.approve_net(0);
+
+    assert!(matches!(first_rx.try_recv(), Ok(NetworkDecision::Allow)));
+    assert!(matches!(second_rx.try_recv(), Ok(NetworkDecision::Allow)));
+}
+
+#[test]
+fn duplicate_network_prompts_do_not_merge_across_workspaces() {
+    let mut app = build_test_app();
+    let (first, _first_rx) =
+        pending_network_item("project-a", "GET", "example.com", Some(443), "/v1/models");
+    let (second, _second_rx) =
+        pending_network_item("project-b", "GET", "example.com", Some(443), "/v1/models");
+
+    app.enqueue_pending_network(first);
+    app.enqueue_pending_network(second);
+
+    assert_eq!(app.pending_net.len(), 2);
+    assert_eq!(
+        super::app::approvals::pending_network_request_count(&app.pending_net[0]),
+        1
+    );
+    assert_eq!(
+        super::app::approvals::pending_network_request_count(&app.pending_net[1]),
+        1
+    );
 }
 
 #[test]
@@ -765,27 +841,27 @@ fn ctrl_g_toggles_terminal_fullscreen() {
 }
 
 #[test]
-fn escape_returns_terminal_fullscreen_to_sidebar() {
+fn escape_stays_in_terminal_fullscreen_without_quitting() {
     let mut app = build_test_app();
     app.focus = Focus::Terminal;
     app.active_session = Some(0);
     app.terminal_fullscreen = true;
 
     app.handle_terminal_key(key(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(!app.terminal_fullscreen);
-    assert_eq!(app.focus, Focus::Sidebar);
+    assert!(app.terminal_fullscreen);
+    assert_eq!(app.focus, Focus::Terminal);
     assert!(!app.should_quit);
 }
 
 #[test]
-fn escape_returns_terminal_to_sidebar_without_quitting() {
+fn escape_stays_in_terminal_without_quitting() {
     let mut app = build_test_app();
     app.focus = Focus::Terminal;
     app.active_session = Some(0);
 
     app.handle_terminal_key(key(KeyCode::Esc, KeyModifiers::NONE));
     assert!(!app.should_quit);
-    assert_eq!(app.focus, Focus::Sidebar);
+    assert_eq!(app.focus, Focus::Terminal);
 }
 
 #[test]
@@ -1036,7 +1112,6 @@ fn workspace_rules_created_by_cli_after_open_does_not_trigger_security_modal() {
     app.tick_base_rules_file_watch();
 
     let result = crate::agents::inject_agent_config(
-        &crate::config::AgentKind::Codex,
         &project_path,
         &project_path,
         "project-a",
@@ -1044,7 +1119,7 @@ fn workspace_rules_created_by_cli_after_open_does_not_trigger_security_modal() {
         std::path::Path::new("/workspace"),
         "http://127.0.0.1:0",
         "http://127.0.0.1:0",
-        None,
+        &[],
     )
     .expect("inject agent config");
     let created = result.created_rules.expect("starter rules file created");
@@ -1065,7 +1140,6 @@ fn workspace_rules_tampered_during_cli_create_still_triggers_security_modal() {
     app.tick_base_rules_file_watch();
 
     let result = crate::agents::inject_agent_config(
-        &crate::config::AgentKind::Codex,
         &project_path,
         &project_path,
         "project-a",
@@ -1073,7 +1147,7 @@ fn workspace_rules_tampered_during_cli_create_still_triggers_security_modal() {
         std::path::Path::new("/workspace"),
         "http://127.0.0.1:0",
         "http://127.0.0.1:0",
-        None,
+        &[],
     )
     .expect("inject agent config");
     let created = result.created_rules.expect("starter rules file created");

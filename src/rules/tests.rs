@@ -10,6 +10,8 @@ mod tests {
     #[test]
     fn parses_current_schema() {
         let raw = r#"
+version = 1
+
 [hostdo]
 default_policy = "prompt"
 
@@ -34,6 +36,7 @@ denylist = ["domain=blocked.example.com"]
 
         let parsed: Result<ProjectRules, toml::de::Error> = toml::from_str(raw);
         let rules = parsed.expect("expected current schema to parse");
+        assert_eq!(rules.version, 1);
         assert_eq!(rules.agentctl.spawn_delay_ms, 500);
         assert_eq!(rules.agentctl.max_subagents, 20);
         assert_eq!(rules.agentctl.effective_spawn_delay_ms(), 500);
@@ -44,6 +47,40 @@ denylist = ["domain=blocked.example.com"]
             rules.network.denylist,
             vec!["domain=blocked.example.com".to_string()]
         );
+    }
+
+    #[test]
+    fn missing_rules_version_defaults_to_current() {
+        let rules: ProjectRules = toml::from_str(
+            r#"
+[network]
+allowlist = ["domain=github.com"]
+"#,
+        )
+        .expect("parse rules");
+
+        assert_eq!(rules.version, crate::rules::CURRENT_RULES_VERSION);
+    }
+
+    #[test]
+    fn load_rejects_future_rules_version() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("harness-hat-rules-future-{nonce}"));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("harness-rules.toml");
+        std::fs::write(&path, "version = 999\n").expect("write rules");
+
+        let err = load(&path).expect_err("future version should be rejected");
+        assert!(
+            err.to_string().contains("unsupported version 999"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
@@ -216,6 +253,7 @@ allowlist = ["domain=github.com"]
             s.contains("Preferred place for *human/LLM instructions*"),
             "missing instruction hint"
         );
+        assert!(s.contains("version = 1"), "missing schema version");
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);

@@ -2,7 +2,7 @@
 
 This changelog is derived from git history and the current working tree.
 
-## [Future]
+## 0.4.0 Future
 
 ### Added
 - Scoped proxy listeners now require per-session proxy authentication before accepting HTTP or CONNECT traffic.
@@ -26,6 +26,10 @@ This changelog is derived from git history and the current working tree.
 - `agentctl send` now supports `--enter` and paced chunked delivery for longer prompts.
 - `agentctl spawn-many` now supports paced subagent launches using `[agentctl].spawn_delay_ms` from `harness-rules.toml`, with a 100ms minimum effective delay.
 - `[agentctl].max_subagents` now limits live descendants under a single top-level agent; the default is 10.
+- Agent launch argv is now configurable per container profile under `[container_profiles.<name>].command`, allowing overrides such as `["claude", "--dangerously-skip-permissions"]`.
+- Container profiles can now define `starter_network_allowlist` entries that are copied into newly created workspace `harness-rules.toml` files.
+- `harness-hat.toml` and `harness-rules.toml` now support top-level `version = 1` schema markers for future migrations while treating missing versions as version 1.
+- Duplicate pending network approval requests are now merged per workspace, method, host, port, and path so one modal decision can approve or deny all matching simultaneous requests.
 
 ### Changed
 - Direct-mode workspace handling now uses each workspace's `canonical_path` directly instead of routing through legacy effective sync/workspace helper APIs.
@@ -56,6 +60,11 @@ This changelog is derived from git history and the current working tree.
 - Subagent names are parent-local aliases, and the sidebar now renders nested subagent trees recursively.
 - Large activity start events now box the activity payload to reduce enum size.
 - README and the example config now document that Docker-reachable bind addresses should be narrowed or firewalled on shared networks.
+- `agentctl spawn` and `agentctl spawn-many` now accept configured profile names instead of being limited to hardcoded agent names.
+- Starter `harness-rules.toml` generation now derives agent API allowlist entries from the selected profile's `starter_network_allowlist` rather than from a separate agent-kind field.
+- Codex subagent launches use a shorter MCP diagnostic poll/stability window, and the temporary MCP startup gate no longer blocks the spawn request path.
+- Subagent-scoped proxy capacity is now capped more tightly per subagent to avoid one child agent exhausting proxy resources.
+- Network approval overlays now show how many matching requests were merged into the current modal.
 
 ### Fixed
 - `bypass_proxy` can no longer skip network policy decisions for CONNECT or transparent TLS traffic.
@@ -70,6 +79,11 @@ This changelog is derived from git history and the current working tree.
 - Docker-backed `hostdo --image` commands now preserve workspace-relative runner CWD mapping when the configured workspace path is a symlink.
 - High-volume `hostdo` command output can no longer grow an unbounded manager-side queue; stdout/stderr streaming now applies bounded backpressure and stops forwarding lines after the capture cap is reached.
 - Cargo clippy warnings introduced by dependency and type-size changes were resolved.
+- Codex subagent config snapshots now skip dangling symlinks and live runtime state directories instead of failing the launch.
+- `agentctl status`, `tail`, `send`, and `stop` now use shorter control-request timeouts so one stuck subagent request does not hang the caller for the full spawn timeout.
+- Pending network approval queues are now bounded; overflow requests are denied instead of allowing modal storms to grow without limit.
+- Closing or stopping a subagent now denies and removes its pending network approval requests so stale proxy waiters do not linger.
+- Parallel subagents triggering the same network prompt no longer freeze the TUI with duplicate modals.
 
 ### Removed
 - Removed inert sync/workspace config schema fields (`workspace_path`, per-workspace `sync`, per-workspace `disposable`, per-workspace `default_policy`, `[defaults.sync]`, and `[defaults.workspace]`) that were already ignored by direct-mode runtime behavior.
@@ -80,6 +94,7 @@ This changelog is derived from git history and the current working tree.
 - Runtime helper artifacts under `docker/scripts/harness-hat-hostdo-*` are now ignored for older launch behavior.
 - Removed unused PWA dependencies, including Ark UI and Park UI packages.
 - Removed the unused `rustls-pemfile` dependency.
+- Removed legacy per-agent config fields from `harness-hat.toml`; profile `command`, mounts, runtime toggles, and `starter_network_allowlist` now carry that behavior.
 
 ## [0.3.0] - May 5, 2026
 

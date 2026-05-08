@@ -26,13 +26,12 @@ impl Default for WorkspaceConfig {
 
 // ── Containers ───────────────────────────────────────────────────────────────
 
-/// Which AI agent CLI is installed in a container image.
-/// Used to generate the right config files (CLAUDE.md, settings.json, etc.)
-/// into the workspace before the container starts.
+/// Known agent CLIs inferred from launch argv for runtime-specific diagnostics
+/// and compatibility behavior.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentKind {
-    /// No agent — skip config file injection.
+    /// No recognized built-in runtime.
     #[default]
     None,
     /// Claude Code CLI (`@anthropic-ai/claude-code`).
@@ -64,11 +63,21 @@ pub struct ContainerDef {
     /// Defaults to `/workspace`.
     #[serde(default = "default_mount_target")]
     pub mount_target: PathBuf,
-    /// Which agent CLI is installed in this image.  Controls which config
-    /// files (CLAUDE.md, settings.json, AGENTS.md, etc.) are written into
-    /// the workspace at launch time.
+    /// Optional argv override used to start the agent inside the container.
     #[serde(default)]
-    pub agent: AgentKind,
+    pub command: Option<Vec<String>>,
+    /// Render ANSI palette requests in grayscale for this profile.
+    #[serde(default)]
+    pub grayscale_palette: bool,
+    /// Additional allowlist entries written into a starter `harness-rules.toml`.
+    #[serde(default)]
+    pub starter_network_allowlist: Vec<String>,
+    /// Optional container log paths to scan for MCP startup diagnostics.
+    #[serde(default)]
+    pub mcp_log_paths: Vec<PathBuf>,
+    /// Optional grep pattern used when scanning `mcp_log_paths`.
+    #[serde(default)]
+    pub mcp_log_pattern: Option<String>,
     /// Extra host paths to mount into the container (for auth/session reuse).
     #[serde(default)]
     pub mounts: Vec<ContainerMount>,
@@ -91,7 +100,15 @@ pub struct ContainerProfile {
     #[serde(default)]
     pub mount_target: Option<PathBuf>,
     #[serde(default)]
-    pub agent: Option<AgentKind>,
+    pub command: Option<Vec<String>>,
+    #[serde(default)]
+    pub grayscale_palette: Option<bool>,
+    #[serde(default)]
+    pub starter_network_allowlist: Vec<String>,
+    #[serde(default)]
+    pub mcp_log_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub mcp_log_pattern: Option<String>,
     #[serde(default)]
     pub mounts: Vec<ContainerMount>,
     #[serde(default)]
@@ -106,9 +123,13 @@ pub struct ContainerDefaults {
     #[serde(default)]
     pub mount_target: Option<PathBuf>,
     #[serde(default)]
-    pub agent: Option<AgentKind>,
+    pub grayscale_palette: Option<bool>,
     #[serde(default)]
     pub mounts: Vec<ContainerMount>,
+    #[serde(default)]
+    pub mcp_log_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub mcp_log_pattern: Option<String>,
     #[serde(default)]
     pub env_passthrough: Vec<String>,
     #[serde(default)]
@@ -117,6 +138,34 @@ pub struct ContainerDefaults {
 
 pub(crate) fn default_mount_target() -> PathBuf {
     PathBuf::from("/workspace")
+}
+
+pub fn infer_agent_kind_from_argv(command: Option<&[String]>) -> AgentKind {
+    let executable = command
+        .and_then(|argv| argv.first())
+        .map(String::as_str)
+        .and_then(normalize_command_name);
+    match executable.as_deref() {
+        Some("claude") => AgentKind::Claude,
+        Some("codex") => AgentKind::Codex,
+        Some("gemini") => AgentKind::Gemini,
+        Some("opencode") => AgentKind::Opencode,
+        _ => AgentKind::None,
+    }
+}
+
+pub fn normalize_command_name(command: &str) -> Option<String> {
+    let raw = command.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(
+        std::path::Path::new(raw)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(raw)
+            .to_ascii_lowercase(),
+    )
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]

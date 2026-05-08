@@ -14,6 +14,7 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
 pub const DEFAULT_AGENTCTL_SPAWN_DELAY_MS: u64 = 500;
 pub const MIN_AGENTCTL_SPAWN_DELAY_MS: u64 = 100;
 pub const DEFAULT_AGENTCTL_MAX_SUBAGENTS: usize = 10;
+pub const CURRENT_RULES_VERSION: u32 = 1;
 
 // ── Enums (re-used across config and rules) ──────────────────────────────────
 
@@ -61,9 +62,12 @@ impl Default for NetworkPolicy {
 
 // ── harness-rules.toml schema ───────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectRules {
+    /// Schema version for future harness-rules.toml migrations.
+    #[serde(default = "current_rules_version")]
+    pub version: u32,
     /// Optional instructions for a human or LLM agent. This field is preserved
     /// across automatic edits to this file (e.g. when harness-hat appends a new
     /// `hostdo` command rule).
@@ -75,6 +79,22 @@ pub struct ProjectRules {
     pub hostdo: HostdoRules,
     #[serde(default)]
     pub network: NetworkRules,
+}
+
+fn current_rules_version() -> u32 {
+    CURRENT_RULES_VERSION
+}
+
+impl Default for ProjectRules {
+    fn default() -> Self {
+        Self {
+            version: CURRENT_RULES_VERSION,
+            llm_instructions: None,
+            agentctl: AgentctlRules::default(),
+            hostdo: HostdoRules::default(),
+            network: NetworkRules::default(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -531,6 +551,7 @@ pub fn load(path: &Path) -> Result<ProjectRules> {
         .with_context(|| format!("reading harness-rules.toml: {}", path.display()))?;
     let parsed: ProjectRules = toml::from_str(&raw)
         .with_context(|| format!("parsing harness-rules.toml: {}", path.display()))?;
+    validate_rules_version(parsed.version, path)?;
     for entry in &parsed.network.allowlist {
         parse_network_allowlist_rule(entry).with_context(|| {
             format!(
@@ -550,6 +571,22 @@ pub fn load(path: &Path) -> Result<ProjectRules> {
         })?;
     }
     Ok(parsed)
+}
+
+fn validate_rules_version(version: u32, path: &Path) -> Result<()> {
+    anyhow::ensure!(
+        version > 0,
+        "harness-rules.toml {}: version must be greater than zero",
+        path.display()
+    );
+    anyhow::ensure!(
+        version <= CURRENT_RULES_VERSION,
+        "harness-rules.toml {}: unsupported version {}; this build supports up to {}",
+        path.display(),
+        version,
+        CURRENT_RULES_VERSION
+    );
+    Ok(())
 }
 
 /// Append an auto-approved command to the rules file at `path`.
@@ -628,11 +665,13 @@ const RULES_FILE_HEADER: &str = "\
 #   `hostdo --image rust:1.88 cargo test`.
 # - `hostdo` requests are policy checked against the `[hostdo]` rules below and may
 #   prompt the developer.
+# - Prefer existing auto-approved `hostdo` commands or `hostdo.command_aliases`
+#   before asking for a new host command approval.
 #
 # Subagents:
-# - Use `agentctl spawn <agent> [--name <name>]` to start a same-workspace
-#   subagent, where `<agent>` is `claude`, `codex`, `gemini`, or `opencode`.
-# - Use `agentctl spawn-many <agent> <count> --prefix <name>` for larger
+# - Use `agentctl spawn <profile> [--name <name>]` to start a same-workspace
+#   subagent from a configured container profile.
+# - Use `agentctl spawn-many <profile> <count> --prefix <name>` for larger
 #   batches; launches are paced by `[agentctl].spawn_delay_ms` and never below
 #   100ms between spawn requests.
 # - Codex subagent launches additionally wait for the previous Codex launch to

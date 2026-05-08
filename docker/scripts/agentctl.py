@@ -32,8 +32,8 @@ _TIMEOUT = 360
 _DEFAULT_SPAWN_DELAY_MS = 500
 _MIN_SPAWN_DELAY_MS = 100
 _CODEX_MCP_GATE_TIMEOUT_MS = 35_000
-_CODEX_MCP_GATE_POLL_MS = 1_000
-_CODEX_MCP_FAST_CLEAN_STABLE_MS = 5_000
+_CODEX_MCP_GATE_POLL_MS = 250
+_CODEX_MCP_FAST_CLEAN_STABLE_MS = 1_500
 _DEFAULT_SEND_CHUNK_SIZE = 120
 _DEFAULT_SEND_DELAY_MS = 15
 _DEFAULT_SEND_MANY_ENTER_DELAY_MS = 250
@@ -258,14 +258,13 @@ def _write_last_spawn_at(f, value: float) -> None:
         pass
 
 
-def _spawn_payload(agent: str, name: str | None) -> dict:
-    payload = {"agent": agent}
+def _spawn_payload(profile: str, name: str | None) -> dict:
+    payload = {"profile": profile}
     if name:
         payload["name"] = name
-    if agent == "codex":
-        token = os.environ.get("CODEX_CONNECTORS_TOKEN", "").strip()
-        if token:
-            payload["codex_connectors_token"] = token
+    token = os.environ.get("CODEX_CONNECTORS_TOKEN", "").strip()
+    if token:
+        payload["codex_connectors_token"] = token
     return payload
 
 
@@ -316,7 +315,7 @@ def _wait_for_codex_mcp_gate(child: str, timeout_ms: int = _CODEX_MCP_GATE_TIMEO
         time.sleep(_CODEX_MCP_GATE_POLL_MS / 1000)
 
 
-def _paced_spawn_request(agent: str, name: str | None, delay_ms: int, jitter_ms: int = 0):
+def _paced_spawn_request(profile: str, name: str | None, delay_ms: int, jitter_ms: int = 0):
     delay_ms = max(_MIN_SPAWN_DELAY_MS, delay_ms)
     jitter_ms = max(0, jitter_ms)
     with _spawn_lock() as lock_file:
@@ -329,11 +328,7 @@ def _paced_spawn_request(agent: str, name: str | None, delay_ms: int, jitter_ms:
             if remaining > 0:
                 time.sleep(remaining)
         _write_last_spawn_at(lock_file, time.time())
-        result = _request("POST", "/agents/spawn", _spawn_payload(agent, name))
-        if agent == "codex":
-            child = result.get("name") or result.get("id") or name
-            if child:
-                result["startup_gate"] = _wait_for_codex_mcp_gate(child)
+        result = _request("POST", "/agents/spawn", _spawn_payload(profile, name))
         return result
 
 
@@ -370,11 +365,11 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     spawn = sub.add_parser("spawn")
-    spawn.add_argument("agent", choices=["claude", "codex", "gemini", "opencode"])
+    spawn.add_argument("profile")
     spawn.add_argument("--name")
 
     spawn_many = sub.add_parser("spawn-many")
-    spawn_many.add_argument("agent", choices=["claude", "codex", "gemini", "opencode"])
+    spawn_many.add_argument("profile")
     spawn_many.add_argument("count", type=int)
     spawn_many.add_argument("--prefix")
     spawn_many.add_argument("--start", type=int, default=1)
@@ -430,12 +425,12 @@ def main() -> None:
 
     if args.cmd == "spawn":
         delay_ms = _configured_spawn_delay_ms()
-        _print_json(_paced_spawn_request(args.agent, args.name, delay_ms))
+        _print_json(_paced_spawn_request(args.profile, args.name, delay_ms))
     elif args.cmd == "spawn-many":
         if args.count < 1:
             print("agentctl: spawn-many count must be at least 1", file=sys.stderr)
             sys.exit(1)
-        prefix = args.prefix or args.agent
+        prefix = args.prefix or args.profile
         delay_ms = args.delay_ms if args.delay_ms is not None else _configured_spawn_delay_ms()
         delay_ms = max(_MIN_SPAWN_DELAY_MS, delay_ms)
         jitter_ms = max(0, args.jitter_ms)
@@ -443,7 +438,7 @@ def main() -> None:
         for offset in range(args.count):
             ordinal = args.start + offset
             name = f"{prefix}-{ordinal}"
-            result = _paced_spawn_request(args.agent, name, delay_ms, jitter_ms)
+            result = _paced_spawn_request(args.profile, name, delay_ms, jitter_ms)
             spawned.append(result)
             print(f"spawned {name}", file=sys.stderr, flush=True)
         _print_json({"ok": True, "count": len(spawned), "agents": spawned})

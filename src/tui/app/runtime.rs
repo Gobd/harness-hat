@@ -1,6 +1,8 @@
 use super::*;
 
 impl App {
+    const MAX_PENDING_NETWORK_APPROVALS: usize = 64;
+
     pub(crate) fn drain_channels(&mut self) {
         let activity_selected_before = {
             let items = self.sidebar_items();
@@ -21,7 +23,7 @@ impl App {
         self.drain_agent_control_requests();
         for _ in 0..32 {
             match self.net_pending_rx.try_recv() {
-                Ok(item) => self.pending_net.push(item),
+                Ok(item) => self.enqueue_pending_network(item),
                 Err(_) => break,
             }
         }
@@ -193,6 +195,37 @@ impl App {
         self.restore_sidebar_selection(selected_before_prune.as_ref(), &items);
     }
 
+    pub(crate) fn enqueue_pending_network(&mut self, item: crate::proxy::PendingNetworkItem) {
+        if let Some(existing) = self
+            .pending_net
+            .iter_mut()
+            .find(|pending| pending_network_merge_key_matches(pending, &item))
+        {
+            existing.merged_response_txs.push(item.response_tx);
+            return;
+        }
+
+        if self.pending_net.len() < Self::MAX_PENDING_NETWORK_APPROVALS {
+            self.pending_net.push(item);
+            return;
+        }
+
+        let activity_id = item.activity_id.clone();
+        let mut item = item;
+        crate::tui::app::approvals::send_pending_network_decision(
+            &mut item,
+            crate::proxy::NetworkDecision::Deny,
+        );
+        if let Some(activity) = self.activity_by_id_mut(&activity_id) {
+            activity.state = crate::activity::ActivityState::Denied;
+            activity.status = Some("too many pending network approvals".to_string());
+            activity.updated_at = std::time::Instant::now();
+            activity.finished_at = Some(activity.updated_at);
+            activity.mark_command_finished(activity.updated_at);
+            activity.terminal_unselected_at = None;
+        }
+    }
+
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
         if self.focus != Focus::Terminal {
             return;
@@ -265,4 +298,15 @@ impl App {
             }
         }
     }
+}
+
+fn pending_network_merge_key_matches(
+    left: &crate::proxy::PendingNetworkItem,
+    right: &crate::proxy::PendingNetworkItem,
+) -> bool {
+    left.source_project == right.source_project
+        && left.method.eq_ignore_ascii_case(&right.method)
+        && left.host.eq_ignore_ascii_case(&right.host)
+        && left.port == right.port
+        && left.path == right.path
 }

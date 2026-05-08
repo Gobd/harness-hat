@@ -24,11 +24,13 @@
 #   `hostdo --image rust:1.88 cargo test`.
 # - `hostdo` requests are policy checked against the `[hostdo]` rules below and may
 #   prompt the developer.
+# - Prefer existing auto-approved `hostdo` commands or `hostdo.command_aliases`
+#   before asking for a new host command approval.
 #
 # Subagents:
-# - Use `agentctl spawn <agent> [--name <name>]` to start a same-workspace
-#   subagent, where `<agent>` is `claude`, `codex`, `gemini`, or `opencode`.
-# - Use `agentctl spawn-many <agent> <count> --prefix <name>` for larger
+# - Use `agentctl spawn <profile> [--name <name>]` to start a same-workspace
+#   subagent from a configured container profile.
+# - Use `agentctl spawn-many <profile> <count> --prefix <name>` for larger
 #   batches; launches are paced by `[agentctl].spawn_delay_ms` and never below
 #   100ms between spawn requests.
 # - Codex subagent launches additionally wait for the previous Codex launch to
@@ -577,24 +579,24 @@ timeout_secs = 60
 concurrency = "queue"
 approval_mode = "auto"
 
-[hostdo.command_aliases.check]
-cmd = "cargo check"
-cwd = "$WORKSPACE"
-
-[hostdo.command_aliases.lint]
-cmd = "cargo clippy"
+[hostdo.command_aliases.build]
+cmd = "cargo build"
 cwd = "$WORKSPACE"
 
 [hostdo.command_aliases.test]
 cmd = "cargo test"
 cwd = "$WORKSPACE"
 
+[hostdo.command_aliases.check]
+cmd = "cargo check"
+cwd = "$WORKSPACE"
+
 [hostdo.command_aliases.fmt]
 cmd = "cargo fmt"
 cwd = "$WORKSPACE"
 
-[hostdo.command_aliases.build]
-cmd = "cargo build"
+[hostdo.command_aliases.lint]
+cmd = "cargo clippy"
 cwd = "$WORKSPACE"
 
 [network]
@@ -609,5 +611,10 @@ allowlist = [
     "domain=cloudcode-pa.googleapis.com",
     "domain=oauth2.googleapis.com",
     "domain=api.openai.com",
+    "domain=api.anthropic.com",
+    "domain=mcp-proxy.anthropic.com",
+    "domain=models.dev",
+    "domain=release-assets.githubusercontent.com",
+    "domain=opencode.ai",
 ]
-denylist = ["domain=*.example.com"]
+denylist = ["domain=http-intake.logs.us5.datadoghq.com"]

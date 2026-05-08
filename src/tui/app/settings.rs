@@ -204,12 +204,7 @@ impl App {
             return;
         }
 
-        if key.code == KeyCode::Esc {
-            self.focus_sidebar_shortcut();
-            return;
-        } else {
-            self.last_terminal_esc = None;
-        }
+        self.last_terminal_esc = None;
 
         if let Some(si) = self.active_session {
             if self.session_is_loading(si) {

@@ -20,7 +20,8 @@ use crate::shared_config::SharedConfig;
 use crate::state::{AuditEntry, StateManager};
 
 pub const AGENT_CONTROL_CHANNEL_CAPACITY: usize = 65_536;
-const AGENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(900);
+const AGENT_SPAWN_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const AGENT_CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const AGENT_SEND_MANY_LIMIT: usize = 4096;
 
 /// A command request waiting for developer approval in the TUI.
@@ -149,7 +150,7 @@ pub struct StopResponse {
 /// Request payload accepted by the subagent spawn endpoint.
 #[derive(Debug, Deserialize)]
 pub struct AgentSpawnRequest {
-    pub agent: AgentKind,
+    pub profile: String,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -179,6 +180,7 @@ pub struct AgentSendManyItem {
 pub struct AgentSpawnResponse {
     pub id: String,
     pub name: String,
+    pub profile: String,
     pub agent: AgentKind,
     pub container_id: String,
 }
@@ -265,7 +267,7 @@ pub enum AgentControlRequest {
     Spawn {
         parent_session_token: String,
         project: String,
-        agent: AgentKind,
+        profile: String,
         name: Option<String>,
         codex_connectors_token: Option<String>,
         response_tx: oneshot::Sender<Result<AgentSpawnResponse, String>>,
@@ -532,20 +534,20 @@ pub(super) async fn agent_spawn_handler(
         Err(resp) => return resp,
     };
 
-    if req.agent == AgentKind::None {
-        return deny("agent must be claude, gemini, opencode, or codex".into());
+    if req.profile.trim().is_empty() {
+        return deny("profile must not be empty".into());
     }
 
     let (response_tx, response_rx) = oneshot::channel();
     let item = AgentControlRequest::Spawn {
         parent_session_token,
         project: identity.project,
-        agent: req.agent,
+        profile: req.profile,
         name: req.name,
         codex_connectors_token: req.codex_connectors_token,
         response_tx,
     };
-    dispatch_agent_request(&state, item, response_rx).await
+    dispatch_agent_request(&state, item, response_rx, AGENT_SPAWN_REQUEST_TIMEOUT).await
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -578,7 +580,7 @@ pub(super) async fn agent_status_handler(
         include_log_diagnostics: query.include_log_diagnostics(),
         response_tx,
     };
-    dispatch_agent_request(&state, item, response_rx).await
+    dispatch_agent_request(&state, item, response_rx, AGENT_CONTROL_REQUEST_TIMEOUT).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -606,7 +608,7 @@ pub(super) async fn agent_tail_handler(
         rows,
         response_tx,
     };
-    dispatch_agent_request(&state, item, response_rx).await
+    dispatch_agent_request(&state, item, response_rx, AGENT_CONTROL_REQUEST_TIMEOUT).await
 }
 
 pub(super) async fn agent_send_handler(
@@ -627,7 +629,7 @@ pub(super) async fn agent_send_handler(
         input: req.input,
         response_tx,
     };
-    dispatch_agent_request(&state, item, response_rx).await
+    dispatch_agent_request(&state, item, response_rx, AGENT_CONTROL_REQUEST_TIMEOUT).await
 }
 
 pub(super) async fn agent_send_many_handler(
@@ -670,7 +672,7 @@ pub(super) async fn agent_send_many_handler(
         items: req.items,
         response_tx,
     };
-    dispatch_agent_request(&state, item, response_rx).await
+    dispatch_agent_request(&state, item, response_rx, AGENT_CONTROL_REQUEST_TIMEOUT).await
 }
 
 pub(super) async fn agent_stop_handler(
@@ -689,13 +691,14 @@ pub(super) async fn agent_stop_handler(
         child,
         response_tx,
     };
-    dispatch_agent_request(&state, item, response_rx).await
+    dispatch_agent_request(&state, item, response_rx, AGENT_CONTROL_REQUEST_TIMEOUT).await
 }
 
 async fn dispatch_agent_request<T>(
     state: &ServerState,
     item: AgentControlRequest,
     response_rx: oneshot::Receiver<Result<T, String>>,
+    timeout: Duration,
 ) -> Response
 where
     T: Serialize,
@@ -724,7 +727,7 @@ where
         }
     }
 
-    match tokio::time::timeout(AGENT_REQUEST_TIMEOUT, response_rx).await {
+    match tokio::time::timeout(timeout, response_rx).await {
         Ok(Ok(Ok(payload))) => Json(payload).into_response(),
         Ok(Ok(Err(reason))) => deny(reason),
         Ok(Err(_)) | Err(_) => (
@@ -1290,7 +1293,7 @@ mod tests {
             State(Arc::new(state)),
             auth_headers("test_token", "parent-session"),
             Json(super::AgentSpawnRequest {
-                agent: AgentKind::Claude,
+                profile: "claude".to_string(),
                 name: Some("reviewer".to_string()),
                 codex_connectors_token: None,
             }),
@@ -1301,20 +1304,21 @@ mod tests {
             super::AgentControlRequest::Spawn {
                 parent_session_token,
                 project,
-                agent,
+                profile,
                 name,
                 codex_connectors_token,
                 response_tx,
             } => {
                 assert_eq!(parent_session_token, "parent-session");
                 assert_eq!(project, "workspace-a");
-                assert_eq!(agent, AgentKind::Claude);
+                assert_eq!(profile, "claude");
                 assert_eq!(name.as_deref(), Some("reviewer"));
                 assert_eq!(codex_connectors_token, None);
                 response_tx
                     .send(Ok(super::AgentSpawnResponse {
                         id: "child-session".to_string(),
                         name: "reviewer".to_string(),
+                        profile: "claude".to_string(),
                         agent: AgentKind::Claude,
                         container_id: "child-container".to_string(),
                     }))

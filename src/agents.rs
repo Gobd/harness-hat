@@ -1,7 +1,6 @@
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 
-use crate::config::AgentKind;
 use crate::rules::{ApprovalMode, HostdoRules, NetworkRules, ProjectRules};
 // ── harness-rules.toml starter ───────────────────────────────────────────────────
 
@@ -16,14 +15,13 @@ pub struct AgentConfigInjectionResult {
     pub created_rules: Option<CreatedRulesFile>,
 }
 
-/// Generate a starter `harness-rules.toml` for the given agent kind.
+/// Generate a starter `harness-rules.toml` for the given container profile.
 ///
 /// Includes common-sense `auto`-approved rules for developer tools (GitHub,
-/// npm, PyPI, crates.io) plus agent-specific API domains.  The default policy
-/// for anything not listed is `prompt`, so the developer still sees and
-/// approves unexpected destinations.
-/// Build the initial `harness-rules.toml` template for a given agent runtime.
-pub fn generate_starter_project_rules(agent: &AgentKind) -> ProjectRules {
+/// npm, PyPI, crates.io) plus any profile-specific allowlist entries from the
+/// config file. The default policy for anything not listed is `prompt`, so the
+/// developer still sees and approves unexpected destinations.
+pub fn generate_starter_project_rules(extra_allowlist: &[String]) -> ProjectRules {
     let mut allowlist = vec![
         "domain=github.com".to_string(),
         "domain=api.github.com".to_string(),
@@ -42,39 +40,10 @@ pub fn generate_starter_project_rules(agent: &AgentKind) -> ProjectRules {
         "domain=sum.golang.org".to_string(),
         "domain=proxy.golang.org".to_string(),
     ];
-
-    match agent {
-        AgentKind::Claude => {
-            allowlist.extend([
-                "domain=api.anthropic.com".to_string(),
-                "domain=statsig.anthropic.com".to_string(),
-                "domain=sentry.io".to_string(),
-            ]);
-        }
-        AgentKind::Codex => {
-            allowlist.push("domain=api.openai.com".to_string());
-        }
-        AgentKind::Gemini => {
-            allowlist.extend([
-                "domain=generativelanguage.googleapis.com".to_string(),
-                "domain=aistudio.google.com".to_string(),
-                "domain=accounts.google.com".to_string(),
-                "domain=oauth2.googleapis.com".to_string(),
-                "domain=www.googleapis.com".to_string(),
-            ]);
-        }
-        AgentKind::Opencode => {
-            allowlist.extend([
-                "domain=api.anthropic.com".to_string(),
-                "domain=api.openai.com".to_string(),
-                "domain=openrouter.ai".to_string(),
-                "domain=api.openrouter.ai".to_string(),
-            ]);
-        }
-        AgentKind::None => {}
-    }
+    allowlist.extend(extra_allowlist.iter().cloned());
 
     ProjectRules {
+        version: crate::rules::CURRENT_RULES_VERSION,
         llm_instructions: None,
         agentctl: Default::default(),
         hostdo: HostdoRules {
@@ -90,24 +59,13 @@ pub fn generate_starter_project_rules(agent: &AgentKind) -> ProjectRules {
 
 // ── inject_agent_config ───────────────────────────────────────────────────────
 
-/// Inject agent configuration files into the workspace and, if no
+/// Inject workspace guidance and, if no
 /// `harness-rules.toml` exists in the canonical project directory, write a
 /// starter one with sensible network allowlist rules.
 ///
 /// Called just before spawning a container so the files are present on the
-/// bind-mounted workspace when the agent starts.  Safe to call on every launch;
-/// agent config files are always overwritten with fresh content.
-///
-/// Files written per agent:
-/// - Claude:   `CLAUDE.md`, `.claude/settings.json`
-/// - Codex:    `AGENTS.md`, `codex.json`
-/// - Gemini:   `GEMINI.md`
-/// - opencode: `AGENTS.md`
-/// - All:      `<canonical>/harness-rules.toml` (only if it does not already exist)
-/// - None:     nothing
-/// Seed a workspace with `harness-rules.toml` guidance for the selected agent.
+/// bind-mounted workspace when the container starts.
 pub fn inject_agent_config(
-    agent: &AgentKind,
     workspace_path: &Path,
     canonical_path: &Path,
     project_name: &str,
@@ -115,12 +73,8 @@ pub fn inject_agent_config(
     _mount_target: &Path,
     _exec_url: &str,
     _proxy_url: &str,
-    extra_instructions: Option<&str>,
+    starter_network_allowlist: &[String],
 ) -> anyhow::Result<AgentConfigInjectionResult> {
-    if *agent == AgentKind::None {
-        return Ok(AgentConfigInjectionResult::default());
-    }
-
     // Ensure the workspace directory exists (it may not have been seeded yet).
     std::fs::create_dir_all(workspace_path).with_context(|| {
         format!(
@@ -139,11 +93,7 @@ pub fn inject_agent_config(
                 canonical_path.display()
             )
         })?;
-        let mut starter = generate_starter_project_rules(agent);
-        let extra = extra_instructions
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| format!("\n\nAdditional instructions:\n{s}\n"))
-            .unwrap_or_default();
+        let mut starter = generate_starter_project_rules(starter_network_allowlist);
         starter.llm_instructions = Some(format!(
             "Project: {project_name}\n\
 \n\
@@ -154,13 +104,12 @@ Environment:\n\
 - Use `hostdo ...` for host-side build/package tooling such as cargo, npm, pnpm, yarn, go, make, pytest, or similar commands.\n\
 - Examples: `hostdo cargo test`, `hostdo npm install`, `hostdo go test ./...`.\n\
 - Only use `hostdo --image <docker-image> ...` when the user explicitly asks you to run against a Docker image or containerized runner; it runs a command in a short-lived Docker runner instead of directly on the host, for example `hostdo --image node:20 npm test` or `hostdo --image rust:1.88 cargo test`.\n\
-- Use `agentctl spawn <agent> [--name <name>]` to start same-workspace subagents (`claude`, `codex`, `gemini`, or `opencode`).\n\
-- Use `agentctl spawn-many <agent> <count> --prefix <name>` for larger batches; launches are paced by `[agentctl].spawn_delay_ms` and never below 100ms between spawn requests.\n\
+- Prefer existing auto-approved `hostdo` commands or `hostdo.command_aliases` before asking for a new host command approval.\n\
+- Use `agentctl spawn <profile> [--name <name>]` to start same-workspace subagents from configured container profiles.\n\
+- Use `agentctl spawn-many <profile> <count> --prefix <name>` for larger batches; launches are paced by `[agentctl].spawn_delay_ms` and never below 100ms between spawn requests.\n\
 - `[agentctl].max_subagents` limits live descendants under a single top-level agent, including subagents, sub-subagents, and deeper descendants.\n\
 - Use `agentctl status <child>`, `agentctl tail <child> --rows 30`, `agentctl tail <child> --all`, `agentctl send <child> \"text\" --enter`, `agentctl send <child> --key enter`, and `agentctl stop <child>` to inspect and control direct child agents.\n\
 - Subagent names are scoped to the parent that created them; duplicate names may exist elsewhere in the tree.\n\
-\n\
-{}\n\
 \n\
 Rules of engagement:\n\
 - Read and follow this file before taking actions.\n\
@@ -173,8 +122,7 @@ Rules of engagement:\n\
                 "- This project uses direct-mount sync; edits persist to the host."
             } else {
                 "- This project uses a managed workspace; be careful about canonical vs workspace paths."
-            },
-            extra
+            }
         ));
         let content = crate::rules::render_rules_file(&starter)
             .with_context(|| format!("rendering starter rules file '{}'", rules_path.display()))?;
@@ -218,12 +166,16 @@ The proxy CA was generated.  Containers must trust it.
 
 #[cfg(test)]
 mod tests {
-    use super::generate_starter_project_rules;
-    use crate::config::AgentKind;
+    use super::{generate_starter_project_rules, inject_agent_config};
+    use std::fs;
 
     #[test]
-    fn gemini_starter_rules_include_google_hosts() {
-        let rules = generate_starter_project_rules(&AgentKind::Gemini);
+    fn starter_rules_include_profile_hosts() {
+        let rules = generate_starter_project_rules(&[
+            "domain=generativelanguage.googleapis.com".to_string(),
+            "domain=accounts.google.com".to_string(),
+            "domain=oauth2.googleapis.com".to_string(),
+        ]);
         let allowlist = rules.network.allowlist;
         assert!(
             allowlist
@@ -236,5 +188,31 @@ mod tests {
                 .iter()
                 .any(|r| r == "domain=oauth2.googleapis.com")
         );
+    }
+
+    #[test]
+    fn injected_starter_rules_prefer_existing_approved_hostdo_commands() {
+        let root =
+            std::env::temp_dir().join(format!("harness-hat-agent-rules-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        let result = inject_agent_config(
+            &workspace,
+            &workspace,
+            "project-a",
+            true,
+            std::path::Path::new("/workspace"),
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:0",
+            &[],
+        )
+        .expect("inject rules");
+
+        let created = result.created_rules.expect("starter rules file");
+        let contents = fs::read_to_string(created.path).expect("read starter rules");
+        assert!(contents.contains(
+            "Prefer existing auto-approved `hostdo` commands or `hostdo.command_aliases`"
+        ));
     }
 }

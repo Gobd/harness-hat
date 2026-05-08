@@ -58,10 +58,11 @@ pub struct PendingNetworkItem {
     pub port: Option<u16>,
     pub path: String,
     pub response_tx: oneshot::Sender<NetworkDecision>,
+    pub merged_response_txs: Vec<oneshot::Sender<NetworkDecision>>,
 }
 
 /// The result returned by the TUI for a pending network request.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum NetworkDecision {
     Allow,
     Deny,

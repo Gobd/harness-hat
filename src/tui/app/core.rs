@@ -754,7 +754,21 @@ impl App {
                     .map(|session| session.session_token.clone())
             })
             .collect::<std::collections::HashSet<_>>();
+        let container_identities = indices
+            .iter()
+            .filter_map(|idx| {
+                self.sessions.get(*idx).map(|session| {
+                    [
+                        session.container_id.clone(),
+                        session.container_name.clone(),
+                        session.docker_name.clone(),
+                    ]
+                })
+            })
+            .flatten()
+            .collect::<std::collections::HashSet<_>>();
         self.fail_pending_agent_sends_for_sessions(&tokens);
+        self.deny_pending_network_for_sessions(&tokens, &container_identities);
 
         for remove_idx in indices.into_iter().rev() {
             if let Some(tok) = self
@@ -809,6 +823,45 @@ impl App {
                     let _ = pending
                         .response_tx
                         .send(Err("subagent is no longer running".to_string()));
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    fn deny_pending_network_for_sessions(
+        &mut self,
+        tokens: &std::collections::HashSet<String>,
+        container_identities: &std::collections::HashSet<String>,
+    ) {
+        let mut i = 0;
+        while i < self.pending_net.len() {
+            let activity_id = self.pending_net[i].activity_id.clone();
+            let source_container = self.pending_net[i].source_container.clone();
+            let matches_activity = self
+                .activity_by_id(&activity_id)
+                .and_then(|activity| activity.session_token.as_deref())
+                .is_some_and(|session_token| tokens.contains(session_token));
+            let matches_container = source_container
+                .as_deref()
+                .is_some_and(|source| container_identities.contains(source));
+
+            if matches_activity || matches_container {
+                if let Some(pending) = self.pending_net.get_mut(i) {
+                    crate::tui::app::approvals::send_pending_network_decision(
+                        pending,
+                        crate::proxy::NetworkDecision::Deny,
+                    );
+                }
+                self.pending_net.remove(i);
+                if let Some(activity) = self.activity_by_id_mut(&activity_id) {
+                    activity.state = crate::activity::ActivityState::Cancelled;
+                    activity.status = Some("subagent stopped".to_string());
+                    activity.updated_at = std::time::Instant::now();
+                    activity.finished_at = Some(activity.updated_at);
+                    activity.mark_command_finished(activity.updated_at);
+                    activity.terminal_unselected_at = None;
                 }
             } else {
                 i += 1;

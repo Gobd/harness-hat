@@ -100,8 +100,7 @@ impl App {
         if idx >= self.pending_net.len() {
             return;
         }
-        let tx = std::mem::replace(&mut self.pending_net[idx].response_tx, oneshot_dummy());
-        let _ = tx.send(NetworkDecision::Allow);
+        send_pending_network_decision(&mut self.pending_net[idx], NetworkDecision::Allow);
         self.pending_net.remove(idx);
     }
 
@@ -109,8 +108,7 @@ impl App {
         if idx >= self.pending_net.len() {
             return;
         }
-        let tx = std::mem::replace(&mut self.pending_net[idx].response_tx, oneshot_dummy());
-        let _ = tx.send(NetworkDecision::Deny);
+        send_pending_network_decision(&mut self.pending_net[idx], NetworkDecision::Deny);
         self.pending_net.remove(idx);
     }
 
@@ -397,6 +395,21 @@ fn pending_network_rule_entry(
         return format!("domain={} port={port}", item.host);
     }
     format!("domain={}", item.host)
+}
+
+pub(crate) fn pending_network_request_count(item: &crate::proxy::PendingNetworkItem) -> usize {
+    1 + item.merged_response_txs.len()
+}
+
+pub(crate) fn send_pending_network_decision(
+    item: &mut crate::proxy::PendingNetworkItem,
+    decision: NetworkDecision,
+) {
+    let tx = std::mem::replace(&mut item.response_tx, oneshot_dummy());
+    let _ = tx.send(decision);
+    for tx in item.merged_response_txs.drain(..) {
+        let _ = tx.send(decision);
+    }
 }
 
 fn format_exec_rule_label(argv: &[String], image: Option<&str>, timeout_secs: u64) -> String {

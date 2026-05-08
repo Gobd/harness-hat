@@ -1,10 +1,11 @@
 use super::*;
 
 const SUBAGENT_WAITING_AFTER: std::time::Duration = std::time::Duration::from_millis(1800);
-const SUBAGENT_INITIAL_INPUT_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+const SUBAGENT_INITIAL_INPUT_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const CODEX_MCP_DIAGNOSTIC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
 const CODEX_MCP_LOG_DIAGNOSTIC_LIMIT: usize = 40;
 const AGENT_CONTROL_DRAIN_LIMIT: usize = 4096;
+const DEFAULT_MCP_LOG_PATTERN: &str = "MCP client|MCP startup|request timed out|timed out handshaking|UnexpectedContentType|unexpected content type|cf-mitigated|cloudflare|challenge|Auth required|refresh token|refresh_token|UnknownIssuer|certificate|failed to lookup|nodename|servname|text/html|Failed to refresh token";
 
 impl App {
     pub(crate) fn drain_agent_control_requests(&mut self) {
@@ -21,7 +22,7 @@ impl App {
             AgentControlRequest::Spawn {
                 parent_session_token,
                 project,
-                agent,
+                profile,
                 name,
                 codex_connectors_token,
                 response_tx,
@@ -29,7 +30,7 @@ impl App {
                 let result = self.spawn_subagent(
                     parent_session_token,
                     project,
-                    agent,
+                    profile,
                     name,
                     codex_connectors_token,
                 );
@@ -85,7 +86,7 @@ impl App {
         &mut self,
         parent_session_token: String,
         project: String,
-        agent: crate::config::AgentKind,
+        profile_name: String,
         name: Option<String>,
         codex_connectors_token: Option<String>,
     ) -> std::result::Result<crate::server::AgentSpawnResponse, String> {
@@ -121,9 +122,11 @@ impl App {
         let container_idx = cfg
             .containers
             .iter()
-            .position(|container| container.agent == agent)
-            .ok_or_else(|| format!("no container profile is configured for {agent:?}"))?;
-        let image = cfg.containers[container_idx].image.clone();
+            .position(|container| container.name == profile_name.as_str())
+            .ok_or_else(|| format!("no container profile is configured for '{profile_name}'"))?;
+        let profile = cfg.containers[container_idx].clone();
+        let agent = crate::config::infer_agent_kind_from_argv(profile.command.as_deref());
+        let image = profile.image.clone();
         drop(cfg);
 
         if !docker_image_exists(&image).unwrap_or(false) {
@@ -135,7 +138,7 @@ impl App {
         let subagent_name = name
             .map(|raw| raw.trim().to_string())
             .filter(|raw| !raw.is_empty())
-            .unwrap_or_else(|| self.default_subagent_name(&parent_session_token, &agent));
+            .unwrap_or_else(|| self.default_subagent_name(&parent_session_token, &profile.name));
         if self.direct_child_name_exists(&parent_session_token, &subagent_name) {
             return Err(format!(
                 "parent already has a direct subagent named '{subagent_name}'"
@@ -187,6 +190,7 @@ impl App {
         let response = crate::server::AgentSpawnResponse {
             id: session.session_token.clone(),
             name: subagent_name,
+            profile: profile.name,
             agent,
             container_id: session.container_id.clone(),
         };
@@ -199,22 +203,12 @@ impl App {
         Ok(response)
     }
 
-    fn default_subagent_name(
-        &self,
-        parent_session_token: &str,
-        agent: &crate::config::AgentKind,
-    ) -> String {
-        let base = match agent {
-            crate::config::AgentKind::Claude => "claude",
-            crate::config::AgentKind::Codex => "codex",
-            crate::config::AgentKind::Gemini => "gemini",
-            crate::config::AgentKind::Opencode => "opencode",
-            crate::config::AgentKind::None => "agent",
-        };
+    fn default_subagent_name(&self, parent_session_token: &str, profile_name: &str) -> String {
+        let base = profile_name;
         let mut count = self
             .direct_children(parent_session_token)
             .into_iter()
-            .filter(|idx| self.sessions[*idx].agent_kind == *agent)
+            .filter(|idx| self.sessions[*idx].container_name == profile_name)
             .count()
             + 1;
         loop {
@@ -233,6 +227,14 @@ impl App {
         include_log_diagnostics: bool,
     ) -> std::result::Result<crate::server::AgentStatusResponse, String> {
         let idx = self.resolve_child_session_idx(parent_session_token, child)?;
+        let (mcp_log_paths, mcp_log_pattern) = {
+            let cfg = self.config.get();
+            cfg.containers
+                .iter()
+                .find(|ctr| ctr.name == self.sessions[idx].container_name)
+                .map(|ctr| (ctr.mcp_log_paths.clone(), ctr.mcp_log_pattern.clone()))
+                .unwrap_or_default()
+        };
         self.sessions[idx].refresh_terminal_snapshot();
         self.sync_subagent_readiness(idx);
         let session = &self.sessions[idx];
@@ -247,7 +249,14 @@ impl App {
         };
         let terminal_lines = session.terminal_bottom_lines(1000);
         let warnings = terminal_health_warnings(&terminal_lines);
-        let mcp = agent_mcp_diagnostics(session, &state, &terminal_lines, include_log_diagnostics);
+        let mcp = agent_mcp_diagnostics(
+            session,
+            &state,
+            &terminal_lines,
+            include_log_diagnostics,
+            &mcp_log_paths,
+            mcp_log_pattern.as_deref(),
+        );
         Ok(crate::server::AgentStatusResponse {
             id: session.session_token.clone(),
             name: session.display_name().to_string(),
@@ -639,14 +648,20 @@ fn agent_mcp_diagnostics(
     state: &crate::server::AgentTerminalState,
     terminal_lines: &[String],
     include_log_diagnostics: bool,
+    mcp_log_paths: &[std::path::PathBuf],
+    mcp_log_pattern: Option<&str>,
 ) -> Option<crate::server::AgentMcpDiagnostics> {
-    if session.agent_kind != crate::config::AgentKind::Codex {
+    if mcp_log_paths.is_empty() && diagnostic_lines("terminal", terminal_lines).is_empty() {
         return None;
     }
 
     let mut diagnostics = diagnostic_lines("terminal", terminal_lines);
     if include_log_diagnostics {
-        diagnostics.extend(codex_log_diagnostic_lines(session));
+        diagnostics.extend(mcp_log_diagnostic_lines(
+            session,
+            mcp_log_paths,
+            mcp_log_pattern.unwrap_or(DEFAULT_MCP_LOG_PATTERN),
+        ));
     }
     dedup_diagnostics(&mut diagnostics);
 
@@ -716,7 +731,7 @@ fn diagnostic_kind(lower: &str) -> Option<&'static str> {
     {
         return Some("mcp_startup_failed");
     }
-    if (lower.contains("mcp client") || lower.contains("codex_apps"))
+    if lower.contains("mcp client")
         && (lower.contains("request timed out") || lower.contains("timed out handshaking"))
     {
         return Some("mcp_timeout");
@@ -758,12 +773,6 @@ fn diagnostic_kind(lower: &str) -> Option<&'static str> {
     if lower.contains("resolving chatgpt.com") && lower.contains("failed") {
         return Some("network_resolution");
     }
-    if lower.contains("wham/apps") {
-        return Some("codex_apps");
-    }
-    if lower.contains("codex_apps") {
-        return Some("codex_apps");
-    }
     None
 }
 
@@ -786,8 +795,10 @@ fn dedup_diagnostics(diagnostics: &mut Vec<crate::server::AgentDiagnostic>) {
     });
 }
 
-fn codex_log_diagnostic_lines(
+fn mcp_log_diagnostic_lines(
     session: &crate::container::ContainerSession,
+    log_paths: &[std::path::PathBuf],
+    pattern: &str,
 ) -> Vec<crate::server::AgentDiagnostic> {
     let target = if !session.container_id.is_empty() && session.container_id != "unknown" {
         session.container_id.as_str()
@@ -798,16 +809,23 @@ fn codex_log_diagnostic_lines(
         return Vec::new();
     }
 
-    let pattern = "codex_apps|MCP client|MCP startup|request timed out|timed out handshaking|UnexpectedContentType|unexpected content type|cf-mitigated|cloudflare|challenge|Auth required|refresh token|refresh_token|UnknownIssuer|certificate|failed to lookup|nodename|servname|wham/apps|text/html|Failed to refresh token";
+    if log_paths.is_empty() {
+        return Vec::new();
+    }
+    let candidates = log_paths
+        .iter()
+        .map(|path| format!("\"{}\"", path.display()))
+        .collect::<Vec<_>>()
+        .join(" ");
     let script = format!(
-        "for log in \"${{CODEX_HOME:-/home/ubuntu/.codex}}/log/codex-tui.log\" /home/ubuntu/.codex/log/codex-tui.log /root/.codex/log/codex-tui.log; do if [ -f \"$log\" ]; then grep -iE '{}' \"$log\" 2>/dev/null | tail -n {}; exit 0; fi; done",
+        "for log in {candidates}; do if [ -f \"$log\" ]; then grep -iE '{}' \"$log\" 2>/dev/null | tail -n {}; exit 0; fi; done",
         pattern, CODEX_MCP_LOG_DIAGNOSTIC_LIMIT
     );
     docker_exec_stdout_with_timeout(target, &script, std::time::Duration::from_secs(2))
         .map(|output| {
             output
                 .lines()
-                .filter_map(|line| diagnostic_for_line("codex_log", line))
+                .filter_map(|line| diagnostic_for_line("mcp_log", line))
                 .collect()
         })
         .unwrap_or_default()
@@ -1006,20 +1024,16 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_lines_classify_codex_mcp_failures() {
+    fn diagnostic_lines_classify_mcp_failures() {
         let cloudflare = diagnostic_for_line(
-            "codex_log",
+            "mcp_log",
             "UnexpectedContentType text/html; cf-mitigated: challenge",
         )
         .expect("cloudflare diagnostic");
         assert_eq!(cloudflare.kind, "cloudflare_challenge");
 
-        let auth = diagnostic_for_line("codex_log", "Failed to refresh token: 401")
+        let auth = diagnostic_for_line("mcp_log", "Failed to refresh token: 401")
             .expect("auth diagnostic");
         assert_eq!(auth.kind, "auth_refresh_failed");
-
-        let info = diagnostic_for_line("codex_log", "POST /backend-api/wham/apps")
-            .expect("codex_apps diagnostic");
-        assert_eq!(info.kind, "codex_apps");
     }
 }

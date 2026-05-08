@@ -14,20 +14,16 @@ use tempfile::NamedTempFile;
 use tracing::info;
 use tracing::instrument;
 
-use crate::config::{AgentKind, ContainerDef, ContainerMount};
+use crate::config::{ContainerDef, ContainerMount};
 use crate::container::core::{
-    TermSize, append_codex_home_args, append_gemini_home_args,
-    append_missing_gemini_home_mount_args, extract_claude_keychain_credential,
-    find_codex_home_container_path, find_gemini_home_container_path, find_gemini_home_mount,
-    loopback_to_host_docker, mount_mode_arg, mounts_include_codex_session_state,
-    mounts_include_gemini_session_state, read_claude_setup_token, sanitize_docker_name,
+    TermSize, loopback_to_host_docker, mount_mode_arg, sanitize_docker_name,
 };
 use crate::container::helpers::detect_default_colors;
 use crate::container::{ContainerSession, SessionEventProxy, compose_no_proxy, read_container_id};
 use crate::fs_util::write_env_file_entry;
 
 const PRIMARY_PROXY_CONN_LIMIT: usize = 0;
-const SUBAGENT_PROXY_CONN_LIMIT: usize = 128;
+const SUBAGENT_PROXY_CONN_LIMIT: usize = 16;
 const AGENT_CONFIG_SNAPSHOT_ROOT: &str = "/tmp/harness-hat-agent-config";
 const AGENT_CONFIG_SNAPSHOT_MANIFEST: &str = "/tmp/harness-hat-agent-config/manifest.tsv";
 const HARNESS_HAT_CA_CERT_PATH: &str = "/usr/local/share/ca-certificates/harness-hat-ca.crt";
@@ -40,22 +36,12 @@ struct AgentConfigSnapshot {
 
 /// Launch `docker run` for a container definition and wire it to a PTY-backed
 /// terminal session.
-#[instrument(skip(
-    ctr,
-    command_argv,
-    workspace_path,
-    codex_home_host_path,
-    gemini_home_host_path,
-    extra_env,
-    scoped_proxy
-))]
+#[instrument(skip(ctr, command_argv, workspace_path, extra_env, scoped_proxy))]
 pub fn spawn(
     ctr: &ContainerDef,
     command_argv: Option<&[String]>,
     project_name: &str,
     workspace_path: &Path,
-    codex_home_host_path: Option<&Path>,
-    gemini_home_host_path: Option<&Path>,
     session_token: &str,
     token: &str,
     exec_url: &str,
@@ -213,7 +199,7 @@ pub fn spawn(
     }
 
     let (effective_mounts, agent_config_snapshot) = if subagent_launch {
-        let (mounts, snapshot) = prepare_subagent_agent_config_snapshot(&ctr.agent, &ctr.mounts)?;
+        let (mounts, snapshot) = prepare_subagent_mount_snapshot(&ctr.mounts)?;
         if let Some(snapshot) = snapshot.as_ref() {
             docker_args.push("-v".to_string());
             docker_args.push(format!(
@@ -226,8 +212,7 @@ pub fn spawn(
                 AGENT_CONFIG_SNAPSHOT_MANIFEST,
             )?;
             let note = format!(
-                "{} config copied into an isolated subagent home from {} host path(s)",
-                agent_label(&ctr.agent),
+                "subagent snapshot copied from {} configured mount path(s)",
                 snapshot.targets.len()
             );
             info!("{note}");
@@ -241,117 +226,7 @@ pub fn spawn(
     docker_args.push("--env-file".to_string());
     docker_args.push(env_file.path().display().to_string());
 
-    if ctr.agent == AgentKind::Codex && !ctr.env_passthrough.iter().any(|v| v == "CODEX_HOME") {
-        // Prefer a real host-mounted Codex home when the container already has
-        // one; otherwise create a project-scoped cache directory so sessions
-        // survive container restarts without leaking across projects.
-        if subagent_launch {
-            docker_args.push("-e".to_string());
-            docker_args.push("CODEX_HOME=/home/ubuntu/.codex".to_string());
-        } else if let Some(container_codex_home) = find_codex_home_container_path(&effective_mounts)
-        {
-            let note = format!(
-                "Codex session data imported from mounted CODEX_HOME at {}",
-                container_codex_home.display()
-            );
-            info!("{note}");
-            launch_notes.push(note);
-            docker_args.push("-e".to_string());
-            docker_args.push(format!("CODEX_HOME={}", container_codex_home.display()));
-        } else if mounts_include_codex_session_state(&effective_mounts) {
-            let note =
-                "Codex session data is already mounted in the container; leaving existing Codex state paths untouched"
-                    .to_string();
-            info!("{note}");
-            launch_notes.push(note);
-        } else if let Some(host_path) = codex_home_host_path {
-            // No existing host-state mounts — use per-project persistence.
-            let note = format!(
-                "Codex session data imported from host cache at {}",
-                host_path.join(".codex").display()
-            );
-            info!("{note}");
-            launch_notes.push(note);
-            append_codex_home_args(&mut docker_args, host_path)?;
-        }
-    }
-
-    if ctr.agent == AgentKind::Gemini {
-        if subagent_launch {
-            // Subagents receive a copied snapshot instead of shared Gemini state mounts.
-        } else if let Some((host_gemini_home, mode)) = find_gemini_home_mount(&effective_mounts) {
-            let container_gemini_home = find_gemini_home_container_path(&effective_mounts)
-                .unwrap_or(Path::new("/home/ubuntu/.gemini"));
-            let note = format!(
-                "Gemini session data imported from mounted .gemini at {}",
-                container_gemini_home.display()
-            );
-            info!("{note}");
-            launch_notes.push(note);
-            append_missing_gemini_home_mount_args(
-                &mut docker_args,
-                &effective_mounts,
-                host_gemini_home,
-                mode,
-            );
-        } else if mounts_include_gemini_session_state(&effective_mounts) {
-            let note =
-                "Gemini session data is already mounted in the container; leaving existing Gemini state paths untouched"
-                    .to_string();
-            info!("{note}");
-            launch_notes.push(note);
-        } else if let Some(host_path) = gemini_home_host_path {
-            let note = format!(
-                "Gemini session data imported from host cache at {}",
-                host_path.join(".gemini").display()
-            );
-            info!("{note}");
-            launch_notes.push(note);
-            append_gemini_home_args(&mut docker_args, host_path)?;
-        }
-    }
-
     for mount in &effective_mounts {
-        if ctr.agent == crate::config::AgentKind::Claude {
-            if mount.container == PathBuf::from("/home/ubuntu/.claude.json") {
-                if let Ok(meta) = std::fs::metadata(&mount.host) {
-                    if meta.is_dir() {
-                        anyhow::bail!(
-                            "invalid Claude mount: host path '{}' is a directory, but '{}' must be a file; fix by replacing ~/.claude.json with the credential file",
-                            mount.host.display(),
-                            mount.container.display()
-                        );
-                    } else {
-                        let note = format!(
-                            "Claude session data imported via mount {} -> {}",
-                            mount.host.display(),
-                            mount.container.display()
-                        );
-                        info!("{note}");
-                        launch_notes.push(note);
-                    }
-                }
-            }
-            if mount.container == PathBuf::from("/home/ubuntu/.claude") {
-                if let Ok(meta) = std::fs::metadata(&mount.host) {
-                    if meta.is_file() {
-                        anyhow::bail!(
-                            "invalid Claude mount: host path '{}' is a file, but '{}' must be a directory",
-                            mount.host.display(),
-                            mount.container.display()
-                        );
-                    } else {
-                        let note = format!(
-                            "Claude session data imported via mount {} -> {}",
-                            mount.host.display(),
-                            mount.container.display()
-                        );
-                        info!("{note}");
-                        launch_notes.push(note);
-                    }
-                }
-            }
-        }
         docker_args.push("-v".to_string());
         docker_args.push(format!(
             "{}:{}:{}",
@@ -367,50 +242,6 @@ pub fn spawn(
         }
         docker_args.push("-e".to_string());
         docker_args.push(name.to_string());
-    }
-
-    let mut _cred_tempfile = None;
-    if ctr.agent == crate::config::AgentKind::Claude {
-        if let Some((setup_token, source)) = read_claude_setup_token() {
-            let note = format!(
-                "Claude session data imported from {:?} and exported as CLAUDE_CODE_OAUTH_TOKEN",
-                source
-            );
-            info!("{note}");
-            launch_notes.push(note);
-            write_env_file_entry(&mut env_file, "CLAUDE_CODE_OAUTH_TOKEN", &setup_token)?;
-        } else if let Some(cred_json) = extract_claude_keychain_credential() {
-            let access_token: Option<String> =
-                serde_json::from_str::<serde_json::Value>(&cred_json)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("claudeAiOauth")?
-                            .get("accessToken")?
-                            .as_str()
-                            .map(String::from)
-                    });
-
-            if let Some(ref tok) = access_token {
-                let note = "Claude session data imported from the macOS keychain credential and exported as CLAUDE_CODE_OAUTH_TOKEN".to_string();
-                info!("{note}");
-                launch_notes.push(note);
-                write_env_file_entry(&mut env_file, "CLAUDE_CODE_OAUTH_TOKEN", tok)?;
-            }
-
-            let staging_path = "/tmp/.harness-hat-claude-credentials.json";
-            let mut tf = tempfile::Builder::new()
-                .prefix("harness-hat-claude-cred-")
-                .suffix(".json")
-                .tempfile()
-                .context("creating Claude credential temp file")?;
-            tf.write_all(cred_json.as_bytes())
-                .context("writing Claude credential temp file")?;
-            tf.flush().context("flushing Claude credential temp file")?;
-            let host_path = tf.path().display().to_string();
-            docker_args.push("-v".to_string());
-            docker_args.push(format!("{host_path}:{staging_path}:ro"));
-            _cred_tempfile = Some(tf);
-        }
     }
 
     env_file.flush().context("flushing container env file")?;
@@ -463,7 +294,7 @@ pub fn spawn(
         has_bell: Arc::clone(&has_bell),
         default_fg,
         default_bg,
-        grayscale_palette: ctr.agent == crate::config::AgentKind::Codex,
+        grayscale_palette: ctr.grayscale_palette,
     };
 
     let mut term_cfg = TermConfig::default();
@@ -502,7 +333,7 @@ pub fn spawn(
     Ok((
         ContainerSession {
             container_name: ctr.name.clone(),
-            agent_kind: ctr.agent.clone(),
+            agent_kind: crate::config::infer_agent_kind_from_argv(command_argv),
             container_id,
             docker_name,
             project: project_name.to_owned(),
@@ -521,7 +352,7 @@ pub fn spawn(
             has_bell,
             exit_reported: false,
             _scoped_proxy: scoped_proxy,
-            _cred_tempfile,
+            _cred_tempfile: None,
             _env_tempfile: Some(env_file),
             _hostdo_tempfile: hostdo_tempfile,
             _agent_config_tempdir: agent_config_snapshot.map(|snapshot| snapshot.tempdir),
@@ -548,11 +379,10 @@ fn write_ca_env_entries<W: Write>(env_file: &mut W) -> Result<()> {
     Ok(())
 }
 
-fn prepare_subagent_agent_config_snapshot(
-    agent: &AgentKind,
+fn prepare_subagent_mount_snapshot(
     mounts: &[ContainerMount],
 ) -> Result<(Vec<ContainerMount>, Option<AgentConfigSnapshot>)> {
-    let mut effective_mounts = Vec::with_capacity(mounts.len());
+    let effective_mounts = Vec::new();
     let mut mappings: Vec<(String, PathBuf)> = Vec::new();
     let tempdir = tempfile::Builder::new()
         .prefix("harness-hat-agent-config-")
@@ -560,26 +390,20 @@ fn prepare_subagent_agent_config_snapshot(
         .context("creating subagent config snapshot directory")?;
 
     for (idx, mount) in mounts.iter().enumerate() {
-        if !is_agent_config_mount(agent, &mount.container) {
-            effective_mounts.push(mount.clone());
-            continue;
-        }
-
         if !mount.host.exists() {
             continue;
         }
 
         let staged_name = format!("item-{idx}");
         let staged_path = tempdir.path().join(&staged_name);
-        copy_agent_config_path(agent, &mount.host, &staged_path)
-            .with_context(|| format!("copying agent config from {}", mount.host.display()))?;
+        copy_snapshot_path(
+            &mount.host,
+            &staged_path,
+            mount.container.as_path(),
+            Path::new(""),
+        )
+        .with_context(|| format!("copying mount snapshot from {}", mount.host.display()))?;
         mappings.push((staged_name.clone(), mount.container.clone()));
-
-        for extra_target in mirrored_agent_config_targets(agent, &mount.container) {
-            if !mappings.iter().any(|(_, target)| target == &extra_target) {
-                mappings.push((staged_name.clone(), extra_target));
-            }
-        }
     }
 
     if mappings.is_empty() {
@@ -607,118 +431,101 @@ fn prepare_subagent_agent_config_snapshot(
     ))
 }
 
-fn agent_label(agent: &AgentKind) -> &'static str {
-    match agent {
-        AgentKind::Claude => "Claude",
-        AgentKind::Codex => "Codex",
-        AgentKind::Gemini => "Gemini",
-        AgentKind::Opencode => "opencode",
-        AgentKind::None => "Agent",
-    }
-}
-
-fn is_agent_config_mount(agent: &AgentKind, container_path: &Path) -> bool {
-    match agent {
-        AgentKind::Claude => matches_agent_path(
-            container_path,
-            &[
-                "/home/ubuntu/.claude.json",
-                "/home/ubuntu/.claude",
-                "/root/.claude.json",
-                "/root/.claude",
-            ],
-        ),
-        AgentKind::Codex => matches_agent_path(
-            container_path,
-            &[
-                "/home/ubuntu/.codex",
-                "/home/ubuntu/.config/codex",
-                "/root/.codex",
-                "/root/.config/codex",
-            ],
-        ),
-        AgentKind::Gemini => matches_agent_path(
-            container_path,
-            &[
-                "/home/ubuntu/.gemini",
-                "/home/ubuntu/.config/gemini",
-                "/root/.gemini",
-                "/root/.config/gemini",
-            ],
-        ),
-        AgentKind::Opencode => matches_agent_path(
-            container_path,
-            &[
-                "/home/ubuntu/.opencode",
-                "/home/ubuntu/.config/opencode",
-                "/root/.opencode",
-                "/root/.config/opencode",
-            ],
-        ),
-        AgentKind::None => false,
-    }
-}
-
-fn matches_agent_path(path: &Path, candidates: &[&str]) -> bool {
-    candidates
-        .iter()
-        .any(|candidate| path == Path::new(candidate))
-}
-
-fn mirrored_agent_config_targets(agent: &AgentKind, target: &Path) -> Vec<PathBuf> {
-    if *agent != AgentKind::Gemini {
-        return Vec::new();
-    }
-    match target.to_str() {
-        Some("/home/ubuntu/.gemini") => vec![PathBuf::from("/root/.gemini")],
-        Some("/root/.gemini") => vec![PathBuf::from("/home/ubuntu/.gemini")],
-        _ => Vec::new(),
-    }
-}
-
-fn copy_agent_config_path(agent: &AgentKind, source: &Path, dest: &Path) -> Result<()> {
-    let meta = std::fs::metadata(source)
+fn copy_snapshot_path(
+    source: &Path,
+    dest: &Path,
+    container_target: &Path,
+    relative_path: &Path,
+) -> Result<()> {
+    let meta = std::fs::symlink_metadata(source)
         .with_context(|| format!("reading metadata for {}", source.display()))?;
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+    if !should_snapshot_path(container_target, relative_path, meta.is_dir()) {
+        return Ok(());
+    }
     if meta.is_dir() {
         std::fs::create_dir_all(dest)
             .with_context(|| format!("creating config snapshot dir {}", dest.display()))?;
-        copy_agent_config_dir(agent, source, dest, Path::new(""))
+        copy_snapshot_dir(source, dest, container_target, relative_path)
     } else {
-        copy_agent_config_file(source, dest)
+        copy_snapshot_file(source, dest)
     }
 }
 
-fn copy_agent_config_dir(
-    agent: &AgentKind,
+fn copy_snapshot_dir(
     source: &Path,
     dest: &Path,
-    relative: &Path,
+    container_target: &Path,
+    relative_path: &Path,
 ) -> Result<()> {
     for entry in
         std::fs::read_dir(source).with_context(|| format!("reading {}", source.display()))?
     {
         let entry = entry.with_context(|| format!("reading entry in {}", source.display()))?;
         let name = entry.file_name();
-        let relative_path = relative.join(&name);
         let src = entry.path();
-        let meta = std::fs::metadata(&src)
+        let meta = std::fs::symlink_metadata(&src)
             .with_context(|| format!("reading metadata for {}", src.display()))?;
-        if should_skip_agent_config_entry(agent, &relative_path, meta.is_dir()) {
+        if meta.file_type().is_symlink() {
             continue;
         }
         let dst = dest.join(&name);
+        let child_relative = relative_path.join(&name);
+        if !should_snapshot_path(container_target, &child_relative, meta.is_dir()) {
+            continue;
+        }
         if meta.is_dir() {
             std::fs::create_dir_all(&dst)
                 .with_context(|| format!("creating config snapshot dir {}", dst.display()))?;
-            copy_agent_config_dir(agent, &src, &dst, &relative_path)?;
+            copy_snapshot_dir(&src, &dst, container_target, &child_relative)?;
         } else if meta.is_file() {
-            copy_agent_config_file(&src, &dst)?;
+            copy_snapshot_file(&src, &dst)?;
         }
     }
     Ok(())
 }
 
-fn copy_agent_config_file(source: &Path, dest: &Path) -> Result<()> {
+fn should_snapshot_path(container_target: &Path, relative_path: &Path, is_dir: bool) -> bool {
+    let is_codex_home = matches!(
+        container_target.to_str(),
+        Some("/home/ubuntu/.codex") | Some("/root/.codex")
+    );
+    if is_codex_home {
+        if let Some(first_component) = relative_path.components().next().and_then(|component| {
+            if let std::path::Component::Normal(name) = component {
+                name.to_str()
+            } else {
+                None
+            }
+        }) {
+            if matches!(first_component, ".tmp" | "log" | "sessions" | "tmp") {
+                return false;
+            }
+        }
+    }
+
+    if is_dir {
+        return true;
+    }
+
+    let Some(file_name) = relative_path.file_name().and_then(|name| name.to_str()) else {
+        return true;
+    };
+
+    if is_codex_home
+        && (file_name.ends_with(".sqlite")
+            || file_name.ends_with(".sqlite-wal")
+            || file_name.ends_with(".sqlite-shm"))
+    {
+        return false;
+    }
+
+    true
+}
+
+fn copy_snapshot_file(source: &Path, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating config snapshot dir {}", parent.display()))?;
@@ -726,57 +533,6 @@ fn copy_agent_config_file(source: &Path, dest: &Path) -> Result<()> {
     std::fs::copy(source, dest)
         .with_context(|| format!("copying {} to {}", source.display(), dest.display()))?;
     Ok(())
-}
-
-fn should_skip_agent_config_entry(agent: &AgentKind, relative_path: &Path, is_dir: bool) -> bool {
-    let name = relative_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    let top_level = relative_path.components().count() == 1;
-
-    match agent {
-        AgentKind::Codex => should_skip_codex_config_entry(name, top_level, is_dir),
-        _ => should_skip_default_agent_config_entry(name),
-    }
-}
-
-fn should_skip_default_agent_config_entry(name: &str) -> bool {
-    is_common_volatile_agent_config_entry(name)
-        || name.ends_with(".sqlite")
-        || name.ends_with(".sqlite-shm")
-        || name.ends_with(".sqlite-wal")
-        || name.starts_with("logs_")
-}
-
-fn should_skip_codex_config_entry(name: &str, top_level: bool, is_dir: bool) -> bool {
-    if is_common_volatile_agent_config_entry(name) {
-        return true;
-    }
-
-    if top_level && name.starts_with("logs_") {
-        return true;
-    }
-
-    if is_dir {
-        return false;
-    }
-
-    if name.ends_with(".sqlite") || name.ends_with(".sqlite-shm") || name.ends_with(".sqlite-wal") {
-        return !name.starts_with("state_");
-    }
-
-    false
-}
-
-fn is_common_volatile_agent_config_entry(name: &str) -> bool {
-    name == ".tmp"
-        || name == "tmp"
-        || name == "log"
-        || name == "logs"
-        || name == "sessions"
-        || name == "shell_snapshots"
-        || name == "history.jsonl"
 }
 
 fn prepare_executable_helper_script(path: &Path, prefix: &str) -> Result<NamedTempFile> {
@@ -843,7 +599,7 @@ pub fn spawn_passthrough(
     project_name: &str,
     workspace_path: &Path,
     mount_target: &Path,
-    agent: AgentKind,
+    grayscale_palette: bool,
     mounts: &[crate::config::ContainerMount],
     env_passthrough: &[String],
     rows: u16,
@@ -942,7 +698,7 @@ pub fn spawn_passthrough(
         has_bell: Arc::clone(&has_bell),
         default_fg,
         default_bg,
-        grayscale_palette: agent == AgentKind::Codex,
+        grayscale_palette,
     };
 
     let mut term_cfg = TermConfig::default();
@@ -979,7 +735,7 @@ pub fn spawn_passthrough(
 
     Ok(ContainerSession {
         container_name: format!("passthrough-{image_name}"),
-        agent_kind: crate::config::AgentKind::None,
+        agent_kind: crate::config::infer_agent_kind_from_argv(Some(command_argv)),
         container_id,
         docker_name: docker_run_name,
         project: project_name.to_owned(),
@@ -1008,11 +764,11 @@ pub fn spawn_passthrough(
 #[cfg(test)]
 mod tests {
     use super::{
-        HARNESS_HAT_CA_BUNDLE_PATH, HARNESS_HAT_CA_CERT_PATH, is_agent_config_mount,
-        prepare_subagent_agent_config_snapshot, proxy_addr_without_auth, write_ca_env_entries,
+        HARNESS_HAT_CA_BUNDLE_PATH, HARNESS_HAT_CA_CERT_PATH, prepare_subagent_mount_snapshot,
+        proxy_addr_without_auth, write_ca_env_entries,
     };
-    use crate::config::{AgentKind, ContainerMount, MountMode};
-    use std::path::{Path, PathBuf};
+    use crate::config::{ContainerMount, MountMode};
+    use std::path::PathBuf;
 
     #[test]
     fn proxy_addr_without_auth_strips_userinfo() {
@@ -1048,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn subagent_config_snapshot_filters_agent_mounts_and_preserves_codex_state() {
+    fn subagent_config_snapshot_skips_live_codex_sqlite_state() {
         let root = tempfile::tempdir().expect("tempdir");
         let codex_home = root.path().join(".codex");
         std::fs::create_dir_all(&codex_home).expect("codex home");
@@ -1064,6 +820,24 @@ mod tests {
             "large runtime logs wal",
         )
         .expect("logs wal");
+        std::fs::create_dir_all(codex_home.join("log")).expect("log dir");
+        std::fs::write(codex_home.join("log/codex-tui.log"), "live log").expect("log file");
+        std::fs::create_dir_all(codex_home.join("sessions/2026/05/08")).expect("sessions");
+        std::fs::write(
+            codex_home.join("sessions/2026/05/08/session.jsonl"),
+            "live session",
+        )
+        .expect("session file");
+        std::fs::create_dir_all(codex_home.join(".tmp/plugins/.git")).expect("tmp plugins");
+        std::fs::write(codex_home.join(".tmp/plugins/.git/index"), "tmp index").expect("tmp index");
+        std::fs::create_dir_all(codex_home.join("tmp/arg0/current")).expect("arg0");
+        std::fs::write(codex_home.join("tmp/arg0/current/.lock"), "").expect("arg0 lock");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            "/definitely/not/a/host/path/codex",
+            codex_home.join("tmp/arg0/current/codex"),
+        )
+        .expect("dangling codex symlink");
         std::fs::create_dir_all(codex_home.join("shell_snapshots")).expect("snapshots");
         std::fs::write(codex_home.join("shell_snapshots/old.sh"), "echo old").expect("snapshot");
         std::fs::create_dir_all(codex_home.join("cache/codex_apps_tools")).expect("cache");
@@ -1087,31 +861,34 @@ mod tests {
             },
         ];
 
-        let (effective, snapshot) =
-            prepare_subagent_agent_config_snapshot(&AgentKind::Codex, &mounts).expect("snapshot");
-        assert_eq!(effective.len(), 1);
-        assert_eq!(effective[0].container, Path::new("/workspace/other"));
+        let (effective, snapshot) = prepare_subagent_mount_snapshot(&mounts).expect("snapshot");
+        assert!(effective.is_empty());
 
         let snapshot = snapshot.expect("snapshot exists");
         let staged = snapshot.tempdir.path().join("item-0");
         assert!(staged.join("auth.json").is_file());
         assert!(staged.join("config.toml").is_file());
         assert!(staged.join("models_cache.json").is_file());
-        assert!(staged.join("state_5.sqlite").is_file());
-        assert!(staged.join("state_5.sqlite-wal").is_file());
         assert!(staged.join("cache/codex_apps_tools/tools.json").is_file());
         assert!(staged.join("plugins/cache/plugin.json").is_file());
+        assert!(staged.join("shell_snapshots/old.sh").is_file());
+        assert!(!staged.join("state_5.sqlite").exists());
+        assert!(!staged.join("state_5.sqlite-wal").exists());
         assert!(!staged.join("logs_2.sqlite").exists());
         assert!(!staged.join("logs_2.sqlite-wal").exists());
-        assert!(!staged.join("shell_snapshots").exists());
+        assert!(!staged.join("log").exists());
+        assert!(!staged.join("sessions").exists());
+        assert!(!staged.join(".tmp").exists());
+        assert!(!staged.join("tmp").exists());
 
         let manifest =
             std::fs::read_to_string(snapshot.tempdir.path().join("manifest.tsv")).unwrap();
         assert!(manifest.contains("item-0\t/home/ubuntu/.codex"));
+        assert!(manifest.contains("item-1\t/workspace/other"));
     }
 
     #[test]
-    fn gemini_subagent_snapshot_mirrors_home_to_root() {
+    fn subagent_snapshot_preserves_exact_mount_targets() {
         let root = tempfile::tempdir().expect("tempdir");
         let gemini_home = root.path().join(".gemini");
         std::fs::create_dir_all(&gemini_home).expect("gemini home");
@@ -1122,24 +899,33 @@ mod tests {
             mode: MountMode::Rw,
         }];
 
-        let (_effective, snapshot) =
-            prepare_subagent_agent_config_snapshot(&AgentKind::Gemini, &mounts).expect("snapshot");
+        let (_effective, snapshot) = prepare_subagent_mount_snapshot(&mounts).expect("snapshot");
         let snapshot = snapshot.expect("snapshot exists");
         let manifest =
             std::fs::read_to_string(snapshot.tempdir.path().join("manifest.tsv")).unwrap();
         assert!(manifest.contains("item-0\t/home/ubuntu/.gemini"));
-        assert!(manifest.contains("item-0\t/root/.gemini"));
     }
 
     #[test]
-    fn agent_config_mount_matching_is_agent_specific() {
-        assert!(is_agent_config_mount(
-            &AgentKind::Opencode,
-            Path::new("/home/ubuntu/.config/opencode")
-        ));
-        assert!(!is_agent_config_mount(
-            &AgentKind::Codex,
-            Path::new("/home/ubuntu/.config/opencode")
-        ));
+    fn subagent_snapshot_keeps_sqlite_files_for_non_codex_mounts() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let other = root.path().join("other");
+        std::fs::create_dir_all(&other).expect("other");
+        std::fs::write(other.join("state.sqlite"), "other sqlite").expect("sqlite");
+        let mounts = vec![ContainerMount {
+            host: other,
+            container: PathBuf::from("/workspace/other"),
+            mode: MountMode::Rw,
+        }];
+
+        let (_effective, snapshot) = prepare_subagent_mount_snapshot(&mounts).expect("snapshot");
+        let snapshot = snapshot.expect("snapshot exists");
+        assert!(
+            snapshot
+                .tempdir
+                .path()
+                .join("item-0/state.sqlite")
+                .is_file()
+        );
     }
 }

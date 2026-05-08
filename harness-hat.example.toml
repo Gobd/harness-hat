@@ -4,6 +4,10 @@
 # Per-workspace command rules, network policy, and agent instructions live in the
 # workspace's own harness-rules.toml file, not here.
 
+# Schema version. Missing versions are treated as version 1 for backwards
+# compatibility; future versions can use this for migrations.
+version = 1
+
 # Directory used to resolve Dockerfiles and the Docker build context.
 # The init flow uses `./docker` when it exists, otherwise it falls back to
 # `~/.config/harness-hat/docker`.
@@ -14,10 +18,6 @@ docker_dir = __HARNESS_HAT_DOCKER_DIR__
 [manager]
 # Global rules file used by the manager for persisted approvals.
 global_rules_file = "~/.config/harness-hat/harness-rules.toml"
-
-[agents.gemini]
-# Optional extra instructions appended into the generated Gemini guidance.
-# extra_instructions = ""
 
 # ---------------------------------------------------------------------------
 # Defaults applied to workspaces unless a workspace overrides them.
@@ -153,10 +153,6 @@ vars = { NODE_ENV = "development" }
 # If omitted, harness-hat uses /workspace.
 # mount_target = "/workspace"
 
-# Optional default agent type for profiles that do not set one.
-# One of: none, claude, codex, gemini, opencode
-# agent = "none"
-
 # Optional mounts shared by all profiles.
 # `container` must be an absolute path inside the container.
 # `mode` is either "ro" or "rw".
@@ -189,9 +185,20 @@ image = "default"
 # Optional override for this profile's mount point.
 # mount_target = "/workspace"
 
-# Controls which agent bootstrap files harness-hat writes into the workspace.
-# One of: none, claude, codex, opencode
-agent = "claude"
+# Explicit argv used to launch the profile inside the container.
+# Harness Hat infers any built-in runtime compatibility behavior from `command[0]`.
+command = ["claude"]
+
+# Unlimited-permissions example:
+# command = ["claude", "--dangerously-skip-permissions"]
+
+# Extra allowlist entries written into a starter harness-rules.toml when one
+# does not already exist for the workspace.
+starter_network_allowlist = [
+  "domain=api.anthropic.com",
+  "domain=statsig.anthropic.com",
+  "domain=sentry.io",
+]
 
 # Optional profile-specific env passthrough.
 # env_passthrough = ["ANTHROPIC_API_KEY"]
@@ -220,7 +227,25 @@ mode = "rw"
 
 [container_profiles.codex]
 image = "default"
-agent = "codex"
+command = ["codex"]
+
+# Optional terminal palette tweak for CLIs that read better in grayscale.
+grayscale_palette = true
+
+# Optional MCP startup log scraping for `agentctl status`.
+mcp_log_paths = [
+  "/home/ubuntu/.codex/log/codex-tui.log",
+  "/root/.codex/log/codex-tui.log",
+]
+
+# Unlimited-permissions example:
+# command = ["codex", "--ask-for-approval", "never", "--sandbox", "danger-full-access"]
+
+# Extra allowlist entries written into a starter harness-rules.toml when one
+# does not already exist for the workspace.
+starter_network_allowlist = [
+  "domain=api.openai.com",
+]
 
 # Optional profile-specific env passthrough.
 # env_passthrough = ["OPENAI_API_KEY"]
@@ -249,7 +274,20 @@ mode = "rw"
 
 [container_profiles.gemini]
 image = "default"
-agent = "gemini"
+command = ["gemini"]
+
+# Unlimited-permissions example:
+# command = ["gemini", "--approval-mode", "yolo"]
+
+# Extra allowlist entries written into a starter harness-rules.toml when one
+# does not already exist for the workspace.
+starter_network_allowlist = [
+  "domain=generativelanguage.googleapis.com",
+  "domain=aistudio.google.com",
+  "domain=accounts.google.com",
+  "domain=oauth2.googleapis.com",
+  "domain=www.googleapis.com",
+]
 
 # Optional profile-specific env passthrough.
 # env_passthrough = ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_CLOUD_PROJECT"]
@@ -272,7 +310,20 @@ mode = "rw"
 
 [container_profiles.opencode]
 image = "default"
-agent = "opencode"
+command = ["opencode"]
+
+# OpenCode already allows all permissions by default, so the default launch
+# command is already the unlimited-permissions form.
+# command = ["opencode"]
+
+# Extra allowlist entries written into a starter harness-rules.toml when one
+# does not already exist for the workspace.
+starter_network_allowlist = [
+  "domain=api.anthropic.com",
+  "domain=api.openai.com",
+  "domain=openrouter.ai",
+  "domain=api.openrouter.ai",
+]
 
 # Optional profile-specific env passthrough.
 # env_passthrough = ["OPENROUTER_API_KEY"]

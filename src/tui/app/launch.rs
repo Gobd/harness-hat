@@ -1,14 +1,8 @@
 use super::*;
 
 impl App {
-    fn container_command_for_agent(agent: &crate::config::AgentKind) -> Option<Vec<String>> {
-        match agent {
-            crate::config::AgentKind::Claude => Some(vec!["claude".to_string()]),
-            crate::config::AgentKind::Codex => Some(vec!["codex".to_string()]),
-            crate::config::AgentKind::Gemini => Some(vec!["gemini".to_string()]),
-            crate::config::AgentKind::Opencode => Some(vec!["opencode".to_string()]),
-            crate::config::AgentKind::None => None,
-        }
+    fn container_command_for_profile(ctr: &crate::config::ContainerDef) -> Option<Vec<String>> {
+        ctr.command.clone()
     }
 
     pub(crate) fn do_launch_container_on_project(&mut self, pi: usize, ctr_idx: usize) {
@@ -48,50 +42,6 @@ impl App {
             Some(c) => c.clone(),
             None => return,
         };
-        let extra_instructions = match ctr.agent {
-            crate::config::AgentKind::Claude => cfg
-                .agents
-                .claude
-                .as_ref()
-                .and_then(|agent| agent.extra_instructions.as_deref()),
-            crate::config::AgentKind::Codex => cfg
-                .agents
-                .codex
-                .as_ref()
-                .and_then(|agent| agent.extra_instructions.as_deref()),
-            crate::config::AgentKind::Gemini => cfg
-                .agents
-                .gemini
-                .as_ref()
-                .and_then(|agent| agent.extra_instructions.as_deref()),
-            crate::config::AgentKind::Opencode | crate::config::AgentKind::None => None,
-        };
-
-        if ctr.agent == crate::config::AgentKind::Claude {
-            let has_claude_json = ctr
-                .mounts
-                .iter()
-                .any(|m| m.container == PathBuf::from("/home/ubuntu/.claude.json"));
-            let has_claude_dir = ctr
-                .mounts
-                .iter()
-                .any(|m| m.container == PathBuf::from("/home/ubuntu/.claude"));
-            if !has_claude_json || !has_claude_dir {
-                self.push_log("hint: Claude containers usually need mounts for '~/.claude.json' and '~/.claude'".to_string(), false);
-            }
-        }
-        if ctr.agent == crate::config::AgentKind::Gemini {
-            let has_gemini_home = ctr.mounts.iter().any(|m| {
-                m.container == PathBuf::from("/home/ubuntu/.gemini")
-                    || m.container == PathBuf::from("/root/.gemini")
-            });
-            if !has_gemini_home {
-                self.push_log(
-                    "hint: Gemini containers usually need a mount for '~/.gemini' to persist sign-in/session state".to_string(),
-                    false,
-                );
-            }
-        }
 
         let proj = match cfg.workspaces.get(pi) {
             Some(p) => p.clone(),
@@ -135,7 +85,6 @@ impl App {
         );
 
         match crate::agents::inject_agent_config(
-            &ctr.agent,
             &mount_source_path,
             &proj.canonical_path,
             &proj.name,
@@ -143,7 +92,7 @@ impl App {
             &ctr.mount_target,
             &exec_url,
             &proxy_url,
-            extra_instructions,
+            &ctr.starter_network_allowlist,
         ) {
             Ok(result) => {
                 if let Some(created) = result.created_rules {
@@ -167,61 +116,6 @@ impl App {
         let pty_cols = term_cols.saturating_sub(38).max(20);
         let pty_rows = term_rows.saturating_sub(10).max(6);
 
-        let codex_home_dir = cfg
-            .logging
-            .log_dir
-            .join("codex-home")
-            .join(crate::container::sanitize_docker_name(&proj.name));
-        let has_host_codex_state_mount = ctr.mounts.iter().any(|m| {
-            let p = &m.container;
-            if p.file_name().and_then(|s| s.to_str()) == Some(".codex") {
-                return true;
-            }
-            if p.file_name().and_then(|s| s.to_str()) != Some("codex") {
-                return false;
-            }
-            p.parent()
-                .and_then(|parent| parent.file_name())
-                .and_then(|s| s.to_str())
-                == Some(".config")
-        });
-
-        let codex_home_host_path: Option<&std::path::Path> = if ctr.agent
-            == crate::config::AgentKind::Codex
-            && !ctr.env_passthrough.iter().any(|v| v == "CODEX_HOME")
-            && !has_host_codex_state_mount
-        {
-            Some(codex_home_dir.as_path())
-        } else {
-            None
-        };
-
-        let gemini_home_dir = cfg
-            .logging
-            .log_dir
-            .join("gemini-home")
-            .join(crate::container::sanitize_docker_name(&proj.name));
-        let has_host_gemini_state_mount = ctr.mounts.iter().any(|m| {
-            let p = &m.container;
-            if p.file_name().and_then(|s| s.to_str()) == Some(".gemini") {
-                return true;
-            }
-            if p.file_name().and_then(|s| s.to_str()) != Some("gemini") {
-                return false;
-            }
-            p.parent()
-                .and_then(|parent| parent.file_name())
-                .and_then(|s| s.to_str())
-                == Some(".config")
-        });
-
-        let gemini_home_host_path: Option<&std::path::Path> =
-            if ctr.agent == crate::config::AgentKind::Gemini && !has_host_gemini_state_mount {
-                Some(gemini_home_dir.as_path())
-            } else {
-                None
-            };
-
         #[cfg(target_os = "macos")]
         if cfg.defaults.proxy.strict_network {
             self.push_log(
@@ -239,14 +133,12 @@ impl App {
             },
         );
 
-        let command_argv = Self::container_command_for_agent(&ctr.agent);
+        let command_argv = Self::container_command_for_profile(&ctr);
         match crate::container::spawn(
             &ctr,
             command_argv.as_deref(),
             &proj.name,
             &mount_source_path,
-            codex_home_host_path,
-            gemini_home_host_path,
             &session_token,
             &self.token,
             &exec_url,
@@ -296,5 +188,61 @@ impl App {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::App;
+    use crate::config::{ContainerDef, default_mount_target};
+
+    #[test]
+    fn container_command_for_profile_uses_configured_override() {
+        let profile = ContainerDef {
+            name: "claude".to_string(),
+            image: String::new(),
+            image_stem: String::new(),
+            profile: None,
+            mount_target: default_mount_target(),
+            command: Some(vec![
+                "claude".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+            ]),
+            grayscale_palette: false,
+            starter_network_allowlist: Vec::new(),
+            mcp_log_paths: Vec::new(),
+            mcp_log_pattern: None,
+            mounts: Vec::new(),
+            env_passthrough: Vec::new(),
+            bypass_proxy: Vec::new(),
+        };
+
+        assert_eq!(
+            App::container_command_for_profile(&profile),
+            Some(vec![
+                "claude".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn container_command_for_profile_requires_explicit_command() {
+        let profile = ContainerDef {
+            name: "codex".to_string(),
+            image: String::new(),
+            image_stem: String::new(),
+            profile: None,
+            mount_target: default_mount_target(),
+            command: None,
+            grayscale_palette: true,
+            starter_network_allowlist: Vec::new(),
+            mcp_log_paths: Vec::new(),
+            mcp_log_pattern: None,
+            mounts: Vec::new(),
+            env_passthrough: Vec::new(),
+            bypass_proxy: Vec::new(),
+        };
+        assert_eq!(App::container_command_for_profile(&profile), None);
     }
 }

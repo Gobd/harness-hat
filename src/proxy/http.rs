@@ -223,6 +223,7 @@ pub(crate) async fn prompt_network(
         port,
         path: path.to_string(),
         response_tx: tx,
+        merged_response_txs: Vec::new(),
     };
     if state.pending_tx.send(item).await.is_err() {
         return false;

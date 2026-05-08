@@ -5,8 +5,7 @@ use toml_edit::{DocumentMut, value};
 use tracing::instrument;
 
 use crate::config::{
-    AgentKind, AliasValue, Config, ContainerMount, DefaultsConfig, MountMode, WorkspaceConfig,
-    default_mount_target,
+    AliasValue, Config, ContainerMount, DefaultsConfig, WorkspaceConfig, default_mount_target,
 };
 
 // ── Rule loading ─────────────────────────────────────────────────────────────
@@ -67,6 +66,7 @@ pub fn load(path: &Path) -> Result<Config> {
         .with_context(|| format!("reading config: {}", path.display()))?;
     let mut config: Config =
         toml::from_str(&raw).with_context(|| format!("parsing config: {}", path.display()))?;
+    validate_config_version(config.version, path)?;
     expand_config_paths(&mut config)?;
     validate_docker_dir(&config, path)?;
     resolve_container_profiles(&mut config)?;
@@ -74,6 +74,22 @@ pub fn load(path: &Path) -> Result<Config> {
     canonicalize_workspace_paths(&mut config)?;
     ensure_logging_instance_id(path, &raw, &mut config)?;
     Ok(config)
+}
+
+fn validate_config_version(version: u32, path: &Path) -> Result<()> {
+    anyhow::ensure!(
+        version > 0,
+        "config {}: version must be greater than zero",
+        path.display()
+    );
+    anyhow::ensure!(
+        version <= crate::config::CURRENT_CONFIG_VERSION,
+        "config {}: unsupported version {}; this build supports up to {}",
+        path.display(),
+        version,
+        crate::config::CURRENT_CONFIG_VERSION
+    );
+    Ok(())
 }
 
 /// Expand `~` in all path fields so downstream code always sees absolute paths.
@@ -155,14 +171,7 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
         );
         let image_tag = image_tag_for_stem(&image_stem);
 
-        let agent = profile
-            .agent
-            .clone()
-            .or_else(|| defaults.agent.clone())
-            .unwrap_or(AgentKind::None);
-        let mut mounts = merge_mounts(&defaults.mounts, &profile.mounts, &[]);
-        add_existing_agent_session_mounts(&mut mounts, &agent);
-        let agent_bypass_proxy = agent_default_bypass_proxy(&agent);
+        let mounts = merge_mounts(&defaults.mounts, &profile.mounts, &[]);
 
         resolved.push(crate::config::ContainerDef {
             name: profile_name.clone(),
@@ -173,117 +182,30 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
                 .clone()
                 .or_else(|| defaults.mount_target.clone())
                 .unwrap_or_else(default_mount_target),
-            agent,
+            command: profile.command.clone(),
+            grayscale_palette: profile
+                .grayscale_palette
+                .or(defaults.grayscale_palette)
+                .unwrap_or(false),
+            starter_network_allowlist: profile.starter_network_allowlist.clone(),
+            mcp_log_paths: merge_unique_paths(&defaults.mcp_log_paths, &profile.mcp_log_paths),
+            mcp_log_pattern: profile
+                .mcp_log_pattern
+                .clone()
+                .or_else(|| defaults.mcp_log_pattern.clone()),
             mounts,
             env_passthrough: merge_unique_strings(
                 &defaults.env_passthrough,
                 &profile.env_passthrough,
                 &[],
             ),
-            bypass_proxy: merge_unique_strings(
-                &defaults.bypass_proxy,
-                &profile.bypass_proxy,
-                &agent_bypass_proxy,
-            ),
+            bypass_proxy: merge_unique_strings(&defaults.bypass_proxy, &profile.bypass_proxy, &[]),
             image_stem,
         });
     }
     config.containers = resolved;
 
     Ok(())
-}
-
-fn agent_default_bypass_proxy(agent: &AgentKind) -> Vec<String> {
-    match agent {
-        AgentKind::Codex => vec![
-            // Codex uses Rust TLS stacks for ChatGPT Apps/MCP and model
-            // WebSocket traffic. Passthrough avoids harness-hat MITM certs for
-            // endpoints the CLI expects to verify against public roots.
-            "chatgpt.com".to_string(),
-            "*.chatgpt.com".to_string(),
-            "*.openai.com".to_string(),
-            "api.openai.com".to_string(),
-            "auth.openai.com".to_string(),
-        ],
-        _ => Vec::new(),
-    }
-}
-
-fn add_existing_agent_session_mounts(mounts: &mut Vec<ContainerMount>, agent: &AgentKind) {
-    let Some(home_dir) = dirs::home_dir() else {
-        return;
-    };
-    add_existing_agent_session_mounts_for_home(mounts, agent, &home_dir);
-}
-
-pub(crate) fn add_existing_agent_session_mounts_for_home(
-    mounts: &mut Vec<ContainerMount>,
-    agent: &AgentKind,
-    home_dir: &Path,
-) {
-    for mount in agent_session_mounts_for_home(agent, home_dir) {
-        if !mount.host.exists() {
-            continue;
-        }
-        if mounts
-            .iter()
-            .any(|existing| existing.host == mount.host || existing.container == mount.container)
-        {
-            continue;
-        }
-        mounts.push(mount);
-    }
-}
-
-pub(crate) fn agent_session_mounts_for_home(
-    agent: &AgentKind,
-    home_dir: &Path,
-) -> Vec<ContainerMount> {
-    let rw = MountMode::Rw;
-    match agent {
-        AgentKind::Claude => vec![
-            ContainerMount {
-                host: home_dir.join(".claude.json"),
-                container: PathBuf::from("/home/ubuntu/.claude.json"),
-                mode: rw.clone(),
-            },
-            ContainerMount {
-                host: home_dir.join(".claude"),
-                container: PathBuf::from("/home/ubuntu/.claude"),
-                mode: rw,
-            },
-        ],
-        AgentKind::Codex => vec![
-            ContainerMount {
-                host: home_dir.join(".codex"),
-                container: PathBuf::from("/home/ubuntu/.codex"),
-                mode: rw.clone(),
-            },
-            ContainerMount {
-                host: home_dir.join(".config/codex"),
-                container: PathBuf::from("/home/ubuntu/.config/codex"),
-                mode: rw,
-            },
-        ],
-        AgentKind::Gemini => vec![ContainerMount {
-            host: home_dir.join(".gemini"),
-            container: PathBuf::from("/home/ubuntu/.gemini"),
-            mode: rw,
-        }],
-        AgentKind::Opencode => vec![
-            ContainerMount {
-                host: home_dir.join(".opencode"),
-                container: PathBuf::from("/home/ubuntu/.opencode"),
-                mode: rw.clone(),
-            },
-            ContainerMount {
-                host: home_dir.join(".config/opencode"),
-                container: PathBuf::from("/home/ubuntu/.config/opencode"),
-                mode: rw,
-            },
-        ],
-        AgentKind::None => Vec::new(),
-    }
 }
 
 #[instrument(skip(config, config_path))]
@@ -324,6 +246,16 @@ pub(crate) fn merge_unique_strings(
     for s in base.iter().chain(profile).chain(override_items) {
         if !out.iter().any(|v| v == s) {
             out.push(s.clone());
+        }
+    }
+    out
+}
+
+pub(crate) fn merge_unique_paths(base: &[PathBuf], profile: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for path in base.iter().chain(profile) {
+        if !out.iter().any(|existing| existing == path) {
+            out.push(path.clone());
         }
     }
     out
@@ -446,6 +378,40 @@ fn validate(config: &Config) -> Result<()> {
             "duplicate container name: {}",
             ctr.name
         );
+        anyhow::ensure!(
+            ctr.command.is_some(),
+            "container profile '{}' must define command explicitly",
+            ctr.name
+        );
+        validate_command_argv(
+            &format!("container profile '{}': command", ctr.name),
+            ctr.command.as_deref(),
+        )?;
+        for path in &ctr.mcp_log_paths {
+            anyhow::ensure!(
+                !path.as_os_str().is_empty(),
+                "container '{}': mcp_log_paths contains an empty path",
+                ctr.name
+            );
+            anyhow::ensure!(
+                path.is_absolute(),
+                "container '{}': mcp_log_paths must be absolute container paths: {}",
+                ctr.name,
+                path.display()
+            );
+        }
+        if let Some(pattern) = &ctr.mcp_log_pattern {
+            anyhow::ensure!(
+                !pattern.trim().is_empty(),
+                "container '{}': mcp_log_pattern must not be empty",
+                ctr.name
+            );
+            anyhow::ensure!(
+                !pattern.contains('\n') && !pattern.contains('\r'),
+                "container '{}': mcp_log_pattern must not contain newlines",
+                ctr.name
+            );
+        }
         for mount in &ctr.mounts {
             anyhow::ensure!(
                 !mount.host.as_os_str().is_empty(),
@@ -484,6 +450,17 @@ fn validate(config: &Config) -> Result<()> {
                 ctr.name
             );
         }
+    }
+    Ok(())
+}
+
+fn validate_command_argv(field: &str, command: Option<&[String]>) -> Result<()> {
+    let Some(command) = command else {
+        return Ok(());
+    };
+    anyhow::ensure!(!command.is_empty(), "{field} must not be empty");
+    for (idx, arg) in command.iter().enumerate() {
+        anyhow::ensure!(!arg.trim().is_empty(), "{field}[{idx}] must not be empty");
     }
     Ok(())
 }
