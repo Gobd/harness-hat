@@ -14,7 +14,7 @@ use tracing::Instrument;
 
 use crate::activity::{Activity, ActivityEvent, ActivityKind, ActivityState};
 use crate::config::{self, ApprovalMode, AuditExportLevel};
-use crate::exec::{self, CommandMatch, DenyReason};
+use crate::exec::{self, CommandMatch};
 use crate::rules::{DEFAULT_TIMEOUT_SECS, RuleCommand};
 use crate::server::{
     ApprovalDecision, ErrorResponse, ExecJobPhase, ExecJobProgress, ExecJobState, ExecJobStatus,
@@ -53,20 +53,7 @@ pub(super) async fn exec_handler(
     let max_timeout_secs = cfg.defaults.hostdo.max_timeout_secs;
 
     if let Some(reason) = validate_requested_timeout(requested_timeout_secs, max_timeout_secs) {
-        record_audit(
-            &state,
-            AuditEntry {
-                project: identity_project.clone(),
-                argv: req.argv.clone(),
-                cwd: req.cwd.clone(),
-                decision: DecisionKind::DeniedByPolicy,
-                exit_code: None,
-                duration_ms: None,
-                timestamp: Utc::now(),
-            },
-        )
-        .await;
-        return server_deny(reason);
+        return deny_with_audit(&state, &identity_project, &req.argv, &req.cwd, reason).await;
     }
 
     let parsed = match req.image.as_deref() {
@@ -76,20 +63,14 @@ pub(super) async fn exec_handler(
     let parsed = match parsed {
         Ok(parsed) => parsed,
         Err(reason) => {
-            record_audit(
+            return deny_with_audit(
                 &state,
-                AuditEntry {
-                    project: identity_project.clone(),
-                    argv: req.argv.clone(),
-                    cwd: req.cwd.clone(),
-                    decision: DecisionKind::DeniedByPolicy,
-                    exit_code: None,
-                    duration_ms: None,
-                    timestamp: Utc::now(),
-                },
+                &identity_project,
+                &req.argv,
+                &req.cwd,
+                reason.to_string(),
             )
             .await;
-            return server_deny(reason.to_string());
         }
     };
     let exec_target = parsed.target;
@@ -123,20 +104,8 @@ pub(super) async fn exec_handler(
         match confine_host_cwd_to_workspace(&cwd_override, &workspace_path_buf) {
             Ok(cwd) => cwd,
             Err(reason) => {
-                record_audit(
-                    &state,
-                    AuditEntry {
-                        project: identity_project.clone(),
-                        argv: exec_argv.clone(),
-                        cwd: req.cwd.clone(),
-                        decision: DecisionKind::DeniedByPolicy,
-                        exit_code: None,
-                        duration_ms: None,
-                        timestamp: Utc::now(),
-                    },
-                )
-                .await;
-                return server_deny(reason);
+                return deny_with_audit(&state, &identity_project, &exec_argv, &req.cwd, reason)
+                    .await;
             }
         }
     } else {
@@ -147,46 +116,22 @@ pub(super) async fn exec_handler(
         ) {
             Ok(cwd) => cwd,
             Err(reason) => {
-                record_audit(
-                    &state,
-                    AuditEntry {
-                        project: identity_project.clone(),
-                        argv: exec_argv.clone(),
-                        cwd: req.cwd.clone(),
-                        decision: DecisionKind::DeniedByPolicy,
-                        exit_code: None,
-                        duration_ms: None,
-                        timestamp: Utc::now(),
-                    },
-                )
-                .await;
-                return server_deny(reason);
+                return deny_with_audit(&state, &identity_project, &exec_argv, &req.cwd, reason)
+                    .await;
             }
         }
     };
 
     // Hard-deny check (executable denylist, fragment denylist).
     if let Some(reason) = exec::check_denied(&exec_argv, proj, &cfg) {
-        let kind = match &reason {
-            DenyReason::EmptyArgv
-            | DenyReason::DeniedExecutable(_)
-            | DenyReason::DeniedArgumentFragment(_)
-            | DenyReason::InvalidImage(_) => DecisionKind::DeniedByPolicy,
-        };
-        record_audit(
+        return deny_with_audit(
             &state,
-            AuditEntry {
-                project: identity_project.clone(),
-                argv: exec_argv.clone(),
-                cwd: req.cwd.clone(),
-                decision: kind,
-                exit_code: None,
-                duration_ms: None,
-                timestamp: Utc::now(),
-            },
+            &identity_project,
+            &exec_argv,
+            &req.cwd,
+            reason.to_string(),
         )
         .await;
-        return server_deny(reason.to_string());
     }
 
     // Load composed rules from harness-rules.toml files (global + all projects).
@@ -224,20 +169,14 @@ pub(super) async fn exec_handler(
         {
             Ok(cwd) => cwd,
             Err(reason) => {
-                record_audit(
+                return deny_with_audit(
                     &state,
-                    AuditEntry {
-                        project: identity_project.clone(),
-                        argv: exec_argv.clone(),
-                        cwd: req.cwd.clone(),
-                        decision: DecisionKind::DeniedByPolicy,
-                        exit_code: None,
-                        duration_ms: None,
-                        timestamp: Utc::now(),
-                    },
+                    &identity_project,
+                    &exec_argv,
+                    &req.cwd,
+                    format!("matched hostdo rule has invalid cwd: {reason}"),
                 )
                 .await;
-                return server_deny(format!("matched hostdo rule has invalid cwd: {reason}"));
             }
         },
         None => requested_host_cwd,
@@ -258,40 +197,15 @@ pub(super) async fn exec_handler(
         } else {
             "command not in allowlist and default_policy is deny".to_string()
         };
-        record_audit(
-            &state,
-            AuditEntry {
-                project: identity_project.clone(),
-                argv: exec_argv.clone(),
-                cwd: req.cwd.clone(),
-                decision: DecisionKind::DeniedByPolicy,
-                exit_code: None,
-                duration_ms: None,
-                timestamp: Utc::now(),
-            },
-        )
-        .await;
-        return server_deny(reason);
+        return deny_with_audit(&state, &identity_project, &exec_argv, &req.cwd, reason).await;
     }
 
     let timeout_secs =
         match effective_timeout_secs(requested_timeout_secs, policy_cmd, max_timeout_secs) {
             Ok(timeout_secs) => timeout_secs,
             Err(reason) => {
-                record_audit(
-                    &state,
-                    AuditEntry {
-                        project: identity_project.clone(),
-                        argv: exec_argv.clone(),
-                        cwd: req.cwd.clone(),
-                        decision: DecisionKind::DeniedByPolicy,
-                        exit_code: None,
-                        duration_ms: None,
-                        timestamp: Utc::now(),
-                    },
-                )
-                .await;
-                return server_deny(reason);
+                return deny_with_audit(&state, &identity_project, &exec_argv, &req.cwd, reason)
+                    .await;
             }
         };
     let env_profile = policy_cmd.and_then(|cmd| cmd.env_profile.clone());
@@ -434,25 +348,23 @@ pub(super) async fn exec_handler(
         let decision = match tokio::time::timeout(Duration::from_secs(300), response_rx).await {
             Ok(Ok(d)) => d,
             Ok(Err(_)) | Err(_) => {
-                let _ = state.activity_tx.send(ActivityEvent::Finished {
-                    id: activity_id.clone(),
-                    state: ActivityState::Failed,
-                    status: Some("approval timed out".to_string()),
-                });
+                finish_activity_by_id(
+                    &state.activity_tx,
+                    &activity_id,
+                    ActivityState::Failed,
+                    "approval timed out",
+                );
                 let wait_ms = approval_start.elapsed().as_millis() as i64;
                 tracing::Span::current().record("decision", "timed_out");
                 tracing::Span::current().record("approval_wait_ms", wait_ms);
-                record_audit(
+                record_command_audit(
                     &state,
-                    AuditEntry {
-                        project: identity_project.clone(),
-                        argv: exec_argv.clone(),
-                        cwd: req.cwd.clone(),
-                        decision: DecisionKind::TimedOut,
-                        exit_code: None,
-                        duration_ms: None,
-                        timestamp: Utc::now(),
-                    },
+                    &identity_project,
+                    &exec_argv,
+                    &req.cwd,
+                    DecisionKind::TimedOut,
+                    None,
+                    None,
                 )
                 .await;
                 return server_deny("approval timed out (5 minutes)".to_string());
@@ -465,31 +377,21 @@ pub(super) async fn exec_handler(
         match decision {
             ApprovalDecision::Deny => {
                 let cancelled = cancel_flag.load(std::sync::atomic::Ordering::SeqCst);
-                let _ = state.activity_tx.send(ActivityEvent::Finished {
-                    id: activity_id.clone(),
-                    state: if cancelled {
-                        ActivityState::Cancelled
-                    } else {
-                        ActivityState::Denied
-                    },
-                    status: Some(if cancelled {
-                        "cancelled".to_string()
-                    } else {
-                        "denied by developer".to_string()
-                    }),
-                });
+                let (state_label, status) = if cancelled {
+                    (ActivityState::Cancelled, "cancelled")
+                } else {
+                    (ActivityState::Denied, "denied by developer")
+                };
+                finish_activity_by_id(&state.activity_tx, &activity_id, state_label, status);
                 tracing::Span::current().record("decision", "denied");
-                record_audit(
+                record_command_audit(
                     &state,
-                    AuditEntry {
-                        project: identity_project.clone(),
-                        argv: exec_argv.clone(),
-                        cwd: req.cwd.clone(),
-                        decision: DecisionKind::Denied,
-                        exit_code: None,
-                        duration_ms: None,
-                        timestamp: Utc::now(),
-                    },
+                    &identity_project,
+                    &exec_argv,
+                    &req.cwd,
+                    DecisionKind::Denied,
+                    None,
+                    None,
                 )
                 .await;
                 server_deny("denied by developer".to_string())
@@ -626,11 +528,7 @@ async fn pull_image_then_execute(run: CommandRun, image: String) -> Response {
         Ok(result) if result.exit_code == 0 => execute_immediate(run).await,
         Ok(result) => {
             let reason = pull_failure_reason(&result);
-            let _ = run.state.activity_tx.send(ActivityEvent::Finished {
-                id: run.activity_id.clone(),
-                state: ActivityState::Failed,
-                status: Some(reason.clone()),
-            });
+            finish_activity(&run, ActivityState::Failed, reason.clone());
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -641,21 +539,13 @@ async fn pull_image_then_execute(run: CommandRun, image: String) -> Response {
                 .into_response()
         }
         Err(e) => {
-            let cancelled = run.cancel_flag.load(std::sync::atomic::Ordering::SeqCst);
-            let _ = run.state.activity_tx.send(ActivityEvent::Finished {
-                id: run.activity_id.clone(),
-                state: if cancelled {
-                    ActivityState::Cancelled
-                } else {
-                    ActivityState::Failed
-                },
-                status: Some(e.to_string()),
-            });
+            let reason = e.to_string();
+            finish_error_activity(&run, reason.clone());
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     error: "execution_failed".into(),
-                    reason: e.to_string(),
+                    reason,
                 }),
             )
                 .into_response()
@@ -672,11 +562,11 @@ async fn execute_immediate(run: CommandRun) -> Response {
     match run.execute().await {
         Ok(result) => {
             record_success(&run, &result).await;
-            let _ = run.state.activity_tx.send(ActivityEvent::Finished {
-                id: run.activity_id.clone(),
-                state: ActivityState::Complete,
-                status: Some(format!("exit code {}", result.exit_code)),
-            });
+            finish_activity(
+                &run,
+                ActivityState::Complete,
+                format!("exit code {}", result.exit_code),
+            );
             Json(ExecResponse {
                 exit_code: result.exit_code,
                 stdout: result.stdout,
@@ -685,21 +575,13 @@ async fn execute_immediate(run: CommandRun) -> Response {
             .into_response()
         }
         Err(e) => {
-            let cancelled = run.cancel_flag.load(std::sync::atomic::Ordering::SeqCst);
-            let _ = run.state.activity_tx.send(ActivityEvent::Finished {
-                id: run.activity_id.clone(),
-                state: if cancelled {
-                    ActivityState::Cancelled
-                } else {
-                    ActivityState::Failed
-                },
-                status: Some(e.to_string()),
-            });
+            let reason = e.to_string();
+            finish_error_activity(&run, reason.clone());
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     error: "execution_failed".into(),
-                    reason: e.to_string(),
+                    reason,
                 }),
             )
                 .into_response()
@@ -791,26 +673,14 @@ fn start_image_pull_job(run: CommandRun, image: String) -> Response {
                 }
                 Ok(result) => {
                     let reason = pull_failure_reason(&result);
-                    set_job_failed(&registry, &job_id, reason);
-                    let _ = run.state.activity_tx.send(ActivityEvent::Finished {
-                        id: run.activity_id.clone(),
-                        state: ActivityState::Failed,
-                        status: Some(pull_failure_reason(&result)),
-                    });
+                    set_job_failed(&registry, &job_id, reason.clone());
+                    finish_activity(&run, ActivityState::Failed, reason);
                     return;
                 }
                 Err(e) => {
-                    let cancelled = run.cancel_flag.load(std::sync::atomic::Ordering::SeqCst);
-                    set_job_failed(&registry, &job_id, e.to_string());
-                    let _ = run.state.activity_tx.send(ActivityEvent::Finished {
-                        id: run.activity_id.clone(),
-                        state: if cancelled {
-                            ActivityState::Cancelled
-                        } else {
-                            ActivityState::Failed
-                        },
-                        status: Some(e.to_string()),
-                    });
+                    let reason = e.to_string();
+                    set_job_failed(&registry, &job_id, reason.clone());
+                    finish_error_activity(&run, reason);
                     return;
                 }
             }
@@ -830,24 +700,16 @@ fn start_image_pull_job(run: CommandRun, image: String) -> Response {
                         status.stderr = Some(result.stderr);
                         status.reason = None;
                     });
-                    let _ = run.state.activity_tx.send(ActivityEvent::Finished {
-                        id: run.activity_id.clone(),
-                        state: ActivityState::Complete,
-                        status: Some(format!("exit code {}", result.exit_code)),
-                    });
+                    finish_activity(
+                        &run,
+                        ActivityState::Complete,
+                        format!("exit code {}", result.exit_code),
+                    );
                 }
                 Err(e) => {
-                    let cancelled = run.cancel_flag.load(std::sync::atomic::Ordering::SeqCst);
-                    set_job_failed(&registry, &job_id, e.to_string());
-                    let _ = run.state.activity_tx.send(ActivityEvent::Finished {
-                        id: run.activity_id.clone(),
-                        state: if cancelled {
-                            ActivityState::Cancelled
-                        } else {
-                            ActivityState::Failed
-                        },
-                        status: Some(e.to_string()),
-                    });
+                    let reason = e.to_string();
+                    set_job_failed(&registry, &job_id, reason.clone());
+                    finish_error_activity(&run, reason);
                 }
             }
         }
@@ -861,15 +723,82 @@ async fn record_success(run: &CommandRun, result: &exec::ExecResult) {
     tracing::Span::current().record("decision", run.decision_label.as_str());
     tracing::Span::current().record("exit_code", result.exit_code);
     tracing::Span::current().record("duration_ms", result.duration_ms as i64);
-    record_audit(
+    record_command_audit(
         &run.state,
+        &run.audit_project,
+        &run.argv,
+        &run.audit_cwd,
+        run.decision_kind.clone(),
+        Some(result.exit_code),
+        Some(result.duration_ms),
+    )
+    .await;
+}
+
+fn finish_error_activity(run: &CommandRun, reason: String) {
+    let state = if run.cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        ActivityState::Cancelled
+    } else {
+        ActivityState::Failed
+    };
+    finish_activity(run, state, reason);
+}
+
+fn finish_activity(run: &CommandRun, state: ActivityState, status: impl Into<String>) {
+    finish_activity_by_id(&run.state.activity_tx, &run.activity_id, state, status);
+}
+
+fn finish_activity_by_id(
+    activity_tx: &tokio::sync::mpsc::UnboundedSender<ActivityEvent>,
+    activity_id: &str,
+    state: ActivityState,
+    status: impl Into<String>,
+) {
+    let _ = activity_tx.send(ActivityEvent::Finished {
+        id: activity_id.to_string(),
+        state,
+        status: Some(status.into()),
+    });
+}
+
+async fn deny_with_audit(
+    state: &ServerState,
+    project: &str,
+    argv: &[String],
+    cwd: &str,
+    reason: impl Into<String>,
+) -> Response {
+    record_command_audit(
+        state,
+        project,
+        argv,
+        cwd,
+        DecisionKind::DeniedByPolicy,
+        None,
+        None,
+    )
+    .await;
+    server_deny(reason.into())
+}
+
+async fn record_command_audit(
+    state: &ServerState,
+    project: &str,
+    argv: &[String],
+    cwd: &str,
+    decision: DecisionKind,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
+) {
+    record_audit(
+        state,
         AuditEntry {
-            project: run.audit_project.clone(),
-            argv: run.argv.clone(),
-            cwd: run.audit_cwd.clone(),
-            decision: run.decision_kind.clone(),
-            exit_code: Some(result.exit_code),
-            duration_ms: Some(result.duration_ms),
+            project: project.to_string(),
+            argv: argv.to_vec(),
+            cwd: cwd.to_string(),
+            decision,
+            exit_code,
+            duration_ms,
             timestamp: Utc::now(),
         },
     )

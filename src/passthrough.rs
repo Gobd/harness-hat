@@ -347,19 +347,23 @@ fn infer_passthrough_runtime(
 }
 
 fn ensure_image_built(image: &str, dockerfile_path: &Path, docker_dir: &Path) -> Result<()> {
-    if docker_image_exists(image)? {
+    if crate::container::docker_image_exists(image).context("checking docker image")? {
         return Ok(());
     }
 
     let base_image = "harness-hat-base:local";
     let base_dockerfile = docker_dir.join("harness-hat-base.dockerfile");
-    if !docker_image_exists(base_image)? && !base_dockerfile.exists() {
+    if !crate::container::docker_image_exists(base_image).context("checking docker image")?
+        && !base_dockerfile.exists()
+    {
         bail!(
             "Looked for {} and didn't find it, please run setup to restore the base dockerfile.",
             base_dockerfile.display()
         );
     }
-    if !docker_image_exists(base_image)? && base_dockerfile.exists() {
+    if !crate::container::docker_image_exists(base_image).context("checking docker image")?
+        && base_dockerfile.exists()
+    {
         eprintln!(
             "Building base image '{base_image}' from {} ...",
             base_dockerfile.display()
@@ -404,16 +408,6 @@ fn ensure_image_built(image: &str, dockerfile_path: &Path, docker_dir: &Path) ->
         );
     }
     Ok(())
-}
-
-fn docker_image_exists(image: &str) -> Result<bool> {
-    let status = std::process::Command::new("docker")
-        .args(["image", "inspect", image])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .context("checking docker image")?;
-    Ok(status.success())
 }
 
 fn parse_args() -> Result<ParsedArgs> {

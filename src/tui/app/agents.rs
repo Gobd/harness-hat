@@ -411,23 +411,15 @@ impl App {
     }
 
     fn top_level_session_token_for(&self, session_token: &str) -> Option<String> {
-        let mut current = self
-            .sessions
-            .iter()
-            .position(|session| session.session_token == session_token)?;
+        let mut current = self.session_idx_by_token(session_token)?;
         let mut seen = std::collections::HashSet::new();
         while seen.insert(current) {
-            let Some(parent_token) = self.sessions[current].parent_session_token.as_deref() else {
-                return Some(self.sessions[current].session_token.clone());
-            };
-            let Some(parent_idx) = self
-                .sessions
-                .iter()
-                .position(|session| session.session_token == parent_token)
-            else {
-                return Some(self.sessions[current].session_token.clone());
-            };
-            current = parent_idx;
+            match self.session_parent(current) {
+                SessionParent::Found { idx, .. } => current = idx,
+                SessionParent::None | SessionParent::Missing(_) => {
+                    return Some(self.sessions[current].session_token.clone());
+                }
+            }
         }
         None
     }
@@ -444,30 +436,22 @@ impl App {
     }
 
     fn session_descends_from(&self, session_token: &str, root_session_token: &str) -> bool {
-        let mut current = match self
-            .sessions
-            .iter()
-            .position(|session| session.session_token == session_token)
-        {
+        let mut current = match self.session_idx_by_token(session_token) {
             Some(idx) => idx,
             None => return false,
         };
         let mut seen = std::collections::HashSet::new();
         while seen.insert(current) {
-            let Some(parent_token) = self.sessions[current].parent_session_token.as_deref() else {
-                return false;
-            };
-            if parent_token == root_session_token {
-                return true;
+            match self.session_parent(current) {
+                SessionParent::Found { token, idx } => {
+                    if token == root_session_token {
+                        return true;
+                    }
+                    current = idx;
+                }
+                SessionParent::Missing(token) => return token == root_session_token,
+                SessionParent::None => return false,
             }
-            let Some(parent_idx) = self
-                .sessions
-                .iter()
-                .position(|session| session.session_token == parent_token)
-            else {
-                return false;
-            };
-            current = parent_idx;
         }
         false
     }
@@ -483,20 +467,34 @@ impl App {
         let mut current = session_idx;
         let mut seen = std::collections::HashSet::new();
         while seen.insert(current) {
-            let Some(parent_token) = self.sessions[current].parent_session_token.as_deref() else {
-                break;
-            };
-            let Some(parent_idx) = self
-                .sessions
-                .iter()
-                .position(|session| session.session_token == parent_token)
-            else {
-                break;
-            };
-            depth += 1;
-            current = parent_idx;
+            match self.session_parent(current) {
+                SessionParent::Found { idx, .. } => {
+                    depth += 1;
+                    current = idx;
+                }
+                SessionParent::None | SessionParent::Missing(_) => break,
+            }
         }
         depth
+    }
+
+    fn session_idx_by_token(&self, session_token: &str) -> Option<usize> {
+        self.sessions
+            .iter()
+            .position(|session| session.session_token == session_token)
+    }
+
+    fn session_parent(&self, session_idx: usize) -> SessionParent<'_> {
+        let Some(parent_token) = self.sessions[session_idx].parent_session_token.as_deref() else {
+            return SessionParent::None;
+        };
+        match self.session_idx_by_token(parent_token) {
+            Some(idx) => SessionParent::Found {
+                token: parent_token,
+                idx,
+            },
+            None => SessionParent::Missing(parent_token),
+        }
     }
 
     pub(crate) fn refresh_session_terminal_states(&mut self) {
@@ -581,6 +579,12 @@ impl App {
             }
         }
     }
+}
+
+enum SessionParent<'a> {
+    None,
+    Missing(&'a str),
+    Found { token: &'a str, idx: usize },
 }
 
 fn child_identity_matches(

@@ -63,7 +63,7 @@ pub(crate) fn validate_env_file_entry(key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn is_valid_env_name(key: &str) -> bool {
+pub(crate) fn is_valid_env_name(key: &str) -> bool {
     let mut chars = key.chars();
     let Some(first) = chars.next() else {
         return false;

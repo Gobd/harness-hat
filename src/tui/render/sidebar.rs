@@ -414,10 +414,6 @@ fn network_group_title(app: &App, session_idx: usize, count: usize, width: u16) 
     truncate_middle(&raw, width.saturating_sub(2) as usize)
 }
 
-fn short_container_id(container_id: &str) -> String {
-    container_id.chars().take(12).collect()
-}
-
 fn append_activity_summary_lines(
     lines: &mut Vec<Line>,
     activity: &crate::activity::Activity,

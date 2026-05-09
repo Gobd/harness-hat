@@ -14,6 +14,7 @@
 
 pub mod activity;
 pub mod agents;
+mod ansi;
 pub mod ca;
 pub mod cli;
 pub mod config;

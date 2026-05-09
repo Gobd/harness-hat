@@ -112,6 +112,11 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
         Ok(rules) => rules,
         Err(e) => {
             warn!("proxy rules load error: {e}");
+            state.activity_finished(
+                &activity.id,
+                ActivityState::Failed,
+                Some("invalid harness-rules.toml configuration".to_string()),
+            );
             write_error_any(&mut stream, 500, "Invalid harness-rules.toml configuration").await?;
             return Ok(());
         }
@@ -126,42 +131,24 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
         }
     }
 
-    let allowed = match policy {
-        NetworkPolicy::Auto => true,
-        NetworkPolicy::Deny => false,
-        NetworkPolicy::Prompt => {
-            state.activity_state(
-                &activity.id,
-                ActivityState::PendingApproval,
-                Some("waiting for network approval".to_string()),
-            );
-            prompt_network(
-                &state,
-                &method,
-                &host,
-                Some(port),
-                &path,
-                source_project.clone(),
-                source_container.clone(),
-                source_status.as_str(),
-                has_proxy_authorization,
-                Some(&activity),
-            )
-            .await
-        }
-    };
+    let allowed = network_policy_allows(
+        &state,
+        &activity,
+        policy,
+        "waiting for network approval",
+        &method,
+        &host,
+        Some(port),
+        &path,
+        source_project.clone(),
+        source_container.clone(),
+        source_status.as_str(),
+        has_proxy_authorization,
+    )
+    .await;
 
     if !allowed {
-        let state_label = if activity.is_cancelled() {
-            ActivityState::Cancelled
-        } else {
-            ActivityState::Denied
-        };
-        state.activity_finished(
-            &activity.id,
-            state_label,
-            Some("blocked by network policy".to_string()),
-        );
+        finish_blocked_network_activity(&state, &activity);
         write_error_any(&mut stream, 403, "Forbidden by harness-hat policy").await?;
         return Ok(());
     }
@@ -232,6 +219,59 @@ pub(crate) async fn prompt_network(
         Ok(Ok(NetworkDecision::Allow)) => true,
         _ => false,
     }
+}
+
+pub(crate) async fn network_policy_allows(
+    state: &ProxyState,
+    activity: &Activity,
+    policy: NetworkPolicy,
+    pending_status: &str,
+    method: &str,
+    host: &str,
+    port: Option<u16>,
+    path: &str,
+    source_project: Option<String>,
+    source_container: Option<String>,
+    source_status: &str,
+    has_proxy_authorization: bool,
+) -> bool {
+    match policy {
+        NetworkPolicy::Auto => true,
+        NetworkPolicy::Deny => false,
+        NetworkPolicy::Prompt => {
+            state.activity_state(
+                &activity.id,
+                ActivityState::PendingApproval,
+                Some(pending_status.to_string()),
+            );
+            prompt_network(
+                state,
+                method,
+                host,
+                port,
+                path,
+                source_project,
+                source_container,
+                source_status,
+                has_proxy_authorization,
+                Some(activity),
+            )
+            .await
+        }
+    }
+}
+
+pub(crate) fn finish_blocked_network_activity(state: &ProxyState, activity: &Activity) {
+    let state_label = if activity.is_cancelled() {
+        ActivityState::Cancelled
+    } else {
+        ActivityState::Denied
+    };
+    state.activity_finished(
+        &activity.id,
+        state_label,
+        Some("blocked by network policy".to_string()),
+    );
 }
 
 pub(crate) async fn forward_request_with_activity<W>(

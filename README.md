@@ -2,33 +2,67 @@
 
 # Harness Hat
 
-**Network, Disk, and Host Isolation for AI Coding Agents**
+**Network, disk, and host isolation for AI coding agents.**
 
-Open-source, local-first alternative inspired by [Coder Agent Firewall](https://coder.com/docs/ai-coder/agent-firewall).
+Run Claude Code, Codex, Gemini CLI, OpenCode, or your own terminal agent in a
+policy-controlled Docker workspace instead of giving it your laptop.
+
+[Quick start](#quick-start) · [Supported agents](#supported-agent-clis) · [Policy model](#policy-model) · [Development](#development)
 
 </div>
 
-![Harness Hat Demo showing launching an agent and the approval dialog.](https://github.com/only-cliches/harness-hat/blob/main/example.gif?raw=true)
+![Harness Hat demo showing an agent launch and approval dialog.](https://github.com/only-cliches/harness-hat/blob/main/example.gif?raw=true)
 
-Harness Hat enforces a zero-trust boundary around any terminal based agent, running them in isolated Docker containers with policy-enforced access to your code, your host, and the outside world. Nothing gets through without a rule that allows it.
+## What It Is
 
-## Key Features
+Harness Hat is a local-first control plane for terminal-based AI coding agents.
+It wraps an agent in an isolated Docker container, routes network traffic through
+a policy-aware proxy, and forces host commands through an explicit approval bridge.
 
-* **Isolated Docker Environments**: Agents run in locked-down Docker containers, fully separated from your host system.
-* **Zero-Trust Network Proxy**: A built-in MITM proxy intercepts all outbound HTTP and HTTPS traffic. Every request is evaluated against your policy: auto-allowed, denied, or escalated to you for approval in real time.
-* **Controlled Host Execution (`hostdo`)**: Agents have no direct access to your machine. Instead, they request specific pre-approved host commands via `hostdo` (e.g. `cargo test`, `npm run build`). You approve or deny each class of command, once or permanently.
-* **Interactive Terminal UI (TUI)**: Manage everything from a single terminal interface. View active containers, inspect logs, review and action pending network and host requests, and drop into a live terminal session when needed.
-* **Ready-to-Use Agent Profiles**: First-class support for Claude Code, OpenAI Codex, Google Gemini CLI, and Opencode, including automatic auth state mounting so agents don't need to re-authenticate on every launch.
-* **OpenTelemetry Logging**: Export hostdo, proxy, and startup traces to your collector with configurable OTLP settings, while keeping local rotating logs on disk.
-* **Keyboard-First Navigation**: The app is a terminal-native TUI with keyboard-friendly navigation and controls across workspaces, sessions, prompts, and settings.
+The result is a practical middle ground: agents can still edit your repo, run
+tests, install dependencies, and coordinate subagents, but every sensitive path
+has a rule, log, or prompt behind it.
 
-## Getting Started
+## Why This Exists
+
+The AI developer tooling ecosystem has moved fast into npm-distributed CLIs and
+SDKs:
+
+| Category | Examples | Why it matters |
+| --- | --- | --- |
+| Terminal coding agents | [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code), [OpenAI Codex CLI](https://www.npmjs.com/package/@openai/codex), [Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli), [OpenCode](https://www.npmjs.com/package/opencode-ai) | These tools can read projects, edit files, run shell commands, call provider APIs, and install packages. |
+| AI application SDKs | [openai](https://www.npmjs.com/package/openai), [@anthropic-ai/sdk](https://www.npmjs.com/package/@anthropic-ai/sdk), [ai](https://www.npmjs.com/package/ai), [langchain](https://www.npmjs.com/package/langchain) | Agents often modify apps that depend on these packages, then run local package managers and test suites. |
+
+Those tools are powerful because they work inside real repositories. Harness Hat
+keeps that power while moving the blast radius out of your host environment.
+
+## Core Features
+
+- **Docker-isolated agent workspaces**: each agent runs in a container with your
+  project mounted at `/workspace`.
+- **Policy-enforced HTTP/HTTPS proxy**: outbound traffic is allowed, denied, or
+  prompted from rules in `harness-rules.toml`.
+- **Strict network mode**: optional container firewalling routes HTTP/HTTPS
+  traffic through Harness Hat instead of relying only on environment variables.
+- **Controlled host execution with `hostdo`**: agents request host-side commands
+  such as `cargo test` or `npm run build`; Harness Hat checks policy before
+  running them.
+- **Interactive manager TUI**: launch agents, review prompts, inspect activity,
+  reload rules, view logs, and attach to sessions from one terminal UI.
+- **First-class npm agent profiles**: the default image installs Claude Code,
+  Codex, Gemini CLI, and OpenCode.
+- **Subagent orchestration with `agentctl`**: agents can spawn and control
+  same-workspace child agents under your configured limits.
+- **OpenTelemetry support**: export approval, proxy, and host-execution traces to
+  an OTLP collector while keeping local logs.
+
+## Quick Start
 
 ### Prerequisites
 
-Harness Hat requires
-1. [Docker](https://www.docker.com/get-started/) to be installed and available in your system's `PATH`
-2. The [Rust programming language](https://rust-lang.org/tools/install/) to be installed.
+- [Docker](https://www.docker.com/get-started/) available on your machine.
+- [Rust](https://www.rust-lang.org/tools/install/) 1.88 or newer.
+- An account, subscription, or API key for whichever agent CLI you plan to run.
 
 ### Install
 
@@ -38,204 +72,321 @@ cd harness-hat
 cargo install --path .
 ```
 
-### CLI Binaries
+This installs two binaries:
 
-After install, Harness Hat provides two binaries:
+- `harness-hat-manager`: the interactive terminal manager.
+- `harness-hat`: a passthrough launcher for running a command in a managed
+  container.
 
-* `harness-hat-manager`: the interactive manager TUI.
-* `harness-hat`: command passthrough (`harness-hat -- codex`, `harness-hat --image rust -- codex`, etc.).
+### Launch An Agent
 
-### Quick Start (After Install)
-
-From the directory you want to work on, run:
+From the repository you want the agent to work on:
 
 ```bash
-cd /path/to/your/project
+cd /path/to/project
 harness-hat -- codex
 ```
 
-### 1. Initialization
-
-Run either CLI from any directory to generate your starter configuration:
+You can also launch the manager:
 
 ```bash
 harness-hat-manager
-# or
-harness-hat -- codex
 ```
 
-If no config is found, Harness Hat prompts you to create a `harness-hat.toml` file, populated with sensible defaults. It will use `./docker` as your Docker build directory if it exists, or fall back to `~/.config/harness-hat/docker` and create it on first run. If the built-in Dockerfiles are missing, Harness Hat will offer to fetch them from GitHub automatically.
+On first run, Harness Hat creates starter config, prepares Dockerfiles, and
+writes a `harness-rules.toml` file for the workspace when needed.
 
-The setup flow also seeds:
-* `<docker_dir>/harness-hat-base.dockerfile` (shared base image template)
-* `<docker_dir>/default.dockerfile` (default runtime image template)
+## How It Works
 
-### 2. Add a Workspace
+```text
+              approve / deny / persist
+                       |
+                       v
++------------------------------+
+|      harness-hat-manager     |
+|  TUI, logs, rules, approvals |
++---------------+--------------+
+                |
+     hostdo / proxy / agentctl
+                |
+                v
++------------------------------+
+|      Docker agent session    |
+|  /workspace mounted project  |
+|  claude | codex | gemini ... |
++---------------+--------------+
+                |
+       filtered HTTP/HTTPS
+                |
+                v
+        model APIs, npm, GitHub,
+        package registries, docs
+```
 
-Add a workspace from within the TUI, or by adding a `[[workspaces]]` block to your `harness-hat.toml`.
+Harness Hat separates three concerns:
 
-When a workspace is registered, Harness Hat writes a `harness-rules.toml` file to the root of your repository. This file defines the security policy for any agent operating in that codebase: which host commands it may request and which network destinations it may reach. Commit it to version control so your policy travels with the code.
+- **Local host config** lives in `harness-hat.toml`.
+- **Workspace security policy** lives in `harness-rules.toml`.
+- **Agent runtime state** stays in profile-specific mounts such as `~/.codex`,
+  `~/.claude`, `~/.gemini`, or `~/.opencode`.
 
-### 3. Launch an Agent
+## Supported Agent CLIs
 
-From the TUI, use the arrow keys (or `j`/`k`) to navigate to a workspace and press `Enter` to launch an agent container.
+Harness Hat ships with profiles for the npm-installed terminal agents that are
+most relevant to current coding-agent workflows.
 
-### 4. Passthrough Wrapper
+| Profile | Package | Command | Notes |
+| --- | --- | --- | --- |
+| `claude` | [`@anthropic-ai/claude-code`](https://www.npmjs.com/package/@anthropic-ai/claude-code) | `claude` | Mounts Claude session state and seeds Anthropic API allowlist entries. |
+| `codex` | [`@openai/codex`](https://www.npmjs.com/package/@openai/codex) | `codex` | Mounts Codex state, uses a grayscale-friendly terminal palette, and can report MCP startup diagnostics. |
+| `gemini` | [`@google/gemini-cli`](https://github.com/google-gemini/gemini-cli) | `gemini` | Mounts Gemini state and seeds Google API allowlist entries. |
+| `opencode` | [`opencode-ai`](https://opencode.ai/docs/) | `opencode` | Mounts OpenCode state and supports model-provider endpoints such as OpenRouter. |
 
-Run any command inside the configured containerized workspace passthrough:
+The default runtime image installs all four:
+
+```dockerfile
+RUN npm install -g \
+    @openai/codex \
+    @google/gemini-cli \
+    opencode-ai \
+    @anthropic-ai/claude-code
+```
+
+You can add any other terminal agent by defining another
+`[container_profiles.<name>]` entry in `harness-hat.toml`.
+
+## Policy Model
+
+Harness Hat uses two TOML files so local machine details do not get mixed with
+repo policy.
+
+### `harness-hat.toml`
+
+This is your machine-local manager config. It defines Dockerfiles, container
+profiles, UI defaults, host bridge settings, proxy settings, logging, and
+workspace registrations.
+
+Example profile:
+
+```toml
+[container_profiles.codex]
+image = "default"
+command = ["codex"]
+grayscale_palette = true
+starter_network_allowlist = [
+  "domain=api.openai.com",
+]
+
+[[container_profiles.codex.mounts]]
+host = "~/.codex"
+container = "/home/ubuntu/.codex"
+mode = "rw"
+```
+
+### `harness-rules.toml`
+
+This lives in the repository and defines what agents may do in that workspace.
+Commit it with your project so the policy is visible in review.
+
+Example:
+
+```toml
+[hostdo]
+default_policy = "prompt"
+
+[[hostdo.commands]]
+argv = ["cargo", "test"]
+cwd = "$WORKSPACE"
+timeout_secs = 120
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = ["npm", "run", "build"]
+cwd = "$WORKSPACE"
+timeout_secs = 180
+approval_mode = "prompt"
+
+[network]
+allowlist = [
+  "domain=api.openai.com",
+  "domain=api.github.com",
+  "domain=registry.npmjs.org",
+]
+denylist = [
+  "domain=tracking.example.com",
+]
+
+[agentctl]
+spawn_delay_ms = 500
+max_subagents = 10
+```
+
+Network rules are Coder-style expressions such as:
+
+```text
+method=GET,POST domain=api.example.com path=/v1/* port=443
+```
+
+Deny rules win over allow rules. If nothing matches, Harness Hat prompts.
+
+## Agent-Side Commands
+
+Agents run inside containers, so Harness Hat gives them a small set of explicit
+bridges.
+
+### `hostdo`
+
+Run approved commands on the host, in the workspace:
+
+```bash
+hostdo cargo test
+hostdo npm install
+hostdo --timeout 300 npm run build
+```
+
+Run an approved command in a short-lived Docker image:
+
+```bash
+hostdo --image node:20 npm test
+hostdo --image rust:1.88 cargo test
+```
+
+Rules match exact argv. Image-backed commands match both argv and image, so
+approving `hostdo npm test` does not approve `hostdo --image node:20 npm test`.
+
+### `agentctl`
+
+Spawn and control same-workspace subagents:
+
+```bash
+agentctl spawn gemini --name review
+agentctl spawn-many codex 3 --prefix fix
+agentctl status review
+agentctl tail review --rows 80
+agentctl send review "inspect the failing test" --enter
+agentctl stop review
+```
+
+Subagent launches are paced by `[agentctl].spawn_delay_ms` and capped by
+`[agentctl].max_subagents`.
+
+### `killme`
+
+Let an agent terminate its own container:
+
+```bash
+killme
+```
+
+Use this only when you actually want that session to end.
+
+## Network Control
+
+Harness Hat runs a local MITM proxy for HTTP and HTTPS policy enforcement.
+Requests are evaluated against the effective rules for the workspace:
+
+1. Deny if a denylist rule matches.
+2. Allow if an allowlist rule matches.
+3. Prompt in the manager TUI otherwise.
+
+With `strict_network = true`, Harness Hat also applies container-side routing so
+HTTP/HTTPS traffic is forced through the proxy path. Profiles may define
+`bypass_proxy` hosts for services that do not tolerate TLS interception; bypassed
+hosts are still an intentional trust decision and should stay narrow.
+
+## Common Workflows
+
+### Run Codex In A Project
 
 ```bash
 harness-hat -- codex
 ```
 
-`--` is recommended before the wrapped command, and required when the wrapped command starts with `-` (or when you need strict argument disambiguation).
+### Use A Different Profile
 
-Override the image by Dockerfile name in `docker_dir`:
+```bash
+harness-hat -- gemini
+harness-hat -- claude
+harness-hat -- opencode
+```
+
+### Use A Custom Dockerfile
+
+If `docker_dir` contains `rust.dockerfile`, launch with:
 
 ```bash
 harness-hat --image rust -- codex
 ```
 
-Image names map to `<docker_dir>/<name>.dockerfile` (for example `rust` -> `rust.dockerfile`).
+### Add A Workspace To The Manager
 
-## Supported Agents
+Open `harness-hat-manager`, add the repository path, then launch any configured
+profile from the workspace list. Harness Hat creates `harness-rules.toml` if the
+workspace does not already have one.
 
-Harness Hat is designed to be flexible. It ships with first-class support for the most popular AI coding assistants, but any agent that runs in Docker will work.
+### Approve A New Command Permanently
 
-### Out-of-the-Box Support
+When an agent requests a host command through `hostdo`, approve it in the TUI and
+choose whether to persist the rule. Persisted approvals are written as explicit
+`[[hostdo.commands]]` entries.
 
-* **Claude Code** (`@anthropic-ai/claude-code`)
-* **OpenAI Codex** (`@openai/codex`)
-* **Google Gemini CLI** (`@google/gemini-cli`)
-* **OpenCode** (`opencode-ai`)
+## Logging And Telemetry
 
-The example profiles show explicit mounts for authentication and session state (for example `~/.claude` and `~/.gemini`) so agents authenticate once and stay authenticated across container restarts. Subagents receive private snapshots of configured profile mounts instead of writable shared mounts.
+Harness Hat writes local rotating logs under `[logging].log_dir`, defaulting to:
 
-### Bring Your Own Agent (BYOA)
+```text
+~/.local/share/harness-hat
+```
 
-Any agent that can run in a Docker container works with Harness Hat. Define custom `container_profiles` in `harness-hat.toml`, choose a Dockerfile stem via `image = "<stem>"`, and set `command = [...]` explicitly.
-
-## Configuration
-
-Harness Hat uses two files to separate concerns cleanly: one for your local environment, one for your workspace's security policy.
-
-### `harness-hat.toml` (Host Configuration)
-
-Lives on your machine. Defines your environment:
-
-* Container profiles (which agent images to use):
-  * `container_profiles.<name>.image` resolves `<docker_dir>/<image>.dockerfile`.
-  * `image` is a lowercase Dockerfile stem (`a-z`, `0-9`, `-`, `_`, `.`).
-  * Profiles are direct launch targets (there is no separate `[[containers]]` list).
-  * Per-profile launch argv is set with `container_profiles.<name>.command`.
-  * Built-in runtime compatibility behavior is inferred from `command[0]`, not a separate agent setting.
-  * Per-profile terminal rendering can be tuned with `container_profiles.<name>.grayscale_palette`.
-  * Per-profile MCP diagnostics can scan configured container logs via `container_profiles.<name>.mcp_log_paths`.
-  * Per-profile starter rules can be extended with `container_profiles.<name>.starter_network_allowlist`.
-* Registered workspaces and their paths.
-* Global network and execution defaults.
-* UI defaults, including `[defaults.ui].show_log_pane = true` to show the bottom log pane.
-
-### `harness-rules.toml` (Workspace Security Policy)
-
-Lives in your repository. Defines what an agent is allowed to do:
-
-* **`[hostdo]`**: Which host commands the agent may request. Commands can be set to `auto` (always run), `deny` (always block), or `prompt` (ask you each time). Aliases let you map simple agent-facing commands to complex host-side ones.
-* **`[agentctl]`**: Defaults for subagent helper behavior. `spawn_delay_ms = 500` paces `agentctl spawn` and `spawn-many`; the effective delay is never below 100ms. `max_subagents = 10` caps live descendants under a single top-level agent.
-* **`[network]`**: Coder-style allowlist and denylist rules for outbound traffic (`method=... domain=... path=...`). Denylist matches win over allowlist matches; if no rule matches, Harness Hat prompts.
-
-## Logging
-
-Harness Hat writes daily rotating logs to the directory configured under `[logging].log_dir` in `harness-hat.toml`. The default is `~/.local/share/harness-hat`, which also holds runtime state and the local CA material used by the proxy.
-
-On first startup, Harness Hat also generates a stable `instance_id` and writes it back into `[logging]`. That value is exported as `service.instance.id` so a collector can distinguish logs and traces from different installations.
-
-If you want OpenTelemetry export, enable `[logging.otlp]` in `harness-hat.toml` or your own config:
-
-* **Endpoint**: OTLP collector URL, such as `http://localhost:4317` for gRPC or `http://localhost:4318/v1/traces` for HTTP/protobuf.
-* **Protocol**: `grpc` or `http`.
-* **Level**: `approvals` for prompt-related spans, `all` for the full hostdo/proxy flow, or `none` to disable export.
-
-Example:
+To export traces, configure OTLP:
 
 ```toml
-[logging]
-log_dir = "~/.local/share/harness-hat"
-
 [logging.otlp]
 endpoint = "http://localhost:4317"
 protocol = "grpc"
 level = "approvals"
 ```
 
-## Workspace Mounting
+`level = "approvals"` exports prompt-related spans. `level = "all"` exports the
+full hostdo and proxy flow.
 
-Harness Hat runs workspaces in direct mode: each container mounts the target dir into the container at `/workspace`.
+## Security Notes
 
-## Network & Proxy Control
+Harness Hat reduces the risk of running autonomous coding tools, but it is not a
+complete security boundary for every possible threat.
 
-Harness Hat's built-in MITM proxy intercepts all outbound HTTP and HTTPS traffic from the agent container, giving you complete visibility and enforcement over external communication.
+- The workspace is intentionally mounted into the container so agents can edit
+  your project.
+- Host commands only run through `hostdo`, and command rules should stay narrow.
+- `server_host = "0.0.0.0"` is portable for Docker reachability, but you should
+  bind to the narrowest Docker-reachable interface or firewall the port on shared
+  networks.
+- Proxy bypasses trade inspection for compatibility. Keep them specific.
+- Secrets mounted into a profile are available to that agent profile. Prefer
+  read-only mounts and minimal env passthrough where possible.
+- Review `harness-rules.toml` changes like code. It is the contract for what an
+  agent can do in that repository.
 
-### How It Works
+## Development
 
-1. **Intercept**: All outbound requests from the container are routed through the Harness Hat proxy.
-2. **Evaluate**: The request is checked against your global config and the workspace's `harness-rules.toml`.
-3. **Enforce**:
-   * **Deny**: Request matches a `[network].denylist` expression.
-   * **Allow**: Request matches a `[network].allowlist` expression.
-   * **Prompt**: No denylist or allowlist match (prompt by default).
+Useful commands while working on Harness Hat:
 
-### Proxy Configuration
-
-Under `[defaults.proxy]` in `harness-hat.toml`:
-
-* **`strict_network`**: Enables `NET_ADMIN` capabilities to enforce iptables rules inside the container, ensuring no traffic can bypass the proxy.
-* **`proxy_port`**: The local port the proxy listens on (default: `8081`).
-* **`proxy_host`**: The host address for per-container proxy listeners. It must be reachable from Docker containers; prefer the narrowest Docker-reachable interface and firewall it on shared networks.
-
-Example network policy in `harness-rules.toml`:
-
-```toml
-[network]
-allowlist = [
-  "domain=*.npmjs.org",
-  "method=GET domain=api.github.com path=/repos/*",
-]
-denylist = [
-  "domain=tracking.example.com",
-]
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo check --all-targets
+cargo test
 ```
 
-## Agent Commands
+When developing inside a Harness Hat-managed container, run host-side tooling
+through `hostdo`:
 
-Because agents run in an isolated container with no direct access to your machine, Harness Hat provides two bridge commands for controlled interaction with the host.
-
-### `hostdo` (Host Execution Bridge)
-
-Lets an agent request execution of specific commands on your host machine, without raw shell access.
-
-* **Usage by agents inside container:** `hostdo <command> [args...]` (e.g. `hostdo cargo test`) to run on the host against the workspace, `hostdo --image <docker-image> <command> [args...]` for a short-lived Docker runner (e.g. `hostdo --image node:20 npm test`), or `hostdo --timeout <seconds> <command> [args...]` to request a longer command timeout.
-* **How it works:** The request is routed to the Harness Hat manager. Based on your `harness-rules.toml` policy, it is automatically executed, silently denied, or escalated to you in the TUI.
-* **Docker runner rules:** Image-backed commands match both `argv` and `image`, so approving `hostdo npm test` does not automatically approve `hostdo --image node:20 npm test`.
-* **Timeout rules:** Approved commands store `timeout_secs` in `harness-rules.toml`. Requested timeouts are capped by `[defaults.hostdo].max_timeout_secs` in `harness-hat.toml`.
-* **Aliases:** Map simple agent-facing commands to complex host-side ones (e.g. `hostdo tests` to `cargo test --all`).
-* **Bind address:** `[defaults.hostdo].server_host` must be reachable from Docker containers. Avoid exposing it on untrusted networks; bind to a Docker-local interface when available or restrict access with a host firewall.
-
-### `killme` (Container Exit)
-
-Lets an agent cleanly terminate its own container.
-
-* **Usage inside container:** `killme`
-* **How it works:** Sends a clean shutdown request to the Harness Hat manager.
-
-### `agentctl` (Subagent Control)
-
-Lets an agent launch and control same-workspace child agents through the manager.
-
-* **Usage inside container:** `agentctl spawn gemini --name docs`, or `agentctl spawn-many gemini 20 --prefix review`.
-* **Pacing:** `spawn` and `spawn-many` read `[agentctl].spawn_delay_ms` from `harness-rules.toml` when `--delay-ms` is omitted. Values below 100ms are clamped to 100ms. Profiles with MCP diagnostics configured also wait for the previous subagent to fail MCP startup, clear MCP startup, sit waiting without MCP diagnostics for a short stable window, or reach the 35s diagnostic timeout.
-* **Limit:** `[agentctl].max_subagents` caps live descendants under one top-level agent, including nested subagents at any depth.
-* **Inspection/control:** `agentctl status <child>` includes MCP diagnostics when the selected profile configures them; use `agentctl tail <child> --all`, `agentctl send <child> "text" --enter`, and `agentctl stop <child>` for terminal control.
-
+```bash
+hostdo cargo fmt --check
+hostdo cargo clippy --all-targets -- -D warnings
+hostdo cargo check --all-targets
+hostdo cargo test
+```
 ## License
+
 MIT

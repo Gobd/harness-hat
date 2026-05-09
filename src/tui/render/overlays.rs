@@ -348,10 +348,6 @@ fn pending_network_source_session<'a>(
     matching_sessions.next().is_none().then_some(only)
 }
 
-fn short_container_id(container_id: &str) -> String {
-    container_id.chars().take(12).collect()
-}
-
 pub(crate) fn render_remove_workspace_confirm_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let Some(state) = app.remove_workspace_confirm.as_ref() else {
         return;

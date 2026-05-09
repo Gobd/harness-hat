@@ -30,6 +30,10 @@ pub(crate) fn truncate_middle(value: &str, max_chars: usize) -> String {
     out
 }
 
+pub(crate) fn short_container_id(container_id: &str) -> String {
+    container_id.chars().take(12).collect()
+}
+
 mod overlays;
 mod root;
 mod sidebar;

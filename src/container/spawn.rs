@@ -185,7 +185,7 @@ pub fn spawn(
     write_env_file_entry(
         &mut env_file,
         "HARNESS_HAT_PROXY_CONN_LIMIT",
-        &proxy_conn_limit.to_string(),
+        proxy_conn_limit.to_string(),
     )?;
     if !strict_network {
         write_env_file_entry(&mut env_file, "HTTP_PROXY", &container_proxy_url)?;

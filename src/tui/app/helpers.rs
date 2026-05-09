@@ -234,15 +234,6 @@ pub(crate) fn host_bind_is_loopback(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
-pub(crate) fn docker_image_exists(image: &str) -> std::io::Result<bool> {
-    let status = std::process::Command::new("docker")
-        .args(["image", "inspect", image])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    Ok(status.success())
-}
-
 pub(crate) fn is_scroll_mode_toggle_key(key: KeyEvent) -> bool {
     (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL))
         || (key.code == KeyCode::Char('\u{13}') && key.modifiers.is_empty())

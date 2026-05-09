@@ -1,18 +1,19 @@
 use anyhow::Result;
-use tokio::io::{AsyncWriteExt, copy_bidirectional};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
-use crate::activity::{Activity, ActivityState, wait_cancelled};
+use crate::activity::{Activity, ActivityState};
 use crate::config;
 use crate::proxy::helpers::{
-    container_tls_passthrough_match, ensure_host_header_matches_target, format_byte_count,
-    proxy_authorization_matches_token, write_error_any,
+    container_tls_passthrough_match, ensure_host_header_matches_target,
+    proxy_authorization_matches_token, tunnel_with_activity, write_error_any,
 };
 use crate::proxy::http::{
-    connect_head_has_proxy_authorization, forward_request_with_activity, parse_connect_target,
-    parse_request_line_and_headers, parse_source_from_connect_head, prompt_network, read_body_any,
+    connect_head_has_proxy_authorization, finish_blocked_network_activity,
+    forward_request_with_activity, network_policy_allows, parse_connect_target,
+    parse_request_line_and_headers, parse_source_from_connect_head, read_body_any,
     read_request_head_any,
 };
 use crate::proxy::{ProxyState, SourceIdentityStatus};
@@ -180,41 +181,23 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
             return Ok(());
         }
     }
-    let preflight_allowed = match preflight_policy {
-        NetworkPolicy::Auto => true,
-        NetworkPolicy::Deny => false,
-        NetworkPolicy::Prompt => {
-            state.activity_state(
-                &connect_activity.id,
-                ActivityState::PendingApproval,
-                Some("waiting for CONNECT approval".to_string()),
-            );
-            prompt_network(
-                &state,
-                "CONNECT",
-                &host,
-                Some(port),
-                "/",
-                source_project.clone(),
-                source_container.clone(),
-                source_status.as_str(),
-                connect_has_proxy_authorization,
-                Some(&connect_activity),
-            )
-            .await
-        }
-    };
+    let preflight_allowed = network_policy_allows(
+        &state,
+        &connect_activity,
+        preflight_policy,
+        "waiting for CONNECT approval",
+        "CONNECT",
+        &host,
+        Some(port),
+        "/",
+        source_project.clone(),
+        source_container.clone(),
+        source_status.as_str(),
+        connect_has_proxy_authorization,
+    )
+    .await;
     if !preflight_allowed {
-        let state_label = if connect_activity.is_cancelled() {
-            ActivityState::Cancelled
-        } else {
-            ActivityState::Denied
-        };
-        state.activity_finished(
-            &connect_activity.id,
-            state_label,
-            Some("blocked by network policy".to_string()),
-        );
+        finish_blocked_network_activity(&state, &connect_activity);
         write_error_any(&mut stream, 403, "Forbidden by harness-hat policy").await?;
         return Ok(());
     }
@@ -352,42 +335,24 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
 
     let policy = rules.match_network_for_port(&method, &host, &path, Some(port));
 
-    let allowed = match policy {
-        NetworkPolicy::Auto => true,
-        NetworkPolicy::Deny => false,
-        NetworkPolicy::Prompt => {
-            state.activity_state(
-                &activity.id,
-                ActivityState::PendingApproval,
-                Some("waiting for network approval".to_string()),
-            );
-            prompt_network(
-                &state,
-                &method,
-                &host,
-                Some(port),
-                &path,
-                source_project.clone(),
-                source_container.clone(),
-                source_status.as_str(),
-                connect_has_proxy_authorization,
-                Some(&activity),
-            )
-            .await
-        }
-    };
+    let allowed = network_policy_allows(
+        &state,
+        &activity,
+        policy,
+        "waiting for network approval",
+        &method,
+        &host,
+        Some(port),
+        &path,
+        source_project.clone(),
+        source_container.clone(),
+        source_status.as_str(),
+        connect_has_proxy_authorization,
+    )
+    .await;
 
     if !allowed {
-        let state_label = if activity.is_cancelled() {
-            ActivityState::Cancelled
-        } else {
-            ActivityState::Denied
-        };
-        state.activity_finished(
-            &activity.id,
-            state_label,
-            Some("blocked by network policy".to_string()),
-        );
+        finish_blocked_network_activity(&state, &activity);
         write_error_any(&mut tls_stream, 403, "Forbidden by harness-hat policy").await?;
         return Ok(());
     }
@@ -446,36 +411,5 @@ async fn tunnel_connect(
         return Err(e.into());
     }
 
-    tokio::select! {
-        result = copy_bidirectional(stream, &mut upstream) => match result {
-            Ok((from_client, from_server)) => {
-                state.activity_line(
-                    &activity.id,
-                    format!(
-                        "tunnel closed after {} upstream, {} downstream",
-                        format_byte_count(from_client),
-                        format_byte_count(from_server)
-                    ),
-                );
-                state.activity_finished(
-                    &activity.id,
-                    ActivityState::Complete,
-                    Some("tunnel closed".to_string()),
-                );
-                Ok(())
-            }
-            Err(e) => {
-                state.activity_finished(&activity.id, ActivityState::Failed, Some(e.to_string()));
-                Err(e.into())
-            }
-        },
-        _ = wait_cancelled(activity.cancel_flag.clone()) => {
-            state.activity_finished(
-                &activity.id,
-                ActivityState::Cancelled,
-                Some("cancelled".to_string()),
-            );
-            Ok(())
-        }
-    }
+    tunnel_with_activity(state, activity, stream, &mut upstream).await
 }

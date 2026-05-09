@@ -8,10 +8,11 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, copy_bidirectional};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
+use crate::activity::{Activity, ActivityState, wait_cancelled};
 use crate::config::Config;
 use crate::proxy::SourceIdentityStatus;
 use crate::proxy::http::is_hop_by_hop;
@@ -50,6 +51,50 @@ pub(crate) fn format_byte_count(bytes: u64) -> String {
         format!("{value:.0}{unit}")
     } else {
         format!("{value:.1}{unit}")
+    }
+}
+
+pub(crate) async fn tunnel_with_activity<D, U>(
+    state: &crate::proxy::ProxyState,
+    activity: &Activity,
+    downstream: &mut D,
+    upstream: &mut U,
+) -> Result<()>
+where
+    D: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
+    tokio::select! {
+        result = copy_bidirectional(downstream, upstream) => match result {
+            Ok((from_client, from_server)) => {
+                state.activity_line(
+                    &activity.id,
+                    format!(
+                        "tunnel closed after {} upstream, {} downstream",
+                        format_byte_count(from_client),
+                        format_byte_count(from_server)
+                    ),
+                );
+                state.activity_finished(
+                    &activity.id,
+                    ActivityState::Complete,
+                    Some("tunnel closed".to_string()),
+                );
+                Ok(())
+            }
+            Err(e) => {
+                state.activity_finished(&activity.id, ActivityState::Failed, Some(e.to_string()));
+                Err(e.into())
+            }
+        },
+        _ = wait_cancelled(activity.cancel_flag.clone()) => {
+            state.activity_finished(
+                &activity.id,
+                ActivityState::Cancelled,
+                Some("cancelled".to_string()),
+            );
+            Ok(())
+        }
     }
 }
 
@@ -181,16 +226,11 @@ pub(crate) fn container_tls_passthrough_match<'a>(
     source_container: Option<&str>,
     host: &str,
 ) -> Option<&'a str> {
-    let Some(source_container) = source_container else {
-        return None;
-    };
-    let Some(container) = config
+    let source_container = source_container?;
+    let container = config
         .containers
         .iter()
-        .find(|c| c.name == source_container)
-    else {
-        return None;
-    };
+        .find(|c| c.name == source_container)?;
     container
         .bypass_proxy
         .iter()
