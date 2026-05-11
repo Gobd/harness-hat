@@ -5,7 +5,8 @@ use toml_edit::{DocumentMut, value};
 use tracing::instrument;
 
 use crate::config::{
-    AliasValue, Config, ContainerMount, DefaultsConfig, WorkspaceConfig, default_mount_target,
+    AliasValue, Config, ContainerMount, DefaultsConfig, LocalhostForward, WorkspaceConfig,
+    default_mount_target,
 };
 
 // ── Rule loading ─────────────────────────────────────────────────────────────
@@ -187,6 +188,10 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
                 .grayscale_palette
                 .or(defaults.grayscale_palette)
                 .unwrap_or(false),
+            mouse_scroll: profile
+                .mouse_scroll
+                .or(defaults.mouse_scroll)
+                .unwrap_or_default(),
             starter_network_allowlist: profile.starter_network_allowlist.clone(),
             mcp_log_paths: merge_unique_paths(&defaults.mcp_log_paths, &profile.mcp_log_paths),
             mcp_log_pattern: profile
@@ -194,12 +199,17 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
                 .clone()
                 .or_else(|| defaults.mcp_log_pattern.clone()),
             mounts,
+            env: merge_env_vars(&defaults.env, &profile.env),
             env_passthrough: merge_unique_strings(
                 &defaults.env_passthrough,
                 &profile.env_passthrough,
                 &[],
             ),
             bypass_proxy: merge_unique_strings(&defaults.bypass_proxy, &profile.bypass_proxy, &[]),
+            localhost_forwards: merge_localhost_forwards(
+                &defaults.localhost_forwards,
+                &profile.localhost_forwards,
+            ),
             image_stem,
         });
     }
@@ -256,6 +266,39 @@ pub(crate) fn merge_unique_paths(base: &[PathBuf], profile: &[PathBuf]) -> Vec<P
     for path in base.iter().chain(profile) {
         if !out.iter().any(|existing| existing == path) {
             out.push(path.clone());
+        }
+    }
+    out
+}
+
+fn merge_env_vars(
+    base: &std::collections::HashMap<String, String>,
+    profile: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    let mut out = base.clone();
+    out.extend(profile.clone());
+    out
+}
+
+pub(crate) fn merge_localhost_forwards(
+    base: &[LocalhostForward],
+    profile: &[LocalhostForward],
+) -> Vec<LocalhostForward> {
+    let profile_ports = profile
+        .iter()
+        .map(|forward| forward.container_port)
+        .collect::<std::collections::HashSet<_>>();
+    let mut out = base
+        .iter()
+        .filter(|forward| !profile_ports.contains(&forward.container_port))
+        .cloned()
+        .collect::<Vec<_>>();
+    for forward in profile {
+        if !out
+            .iter()
+            .any(|existing| existing.container_port == forward.container_port)
+        {
+            out.push(forward.clone());
         }
     }
     out
@@ -430,6 +473,20 @@ fn validate(config: &Config) -> Result<()> {
                 mount.container.display()
             );
         }
+        for (key, value) in &ctr.env {
+            anyhow::ensure!(
+                crate::fs_util::is_valid_env_name(key),
+                "container '{}': invalid environment variable name: {}",
+                ctr.name,
+                key
+            );
+            anyhow::ensure!(
+                !value.contains('\n') && !value.contains('\r'),
+                "container '{}': env value for {} must not contain newlines",
+                ctr.name,
+                key
+            );
+        }
         for name in &ctr.env_passthrough {
             anyhow::ensure!(
                 !name.trim().is_empty(),
@@ -447,6 +504,18 @@ fn validate(config: &Config) -> Result<()> {
             anyhow::ensure!(
                 !host.trim().is_empty(),
                 "container '{}': bypass_proxy contains an empty host",
+                ctr.name
+            );
+        }
+        for forward in &ctr.localhost_forwards {
+            anyhow::ensure!(
+                forward.container_port > 0,
+                "container '{}': localhost_forwards.container_port must be greater than zero",
+                ctr.name
+            );
+            anyhow::ensure!(
+                forward.effective_host_port() > 0,
+                "container '{}': localhost_forwards.host_port must be greater than zero",
                 ctr.name
             );
         }

@@ -105,10 +105,14 @@ Environment:\n\
 - Examples: `hostdo cargo test`, `hostdo npm install`, `hostdo go test ./...`.\n\
 - Only use `hostdo --image <docker-image> ...` when the user explicitly asks you to run against a Docker image or containerized runner; it runs a command in a short-lived Docker runner instead of directly on the host, for example `hostdo --image node:20 npm test` or `hostdo --image rust:1.88 cargo test`.\n\
 - Prefer existing auto-approved `hostdo` commands or `hostdo.command_aliases` before asking for a new host command approval.\n\
-- Use `agentctl spawn <profile> [--name <name>]` to start same-workspace subagents from configured container profiles.\n\
+- Run `agentctl list` first to see the configured subagent profiles available in this environment. Use the profile name from the first column; do not guess hardcoded names such as `codex`, `claude`, or `qwen`.\n\
+- Use `agentctl spawn <profile> [--name <child>]` to start same-workspace subagents from one of those configured container profiles.\n\
+- After spawning, give the child a task with `agentctl send <child> \"task prompt\" --enter`.\n\
+- A typical sequence is `agentctl list`, `agentctl spawn <profile> --name review`, `agentctl status review`, `agentctl tail review --rows 30`, then `agentctl send review \"inspect the failing test\" --enter`.\n\
 - Use `agentctl spawn-many <profile> <count> --prefix <name>` for larger batches; launches are paced by `[agentctl].spawn_delay_ms` and never below 100ms between spawn requests.\n\
 - `[agentctl].max_subagents` limits live descendants under a single top-level agent, including subagents, sub-subagents, and deeper descendants.\n\
 - Use `agentctl status <child>`, `agentctl tail <child> --rows 30`, `agentctl tail <child> --all`, `agentctl send <child> \"text\" --enter`, `agentctl send <child> --key enter`, and `agentctl stop <child>` to inspect and control direct child agents.\n\
+- If `agentctl list` reports `image-missing`, the profile exists but its Docker image must be built or pulled before `agentctl spawn` will work.\n\
 - Subagent names are scoped to the parent that created them; duplicate names may exist elsewhere in the tree.\n\
 \n\
 Rules of engagement:\n\

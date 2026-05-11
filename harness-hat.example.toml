@@ -71,7 +71,7 @@ denied_argument_fragments = []
 
 [defaults.proxy]
 # Local proxy used for outbound HTTP/HTTPS policy enforcement.
-proxy_port = 8081
+proxy_port = 28781
 
 # Must be reachable from Docker containers. Use the narrowest Docker-reachable
 # bind address your environment supports; 0.0.0.0 is portable but broader than
@@ -153,6 +153,14 @@ vars = { NODE_ENV = "development" }
 # If omitted, harness-hat uses /workspace.
 # mount_target = "/workspace"
 
+# Mouse wheel routing for agent terminal panes.
+# Options:
+#   "auto"    - pass through when the inner TUI requested SGR mouse reporting,
+#               otherwise scroll Harness Hat history
+#   "harness" - always scroll Harness Hat history
+#   "agent"   - pass wheel events through to the agent TUI
+# mouse_scroll = "auto"
+
 # Optional mounts shared by all profiles.
 # `container` must be an absolute path inside the container.
 # `mode` is either "ro" or "rw".
@@ -166,9 +174,19 @@ vars = { NODE_ENV = "development" }
 # These must be variable names only, not NAME=value pairs.
 env_passthrough = ["TERM", "COLORTERM", "COLORFGBG"]
 
+# Fixed env vars set in every container.
+# env = { EXAMPLE = "value" }
+
 # Optional hosts that bypass MITM handling for every profile.
 # Usually better to keep this empty and set bypasses per profile instead.
 # bypass_proxy = []
+
+# Optional container-local TCP forwards to host services.
+# This example makes http://localhost:8081 inside the container connect to
+# host.docker.internal:8081. The host service must be reachable from Docker.
+# [[defaults.containers.localhost_forwards]]
+# container_port = 8081
+# host_port = 8081
 
 # ---------------------------------------------------------------------------
 # Container profiles.
@@ -308,40 +326,31 @@ host = "~/.gemini"
 container = "/home/ubuntu/.gemini"
 mode = "rw"
 
-[container_profiles.opencode]
+[container_profiles.pi]
 image = "default"
-command = ["opencode"]
-
-# OpenCode already allows all permissions by default, so the default launch
-# command is already the unlimited-permissions form.
-# command = ["opencode"]
+command = ["pi"]
 
 # Extra allowlist entries written into a starter harness-rules.toml when one
 # does not already exist for the workspace.
 starter_network_allowlist = [
   "domain=api.anthropic.com",
   "domain=api.openai.com",
+  "domain=generativelanguage.googleapis.com",
   "domain=openrouter.ai",
   "domain=api.openrouter.ai",
 ]
 
 # Optional profile-specific env passthrough.
-# env_passthrough = ["OPENROUTER_API_KEY"]
+# env_passthrough = ["ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"]
 
-bypass_proxy = [
-  "models.dev",
-  "githubusercontent.com",
-  ".githubusercontent.com",
-]
+# Map a host-local OpenAI-compatible server to Pi as http://localhost:8081.
+# [[container_profiles.pi.localhost_forwards]]
+# container_port = 8081
+# host_port = 8081
 
-# Persist opencode auth/session state across primary launches.
+# Persist Pi auth/session state across primary launches.
 # Subagents receive a startup snapshot instead of a shared writable mount.
-[[container_profiles.opencode.mounts]]
-host = "~/.opencode"
-container = "/home/ubuntu/.opencode"
-mode = "rw"
-
-[[container_profiles.opencode.mounts]]
-host = "~/.config/opencode"
-container = "/home/ubuntu/.config/opencode"
+[[container_profiles.pi.mounts]]
+host = "~/.pi"
+container = "/home/ubuntu/.pi"
 mode = "rw"

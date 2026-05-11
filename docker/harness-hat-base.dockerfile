@@ -154,6 +154,124 @@ if [ -f "$HH_STAGED_CREDS" ]; then
     chmod 600 "$CLAUDE_DIR/.credentials.json" 2>/dev/null || true
 fi
 
+start_localhost_forwards() {
+    HH_LOCALHOST_FORWARDS="${HARNESS_HAT_LOCALHOST_FORWARDS:-}"
+    [ -n "$HH_LOCALHOST_FORWARDS" ] || return 0
+    HH_LOCALHOST_FORWARD_HOST="${HARNESS_HAT_LOCALHOST_FORWARD_HOST:-host.docker.internal}"
+    HH_LOCALHOST_FORWARD_TARGET="$(getent ahostsv4 "$HH_LOCALHOST_FORWARD_HOST" 2>/dev/null | awk '{print $1; exit}')"
+    [ -n "$HH_LOCALHOST_FORWARD_TARGET" ] || HH_LOCALHOST_FORWARD_TARGET="$HH_LOCALHOST_FORWARD_HOST"
+    python3 - "$HH_LOCALHOST_FORWARDS" "$HH_LOCALHOST_FORWARD_TARGET" <<'PY' &
+import select
+import socket
+import sys
+import threading
+
+spec_arg = sys.argv[1]
+target_host = sys.argv[2]
+
+
+def parse_port(value):
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid port {value!r}") from exc
+    if port < 1 or port > 65535:
+        raise ValueError(f"port out of range: {port}")
+    return port
+
+
+forwards = []
+for raw in spec_arg.split(","):
+    raw = raw.strip()
+    if not raw:
+        continue
+    if ":" in raw:
+        container_port_raw, host_port_raw = raw.split(":", 1)
+    else:
+        container_port_raw = host_port_raw = raw
+    forwards.append((parse_port(container_port_raw), parse_port(host_port_raw)))
+
+if not forwards:
+    sys.exit(0)
+
+
+def relay(client, host_port):
+    upstream = None
+    try:
+        upstream = socket.create_connection((target_host, host_port), timeout=10)
+        client.setblocking(False)
+        upstream.setblocking(False)
+        sockets = [client, upstream]
+        while True:
+            readable, _, _ = select.select(sockets, [], [], 60)
+            for sock in readable:
+                data = sock.recv(65536)
+                if not data:
+                    return
+                (upstream if sock is client else client).sendall(data)
+    except Exception as exc:
+        print(f"harness-hat: localhost forward connection failed: {exc}", file=sys.stderr)
+    finally:
+        for sock in (client, upstream):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+
+def listen(sock, bind_host, container_port, host_port):
+    print(
+        f"harness-hat: forwarding {bind_host}:{container_port} to {target_host}:{host_port}",
+        file=sys.stderr,
+        flush=True,
+    )
+    while True:
+        client, _ = sock.accept()
+        threading.Thread(target=relay, args=(client, host_port), daemon=True).start()
+
+
+listeners = []
+for container_port, host_port in forwards:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", container_port))
+    sock.listen(128)
+    listeners.append((sock, "127.0.0.1", container_port, host_port))
+
+    try:
+        sock6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        sock6.bind(("::1", container_port))
+        sock6.listen(128)
+        listeners.append((sock6, "::1", container_port, host_port))
+    except OSError as exc:
+        print(
+            f"harness-hat: warning: could not bind ::1:{container_port}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+for sock, bind_host, container_port, host_port in listeners:
+    threading.Thread(
+        target=listen,
+        args=(sock, bind_host, container_port, host_port),
+        daemon=True,
+    ).start()
+
+threading.Event().wait()
+PY
+    HH_LOCALHOST_FORWARD_PID=$!
+    sleep 0.2
+    if ! kill -0 "$HH_LOCALHOST_FORWARD_PID" 2>/dev/null; then
+        echo "harness-hat: localhost forward setup failed" >&2
+        exit 1
+    fi
+}
+
+start_localhost_forwards
+
 # Optional: strict network enforcement.
 # TUN mode captures outbound TCP at the routing layer and forwards it through
 # the harness-hat scoped HTTP proxy via tun2proxy.  This does not rely on the
@@ -213,8 +331,17 @@ if [ "${HARNESS_HAT_STRICT_NETWORK:-0}" = "1" ]; then
 
     proxy_ip="$(getent ahostsv4 "$proxy_host" 2>/dev/null | awk '{print $1; exit}')"
     exec_ip="$(getent ahostsv4 "$exec_host" 2>/dev/null | awk '{print $1; exit}')"
+    forward_host="${HARNESS_HAT_LOCALHOST_FORWARD_HOST:-host.docker.internal}"
+    forward_ip=""
+    if [ -n "${HARNESS_HAT_LOCALHOST_FORWARDS:-}" ]; then
+        forward_ip="$(getent ahostsv4 "$forward_host" 2>/dev/null | awk '{print $1; exit}')"
+    fi
     if [ -z "$proxy_ip" ] || [ -z "$exec_ip" ]; then
         echo "harness-hat: strict_network failed to resolve proxy ($proxy_host) or exec ($exec_host) hosts" >&2
+        exit 1
+    fi
+    if [ -n "${HARNESS_HAT_LOCALHOST_FORWARDS:-}" ] && [ -z "$forward_ip" ]; then
+        echo "harness-hat: strict_network failed to resolve localhost forward host ($forward_host)" >&2
         exit 1
     fi
 
@@ -226,7 +353,8 @@ if [ "${HARNESS_HAT_STRICT_NETWORK:-0}" = "1" ]; then
     echo "harness-hat: strict_network using $IPT; proxy=$proxy_ip:$proxy_port exec=$exec_ip:$exec_port proxy_conn_limit=$proxy_conn_limit" >&2
     # ── Layer 1: strict egress filter ────────────────────────────────────
     # Allow only: loopback, tun0 (captured traffic), established/related,
-    # Docker DNS, proxy, exec. Traffic written to tun0 is not raw egress;
+    # Docker DNS, proxy, exec, and configured localhost forwards. Traffic
+    # written to tun0 is not raw egress;
     # tun2proxy consumes it in userspace and opens the real upstream sockets.
     # Anything escaping that path on a physical interface is rejected here.
     $IPT -w -t filter -N HH_EGRESS 2>/dev/null || $IPT -w -t filter -F HH_EGRESS
@@ -246,6 +374,22 @@ if [ "${HARNESS_HAT_STRICT_NETWORK:-0}" = "1" ]; then
     fi
     $IPT -w -t filter -A HH_EGRESS -p tcp -d "$proxy_ip" --dport "$proxy_port" -j ACCEPT
     $IPT -w -t filter -A HH_EGRESS -p tcp -d "$exec_ip" --dport "$exec_port" -j ACCEPT
+    if [ -n "${HARNESS_HAT_LOCALHOST_FORWARDS:-}" ]; then
+        old_ifs="$IFS"
+        IFS=','
+        for spec in $HARNESS_HAT_LOCALHOST_FORWARDS; do
+            host_port="${spec#*:}"
+            [ "$host_port" != "$spec" ] || host_port="$spec"
+            case "$host_port" in
+                ''|*[!0-9]*)
+                    echo "harness-hat: invalid localhost forward spec: $spec" >&2
+                    exit 1
+                    ;;
+            esac
+            $IPT -w -t filter -A HH_EGRESS -p tcp -d "$forward_ip" --dport "$host_port" -j ACCEPT
+        done
+        IFS="$old_ifs"
+    fi
     $IPT -w -t filter -A HH_EGRESS -j REJECT 2>/dev/null || $IPT -w -t filter -A HH_EGRESS -j DROP
 
     # IPv6: reject everything to avoid long hangs on AAAA/QUIC attempts.
@@ -279,13 +423,24 @@ if [ "${HARNESS_HAT_STRICT_NETWORK:-0}" = "1" ]; then
         echo "harness-hat: tun2proxy-bin not found in PATH or common cargo locations" >&2
         exit 1
     fi
-    "$TUN2PROXY_BIN" \
-        --setup \
-        --proxy "http://harness-hat:${HARNESS_HAT_SCOPED_PROXY_AUTH}@${proxy_ip}:${proxy_port}" \
-        --dns virtual \
-        --bypass "$proxy_ip" \
-        --bypass "$exec_ip" \
-        >/tmp/harness-hat-tun2proxy.log 2>&1 &
+    if [ -n "$forward_ip" ]; then
+        "$TUN2PROXY_BIN" \
+            --setup \
+            --proxy "http://harness-hat:${HARNESS_HAT_SCOPED_PROXY_AUTH}@${proxy_ip}:${proxy_port}" \
+            --dns virtual \
+            --bypass "$proxy_ip" \
+            --bypass "$exec_ip" \
+            --bypass "$forward_ip" \
+            >/tmp/harness-hat-tun2proxy.log 2>&1 &
+    else
+        "$TUN2PROXY_BIN" \
+            --setup \
+            --proxy "http://harness-hat:${HARNESS_HAT_SCOPED_PROXY_AUTH}@${proxy_ip}:${proxy_port}" \
+            --dns virtual \
+            --bypass "$proxy_ip" \
+            --bypass "$exec_ip" \
+            >/tmp/harness-hat-tun2proxy.log 2>&1 &
+    fi
     HH_TUN2PROXY_PID=$!
     sleep 1
     if ! kill -0 "$HH_TUN2PROXY_PID" 2>/dev/null; then

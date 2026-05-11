@@ -768,11 +768,24 @@ pub(crate) fn render_terminal_fullscreen_header(
     area: Rect,
     title: &str,
     title_style: Style,
+    hint: &str,
 ) {
-    frame.render_widget(
-        Paragraph::new(Span::styled(title.to_string(), title_style)),
-        area,
-    );
+    let width = area.width as usize;
+    let hint_width = hint.chars().count();
+    let line = if width > hint_width + 1 {
+        let title = truncate_middle(title, width.saturating_sub(hint_width + 1));
+        let title_width = title.chars().count();
+        let gap = width.saturating_sub(title_width + hint_width);
+        Line::from(vec![
+            Span::styled(title, title_style),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(hint.to_string(), Style::default().fg(Color::DarkGray)),
+        ])
+    } else {
+        Line::from(Span::styled(truncate_middle(title, width), title_style))
+    };
+
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 #[cfg(test)]

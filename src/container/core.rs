@@ -28,6 +28,7 @@ const INPUT_ECHO_GRACE: Duration = Duration::from_millis(350);
 pub struct ContainerSession {
     pub container_name: String,
     pub agent_kind: crate::config::AgentKind,
+    pub mouse_scroll: crate::config::MouseScrollMode,
     pub container_id: String,
     pub docker_name: String,
     pub project: String,

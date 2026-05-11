@@ -13,7 +13,7 @@ pub(crate) fn maybe_encode_sgr_mouse_for_session(
         return None;
     }
 
-    // Only emit SGR mouse sequences for now; this matches most modern TUIs (including OpenCode).
+    // Only emit SGR mouse sequences for now; this matches most modern TUIs.
     if !mode.contains(TermMode::SGR_MOUSE) {
         return None;
     }

@@ -470,6 +470,9 @@ fn should_enable_mouse_capture(app: &App) -> bool {
     let Some(session) = app.sessions.get(si) else {
         return false;
     };
+    if session.mouse_scroll == crate::config::MouseScrollMode::Agent {
+        return true;
+    }
     let mode = *session.term.lock().mode();
     session_mode_requires_mouse_capture(mode)
 }

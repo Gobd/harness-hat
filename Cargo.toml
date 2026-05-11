@@ -1,9 +1,9 @@
 [package]
 name = "harness-hat"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Network, Disk, and Host Isolation for AI Coding Agents"
+description = "Secure isolation and subagent orchestration for AI coding agents."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/only-cliches/harness-hat"

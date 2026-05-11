@@ -2,9 +2,9 @@
 
 # Harness Hat
 
-**Network, disk, and host isolation for AI coding agents.**
+**Secure isolation and subagent orchestration for AI coding agents.**
 
-Run Claude Code, Codex, Gemini CLI, OpenCode, or your own terminal agent in a
+Run Claude Code, Codex, Gemini CLI, Pi, or your own terminal agent in a
 policy-controlled Docker workspace instead of giving it your laptop.
 
 [Quick start](#quick-start) · [Supported agents](#supported-agent-clis) · [Policy model](#policy-model) · [Development](#development)
@@ -20,8 +20,8 @@ It wraps an agent in an isolated Docker container, routes network traffic throug
 a policy-aware proxy, and forces host commands through an explicit approval bridge.
 
 The result is a practical middle ground: agents can still edit your repo, run
-tests, install dependencies, and coordinate subagents, but every sensitive path
-has a rule, log, or prompt behind it.
+tests, install dependencies, and use `agentctl` to create and manage other
+configured agents, but every sensitive path has a rule, log, or prompt behind it.
 
 ## Why This Exists
 
@@ -30,7 +30,7 @@ SDKs:
 
 | Category | Examples | Why it matters |
 | --- | --- | --- |
-| Terminal coding agents | [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code), [OpenAI Codex CLI](https://www.npmjs.com/package/@openai/codex), [Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli), [OpenCode](https://www.npmjs.com/package/opencode-ai) | These tools can read projects, edit files, run shell commands, call provider APIs, and install packages. |
+| Terminal coding agents | [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code), [OpenAI Codex CLI](https://www.npmjs.com/package/@openai/codex), [Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli), [Pi](https://pi.dev/) | These tools can read projects, edit files, run shell commands, call provider APIs, and install packages. |
 | AI application SDKs | [openai](https://www.npmjs.com/package/openai), [@anthropic-ai/sdk](https://www.npmjs.com/package/@anthropic-ai/sdk), [ai](https://www.npmjs.com/package/ai), [langchain](https://www.npmjs.com/package/langchain) | Agents often modify apps that depend on these packages, then run local package managers and test suites. |
 
 Those tools are powerful because they work inside real repositories. Harness Hat
@@ -50,9 +50,10 @@ keeps that power while moving the blast radius out of your host environment.
 - **Interactive manager TUI**: launch agents, review prompts, inspect activity,
   reload rules, view logs, and attach to sessions from one terminal UI.
 - **First-class npm agent profiles**: the default image installs Claude Code,
-  Codex, Gemini CLI, and OpenCode.
-- **Subagent orchestration with `agentctl`**: agents can spawn and control
-  same-workspace child agents under your configured limits.
+  Codex, Gemini CLI, and Pi.
+- **Subagent orchestration with `agentctl`**: any agent can spawn and control
+  any other configured agent profile in the same workspace under your configured
+  limits.
 - **OpenTelemetry support**: export approval, proxy, and host-execution traces to
   an OTLP collector while keeping local logs.
 
@@ -128,7 +129,7 @@ Harness Hat separates three concerns:
 - **Local host config** lives in `harness-hat.toml`.
 - **Workspace security policy** lives in `harness-rules.toml`.
 - **Agent runtime state** stays in profile-specific mounts such as `~/.codex`,
-  `~/.claude`, `~/.gemini`, or `~/.opencode`.
+  `~/.claude`, `~/.gemini`, or `~/.pi`.
 
 ## Supported Agent CLIs
 
@@ -140,7 +141,7 @@ most relevant to current coding-agent workflows.
 | `claude` | [`@anthropic-ai/claude-code`](https://www.npmjs.com/package/@anthropic-ai/claude-code) | `claude` | Mounts Claude session state and seeds Anthropic API allowlist entries. |
 | `codex` | [`@openai/codex`](https://www.npmjs.com/package/@openai/codex) | `codex` | Mounts Codex state, uses a grayscale-friendly terminal palette, and can report MCP startup diagnostics. |
 | `gemini` | [`@google/gemini-cli`](https://github.com/google-gemini/gemini-cli) | `gemini` | Mounts Gemini state and seeds Google API allowlist entries. |
-| `opencode` | [`opencode-ai`](https://opencode.ai/docs/) | `opencode` | Mounts OpenCode state and supports model-provider endpoints such as OpenRouter. |
+| `pi` | [`@earendil-works/pi-coding-agent`](https://pi.dev/) | `pi` | Mounts Pi state under `~/.pi` and seeds common provider API allowlist entries. |
 
 The default runtime image installs all four:
 
@@ -148,7 +149,7 @@ The default runtime image installs all four:
 RUN npm install -g \
     @openai/codex \
     @google/gemini-cli \
-    opencode-ai \
+    @earendil-works/pi-coding-agent \
     @anthropic-ai/claude-code
 ```
 
@@ -173,6 +174,8 @@ Example profile:
 image = "default"
 command = ["codex"]
 grayscale_palette = true
+mouse_scroll = "auto"
+env = { EXAMPLE_FLAG = "1" }
 starter_network_allowlist = [
   "domain=api.openai.com",
 ]
@@ -182,6 +185,26 @@ host = "~/.codex"
 container = "/home/ubuntu/.codex"
 mode = "rw"
 ```
+
+`mouse_scroll` controls mouse wheel routing in the terminal pane. Use `auto` for
+the default behavior, `harness` to always scroll Harness Hat history, or `agent`
+to pass wheel events through to a mouse-aware agent TUI.
+
+`env` sets fixed container environment variables. `env_passthrough` passes host
+environment variables by name.
+
+`localhost_forwards` maps a container-local TCP port to the same or another port
+on the host. For example, this makes `http://localhost:8081` inside Pi connect
+to a host OpenAI-compatible server reachable as `host.docker.internal:8081`:
+
+```toml
+[[container_profiles.pi.localhost_forwards]]
+container_port = 8081
+host_port = 8081
+```
+
+The bundled Pi profile mounts `~/.pi` into the container so local auth and
+session state survive across launches.
 
 ### `harness-rules.toml`
 
@@ -256,9 +279,12 @@ approving `hostdo npm test` does not approve `hostdo --image node:20 npm test`.
 
 ### `agentctl`
 
-Spawn and control same-workspace subagents:
+Spawn and control same-workspace subagents. The parent and child do not need to
+use the same agent CLI; for example, Claude can launch Gemini, Codex can launch
+Pi, and Pi can launch any other configured profile:
 
 ```bash
+agentctl list
 agentctl spawn gemini --name review
 agentctl spawn-many codex 3 --prefix fix
 agentctl status review
@@ -267,7 +293,9 @@ agentctl send review "inspect the failing test" --enter
 agentctl stop review
 ```
 
-Subagent launches are paced by `[agentctl].spawn_delay_ms` and capped by
+Use `agentctl list` to discover the configured profile names before spawning;
+the first column is the `<profile>` accepted by `agentctl spawn`. Subagent
+launches are paced by `[agentctl].spawn_delay_ms` and capped by
 `[agentctl].max_subagents`.
 
 ### `killme`
@@ -307,7 +335,7 @@ harness-hat -- codex
 ```bash
 harness-hat -- gemini
 harness-hat -- claude
-harness-hat -- opencode
+harness-hat -- pi
 ```
 
 ### Use A Custom Dockerfile

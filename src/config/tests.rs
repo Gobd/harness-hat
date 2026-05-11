@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use crate::config::{
-        Config, ContainerMount, DefaultsConfig, MountMode, image_tag_for_stem, load,
-        load_composed_rules_for_workspace, merge_mounts, merge_unique_strings,
+        Config, ContainerMount, DefaultsConfig, MountMode, MouseScrollMode, image_tag_for_stem,
+        load, load_composed_rules_for_workspace, merge_mounts, merge_unique_strings,
     };
     use crate::rules::{ApprovalMode, NetworkPolicy};
     use std::fs;
@@ -63,6 +63,11 @@ canonical_path = "{}"
     #[test]
     fn defaults_hostdo_max_timeout_defaults_to_one_hour() {
         assert_eq!(DefaultsConfig::default().hostdo.max_timeout_secs, 60 * 60);
+    }
+
+    #[test]
+    fn defaults_proxy_port_uses_less_common_port() {
+        assert_eq!(DefaultsConfig::default().proxy.proxy_port, 28781);
     }
 
     #[test]
@@ -925,6 +930,7 @@ command = ["codex"]
         assert_eq!(cfg.containers[0].name, "codex");
         assert_eq!(cfg.containers[0].image_stem, "default");
         assert_eq!(cfg.containers[0].image, "harness-hat-default:local");
+        assert_eq!(cfg.containers[0].mouse_scroll, MouseScrollMode::Auto);
         assert!(cfg.containers[0].bypass_proxy.is_empty());
     }
 
@@ -978,6 +984,8 @@ global_rules_file = "{}"
 image = "default"
 command = ["codex"]
 grayscale_palette = true
+mouse_scroll = "agent"
+env = {{ HARNESS_HAT_TEST_FLAG = "1", HARNESS_HAT_TEST_MODE = "runtime" }}
 mcp_log_paths = ["/home/ubuntu/.codex/log/codex-tui.log", "/root/.codex/log/codex-tui.log"]
 mcp_log_pattern = "MCP startup|UnknownIssuer"
 "#,
@@ -987,6 +995,15 @@ mcp_log_pattern = "MCP startup|UnknownIssuer"
         fs::write(&cfg_path, raw).expect("write config");
         let cfg = load(&cfg_path).expect("config load should work");
         assert!(cfg.containers[0].grayscale_palette);
+        assert_eq!(cfg.containers[0].mouse_scroll, MouseScrollMode::Agent);
+        assert_eq!(
+            cfg.containers[0].env.get("HARNESS_HAT_TEST_FLAG"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            cfg.containers[0].env.get("HARNESS_HAT_TEST_MODE"),
+            Some(&"runtime".to_string())
+        );
         assert_eq!(
             cfg.containers[0].mcp_log_paths,
             vec![
@@ -997,6 +1014,94 @@ mcp_log_pattern = "MCP startup|UnknownIssuer"
         assert_eq!(
             cfg.containers[0].mcp_log_pattern.as_deref(),
             Some("MCP startup|UnknownIssuer")
+        );
+    }
+
+    #[test]
+    fn load_merges_localhost_forwards_with_profile_override() {
+        let root = unique_temp_dir("localhost-forwards");
+        let cfg_path = root.join("harness-hat.toml");
+        let docker_dir = root.join("docker-root");
+        fs::create_dir_all(&docker_dir).expect("create docker dir");
+        let raw = format!(
+            r#"
+docker_dir = "{}"
+
+[workspace]
+
+[manager]
+global_rules_file = "{}"
+
+[defaults.containers]
+
+[[defaults.containers.localhost_forwards]]
+container_port = 8081
+host_port = 8081
+
+[[defaults.containers.localhost_forwards]]
+container_port = 9000
+host_port = 9001
+
+[container_profiles.pi]
+image = "default"
+command = ["pi"]
+
+[[container_profiles.pi.localhost_forwards]]
+container_port = 8081
+host_port = 18081
+
+[[container_profiles.pi.localhost_forwards]]
+container_port = 7000
+"#,
+            docker_dir.display(),
+            root.join("global-rules.toml").display()
+        );
+        fs::write(&cfg_path, raw).expect("write config");
+        let cfg = load(&cfg_path).expect("config load should work");
+        let forwards = &cfg.containers[0].localhost_forwards;
+        assert_eq!(forwards.len(), 3);
+        assert!(forwards.iter().any(|forward| {
+            forward.container_port == 9000 && forward.effective_host_port() == 9001
+        }));
+        assert!(forwards.iter().any(|forward| {
+            forward.container_port == 8081 && forward.effective_host_port() == 18081
+        }));
+        assert!(forwards.iter().any(|forward| {
+            forward.container_port == 7000 && forward.effective_host_port() == 7000
+        }));
+    }
+
+    #[test]
+    fn load_rejects_zero_localhost_forward_port() {
+        let root = unique_temp_dir("localhost-forward-zero");
+        let cfg_path = root.join("harness-hat.toml");
+        let docker_dir = root.join("docker-root");
+        fs::create_dir_all(&docker_dir).expect("create docker dir");
+        let raw = format!(
+            r#"
+docker_dir = "{}"
+
+[workspace]
+
+[manager]
+global_rules_file = "{}"
+
+[container_profiles.pi]
+image = "default"
+command = ["pi"]
+
+[[container_profiles.pi.localhost_forwards]]
+container_port = 0
+"#,
+            docker_dir.display(),
+            root.join("global-rules.toml").display()
+        );
+        fs::write(&cfg_path, raw).expect("write config");
+        let err = load(&cfg_path).expect_err("zero localhost forward port should fail");
+        assert!(
+            err.to_string()
+                .contains("localhost_forwards.container_port must be greater than zero"),
+            "unexpected error: {err}"
         );
     }
 

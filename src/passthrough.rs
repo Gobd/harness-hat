@@ -36,9 +36,12 @@ struct PassthroughRuntime {
     image_stem: String,
     mount_target: PathBuf,
     mounts: Vec<crate::config::ContainerMount>,
+    env: std::collections::HashMap<String, String>,
     env_passthrough: Vec<String>,
     bypass_proxy: Vec<String>,
+    localhost_forwards: Vec<crate::config::LocalhostForward>,
     grayscale_palette: bool,
+    mouse_scroll: crate::config::MouseScrollMode,
 }
 
 pub async fn run_and_get_exit_code() -> Result<i32> {
@@ -168,12 +171,15 @@ pub async fn run_and_get_exit_code() -> Result<i32> {
         mount_target: runtime.mount_target.clone(),
         command: None,
         grayscale_palette: runtime.grayscale_palette,
+        mouse_scroll: runtime.mouse_scroll,
         starter_network_allowlist: Vec::new(),
         mcp_log_paths: Vec::new(),
         mcp_log_pattern: None,
         mounts: runtime.mounts.clone(),
+        env: runtime.env.clone(),
         env_passthrough: runtime.env_passthrough.clone(),
         bypass_proxy: runtime.bypass_proxy.clone(),
+        localhost_forwards: runtime.localhost_forwards.clone(),
     };
 
     session_registry.insert(
@@ -329,20 +335,34 @@ fn infer_passthrough_runtime(
         .map(|ctr| ctr.env_passthrough.clone())
         .unwrap_or_else(|| config.defaults.containers.env_passthrough.clone());
 
+    let env = inferred_profile
+        .map(|ctr| ctr.env.clone())
+        .unwrap_or_else(|| config.defaults.containers.env.clone());
+
     let bypass_proxy = inferred_profile
         .map(|ctr| ctr.bypass_proxy.clone())
         .unwrap_or_else(|| config.defaults.containers.bypass_proxy.clone());
+
+    let localhost_forwards = inferred_profile
+        .map(|ctr| ctr.localhost_forwards.clone())
+        .unwrap_or_else(|| config.defaults.containers.localhost_forwards.clone());
 
     PassthroughRuntime {
         container_name,
         image_stem,
         mount_target,
         mounts,
+        env,
         env_passthrough,
         bypass_proxy,
+        localhost_forwards,
         grayscale_palette: inferred_profile
             .map(|ctr| ctr.grayscale_palette)
             .unwrap_or(false),
+        mouse_scroll: inferred_profile
+            .map(|ctr| ctr.mouse_scroll)
+            .or(config.defaults.containers.mouse_scroll)
+            .unwrap_or_default(),
     }
 }
 
@@ -519,6 +539,7 @@ mod tests {
             mount_target: PathBuf::from(mount_target),
             command: Some(command.iter().map(|value| (*value).to_string()).collect()),
             grayscale_palette: false,
+            mouse_scroll: crate::config::MouseScrollMode::Auto,
             starter_network_allowlist: Vec::new(),
             mcp_log_paths: Vec::new(),
             mcp_log_pattern: None,
@@ -527,8 +548,10 @@ mod tests {
                 container: PathBuf::from(mount_container),
                 mode: crate::config::MountMode::Rw,
             }],
+            env: std::collections::HashMap::new(),
             env_passthrough: env.iter().map(|v| (*v).to_string()).collect(),
             bypass_proxy: vec![],
+            localhost_forwards: vec![],
         }
     }
 
@@ -547,8 +570,8 @@ mod tests {
             crate::config::AgentKind::Gemini
         );
         assert_eq!(
-            crate::config::infer_agent_kind_from_argv(Some(&["opencode".to_string()])),
-            crate::config::AgentKind::Opencode
+            crate::config::infer_agent_kind_from_argv(Some(&["pi".to_string()])),
+            crate::config::AgentKind::Pi
         );
         assert_eq!(
             crate::config::infer_agent_kind_from_argv(Some(&["anything-else".to_string()])),
@@ -648,6 +671,7 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.defaults.containers.mount_target = Some(PathBuf::from("/workspace-default"));
         cfg.defaults.containers.env_passthrough = vec!["DEFAULT_ENV".to_string()];
+        cfg.defaults.containers.mouse_scroll = Some(crate::config::MouseScrollMode::Harness);
         cfg.defaults.containers.mounts = vec![crate::config::ContainerMount {
             host: PathBuf::from("/default"),
             container: PathBuf::from("/c-default"),
@@ -662,12 +686,14 @@ mod tests {
             "/codex",
             "/c-codex",
         )];
+        cfg.containers[0].mouse_scroll = crate::config::MouseScrollMode::Agent;
 
         let runtime = infer_passthrough_runtime(&cfg, None, Some("codex"));
         assert_eq!(runtime.container_name, "codex");
         assert_eq!(runtime.image_stem, "custom-codex");
         assert_eq!(runtime.mount_target, PathBuf::from("/workspace-codex"));
         assert_eq!(runtime.env_passthrough, vec!["CODEX_ENV".to_string()]);
+        assert_eq!(runtime.mouse_scroll, crate::config::MouseScrollMode::Agent);
         assert_eq!(runtime.mounts.len(), 1);
         assert_eq!(runtime.mounts[0].host, PathBuf::from("/codex"));
     }
@@ -697,6 +723,7 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.defaults.containers.mount_target = Some(PathBuf::from("/workspace-default"));
         cfg.defaults.containers.env_passthrough = vec!["DEFAULT_ENV".to_string()];
+        cfg.defaults.containers.mouse_scroll = Some(crate::config::MouseScrollMode::Harness);
         cfg.defaults.containers.mounts = vec![crate::config::ContainerMount {
             host: PathBuf::from("/default"),
             container: PathBuf::from("/c-default"),
@@ -708,6 +735,10 @@ mod tests {
         assert_eq!(runtime.image_stem, "default");
         assert_eq!(runtime.mount_target, PathBuf::from("/workspace-default"));
         assert_eq!(runtime.env_passthrough, vec!["DEFAULT_ENV".to_string()]);
+        assert_eq!(
+            runtime.mouse_scroll,
+            crate::config::MouseScrollMode::Harness
+        );
         assert_eq!(runtime.mounts.len(), 1);
         assert_eq!(runtime.mounts[0].host, PathBuf::from("/default"));
     }

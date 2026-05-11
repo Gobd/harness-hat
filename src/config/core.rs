@@ -248,7 +248,7 @@ pub struct ProxyDefaults {
 
 /// Provides the default value for `ProxyDefaults.proxy_port`.
 fn default_proxy_port() -> u16 {
-    8081
+    28781
 }
 
 impl Default for ProxyDefaults {

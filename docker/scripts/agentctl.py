@@ -14,6 +14,7 @@ import json
 import os
 import pathlib
 import random
+import shlex
 import sys
 import time
 import urllib.error
@@ -277,6 +278,45 @@ def _agent_status(child: str, diagnostics: str = "summary") -> dict:
     )
 
 
+def _agent_profiles() -> dict:
+    return _request("GET", "/agents/profiles")
+
+
+def _command_text(profile: dict) -> str:
+    command = profile.get("command") or []
+    if not isinstance(command, list):
+        return ""
+    return " ".join(shlex.quote(str(part)) for part in command)
+
+
+def _print_profiles(data: dict) -> None:
+    profiles = data.get("profiles") or []
+    if not profiles:
+        print("No subagent profiles are configured.")
+        return
+
+    workspace = data.get("workspace") or "current workspace"
+    print(f"Available subagent profiles for {workspace}:")
+    width = max(len(str(profile.get("name", ""))) for profile in profiles)
+    for profile in profiles:
+        name = str(profile.get("name", ""))
+        agent = str(profile.get("agent") or "none")
+        image = str(profile.get("image") or "")
+        image_state = "ready" if profile.get("image_present") else "image-missing"
+        command = _command_text(profile)
+        line = f"  {name:<{width}}  agent={agent}  {image_state}"
+        if command:
+            line += f"  command={command}"
+        if image:
+            line += f"  image={image}"
+        print(line)
+
+    print("")
+    print("Use the first column as <profile>, for example:")
+    print("  agentctl spawn <profile> --name <child>")
+    print("  agentctl send <child> \"task prompt\" --enter")
+
+
 def _codex_gate_complete(status: dict) -> bool:
     if status.get("state") == "exited":
         return True
@@ -364,6 +404,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="agentctl")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    list_profiles = sub.add_parser(
+        "list",
+        help="list configured subagent profiles available to spawn",
+    )
+    list_profiles.add_argument("--json", action="store_true")
+
+    profiles = sub.add_parser(
+        "profiles",
+        help="alias for list",
+    )
+    profiles.add_argument("--json", action="store_true")
+
     spawn = sub.add_parser("spawn")
     spawn.add_argument("profile")
     spawn.add_argument("--name")
@@ -423,7 +475,13 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.cmd == "spawn":
+    if args.cmd in {"list", "profiles"}:
+        data = _agent_profiles()
+        if args.json:
+            _print_json(data)
+        else:
+            _print_profiles(data)
+    elif args.cmd == "spawn":
         delay_ms = _configured_spawn_delay_ms()
         _print_json(_paced_spawn_request(args.profile, args.name, delay_ms))
     elif args.cmd == "spawn-many":

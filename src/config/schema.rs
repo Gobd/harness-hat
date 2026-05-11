@@ -40,8 +40,22 @@ pub enum AgentKind {
     Codex,
     /// Google Gemini CLI (`@google/gemini-cli`).
     Gemini,
-    /// opencode (`opencode-ai`).
-    Opencode,
+    /// Pi agentic TUI (`@earendil-works/pi-coding-agent`).
+    Pi,
+}
+
+/// How mouse wheel events in agent terminals are routed.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseScrollMode {
+    /// Preserve existing behavior: pass through when the inner TUI requested
+    /// SGR mouse reporting, otherwise scroll Harness Hat's terminal history.
+    #[default]
+    Auto,
+    /// Always use mouse wheel events for Harness Hat terminal scrollback.
+    Harness,
+    /// Pass mouse wheel events through to the terminal agent as SGR mouse input.
+    Agent,
 }
 
 /// Internal resolved container launch definition synthesized from
@@ -69,6 +83,10 @@ pub struct ContainerDef {
     /// Render ANSI palette requests in grayscale for this profile.
     #[serde(default)]
     pub grayscale_palette: bool,
+    /// Controls whether mouse wheel events scroll Harness Hat history or are
+    /// passed through to the inner agent TUI.
+    #[serde(default)]
+    pub mouse_scroll: MouseScrollMode,
     /// Additional allowlist entries written into a starter `harness-rules.toml`.
     #[serde(default)]
     pub starter_network_allowlist: Vec<String>,
@@ -81,6 +99,9 @@ pub struct ContainerDef {
     /// Extra host paths to mount into the container (for auth/session reuse).
     #[serde(default)]
     pub mounts: Vec<ContainerMount>,
+    /// Fixed environment variables to set in the container.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
     /// Host env var names to pass through with `docker run -e NAME`.
     #[serde(default)]
     pub env_passthrough: Vec<String>,
@@ -88,6 +109,9 @@ pub struct ContainerDef {
     /// Use when specific endpoints must bypass the harness-hat proxy.
     #[serde(default)]
     pub bypass_proxy: Vec<String>,
+    /// TCP ports on container localhost that forward to the host.
+    #[serde(default)]
+    pub localhost_forwards: Vec<LocalhostForward>,
 }
 
 /// Named container profile used directly as a launch target.
@@ -104,6 +128,8 @@ pub struct ContainerProfile {
     #[serde(default)]
     pub grayscale_palette: Option<bool>,
     #[serde(default)]
+    pub mouse_scroll: Option<MouseScrollMode>,
+    #[serde(default)]
     pub starter_network_allowlist: Vec<String>,
     #[serde(default)]
     pub mcp_log_paths: Vec<PathBuf>,
@@ -112,9 +138,13 @@ pub struct ContainerProfile {
     #[serde(default)]
     pub mounts: Vec<ContainerMount>,
     #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
     pub env_passthrough: Vec<String>,
     #[serde(default)]
     pub bypass_proxy: Vec<String>,
+    #[serde(default)]
+    pub localhost_forwards: Vec<LocalhostForward>,
 }
 
 /// Shared defaults merged into every container definition.
@@ -125,15 +155,21 @@ pub struct ContainerDefaults {
     #[serde(default)]
     pub grayscale_palette: Option<bool>,
     #[serde(default)]
+    pub mouse_scroll: Option<MouseScrollMode>,
+    #[serde(default)]
     pub mounts: Vec<ContainerMount>,
     #[serde(default)]
     pub mcp_log_paths: Vec<PathBuf>,
     #[serde(default)]
     pub mcp_log_pattern: Option<String>,
     #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
     pub env_passthrough: Vec<String>,
     #[serde(default)]
     pub bypass_proxy: Vec<String>,
+    #[serde(default)]
+    pub localhost_forwards: Vec<LocalhostForward>,
 }
 
 pub(crate) fn default_mount_target() -> PathBuf {
@@ -149,7 +185,7 @@ pub fn infer_agent_kind_from_argv(command: Option<&[String]>) -> AgentKind {
         Some("claude") => AgentKind::Claude,
         Some("codex") => AgentKind::Codex,
         Some("gemini") => AgentKind::Gemini,
-        Some("opencode") => AgentKind::Opencode,
+        Some("pi") => AgentKind::Pi,
         _ => AgentKind::None,
     }
 }
@@ -185,6 +221,21 @@ pub enum MountMode {
     Ro,
     #[default]
     Rw,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct LocalhostForward {
+    /// Port to bind on 127.0.0.1 inside the container.
+    pub container_port: u16,
+    /// Port to connect to on the host. Defaults to `container_port`.
+    #[serde(default)]
+    pub host_port: Option<u16>,
+}
+
+impl LocalhostForward {
+    pub fn effective_host_port(&self) -> u16 {
+        self.host_port.unwrap_or(self.container_port)
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

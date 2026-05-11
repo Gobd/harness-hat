@@ -245,12 +245,24 @@ impl App {
             | MouseEventKind::ScrollDown
             | MouseEventKind::ScrollLeft
             | MouseEventKind::ScrollRight => {
-                // If the inner terminal app requested SGR mouse reporting, prefer forwarding
-                // scroll events so internal scrollbars (e.g. OpenCode) work.
                 if !self.scroll_mode {
-                    if let Some(bytes) = maybe_encode_sgr_mouse_for_session(session, mouse) {
-                        session.send_input(bytes);
-                        return;
+                    match session.mouse_scroll {
+                        crate::config::MouseScrollMode::Agent => {
+                            if let Some(bytes) = encode_sgr_mouse(mouse) {
+                                session.send_input(bytes);
+                                return;
+                            }
+                        }
+                        crate::config::MouseScrollMode::Auto => {
+                            // If the inner terminal app requested SGR mouse reporting, prefer
+                            // forwarding scroll events so internal scrollbars work.
+                            if let Some(bytes) = maybe_encode_sgr_mouse_for_session(session, mouse)
+                            {
+                                session.send_input(bytes);
+                                return;
+                            }
+                        }
+                        crate::config::MouseScrollMode::Harness => {}
                     }
                 }
 

@@ -51,7 +51,13 @@ pub(crate) fn render_terminal(
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .split(area);
-        render_terminal_fullscreen_header(frame, split[0], tab_title.as_str(), title_style);
+        render_terminal_fullscreen_header(
+            frame,
+            split[0],
+            tab_title.as_str(),
+            title_style,
+            terminal_fullscreen_hint(true),
+        );
         split[1]
     } else {
         area
@@ -77,6 +83,9 @@ pub(crate) fn render_terminal(
         block.inner(content_area)
     };
     frame.render_widget(block, content_area);
+    if !fullscreen {
+        render_terminal_border_hint(frame, content_area, terminal_fullscreen_hint(false));
+    }
 
     if let Some(session) = app.sessions.get_mut(session_idx) {
         let _ = session.resize(inner.height, inner.width);
@@ -110,6 +119,35 @@ pub(crate) fn render_terminal(
         focused,
         app.scroll_mode,
         app.terminal_scroll,
+    );
+}
+
+pub(crate) fn terminal_fullscreen_hint(fullscreen: bool) -> &'static str {
+    if fullscreen {
+        " Ctrl+G to exit fullscreen "
+    } else {
+        " Ctrl+G for full screen "
+    }
+}
+
+fn render_terminal_border_hint(frame: &mut Frame, area: Rect, hint: &str) {
+    let hint_width = hint.chars().count() as u16;
+    if area.height == 0 || area.width <= hint_width + 2 {
+        return;
+    }
+
+    let hint_area = Rect {
+        x: area.x + area.width - hint_width - 1,
+        y: area.y,
+        width: hint_width,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            hint.to_string(),
+            Style::default().fg(Color::DarkGray),
+        )),
+        hint_area,
     );
 }
 
@@ -412,5 +450,19 @@ pub(crate) fn maybe_dim(color: Color, dimmed: bool) -> Color {
         attenuate_color(color)
     } else {
         color
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_fullscreen_hint_tracks_state() {
+        assert_eq!(terminal_fullscreen_hint(false), " Ctrl+G for full screen ");
+        assert_eq!(
+            terminal_fullscreen_hint(true),
+            " Ctrl+G to exit fullscreen "
+        );
     }
 }

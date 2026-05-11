@@ -669,8 +669,16 @@ const RULES_FILE_HEADER: &str = "\
 #   before asking for a new host command approval.
 #
 # Subagents:
-# - Use `agentctl spawn <profile> [--name <name>]` to start a same-workspace
-#   subagent from a configured container profile.
+# - Run `agentctl list` first to see the configured subagent profiles available
+#   in this environment. Use the profile name from the first column; do not
+#   guess hardcoded names such as `codex`, `claude`, or `qwen`.
+# - Use `agentctl spawn <profile> [--name <child>]` to start a same-workspace
+#   subagent from one of those configured container profiles.
+# - After spawning, give the child a task with
+#   `agentctl send <child> \"task prompt\" --enter`.
+# - A typical sequence is `agentctl list`, `agentctl spawn <profile> --name review`,
+#   `agentctl status review`, `agentctl tail review --rows 30`, then
+#   `agentctl send review \"inspect the failing test\" --enter`.
 # - Use `agentctl spawn-many <profile> <count> --prefix <name>` for larger
 #   batches; launches are paced by `[agentctl].spawn_delay_ms` and never below
 #   100ms between spawn requests.
@@ -683,6 +691,8 @@ const RULES_FILE_HEADER: &str = "\
 #   `agentctl tail <child> --all`, `agentctl send <child> \"text\" --enter`,
 #   `agentctl send <child> --key enter`, and `agentctl stop <child>` to inspect
 #   and control direct child agents.
+# - If `agentctl list` reports `image-missing`, the profile exists but its
+#   Docker image must be built or pulled before `agentctl spawn` will work.
 # - Subagent names are scoped to the parent that created them; duplicate names
 #   may exist elsewhere in the tree.
 #

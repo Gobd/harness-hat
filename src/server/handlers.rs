@@ -185,6 +185,23 @@ pub struct AgentSpawnResponse {
     pub container_id: String,
 }
 
+/// Response payload entry for one configured subagent profile.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentProfileResponse {
+    pub name: String,
+    pub agent: AgentKind,
+    pub image: String,
+    pub image_present: bool,
+    pub command: Option<Vec<String>>,
+}
+
+/// Response payload returned by the subagent profile listing endpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentProfilesResponse {
+    pub workspace: String,
+    pub profiles: Vec<AgentProfileResponse>,
+}
+
 /// Terminal-settled state exposed to parent agents.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -433,6 +450,7 @@ pub async fn run_with_listener(
         .route("/exec", post(super::core::exec_handler))
         .route("/exec/jobs/:job_id", get(exec_job_handler))
         .route("/container/stop", post(stop_handler))
+        .route("/agents/profiles", get(agent_profiles_handler))
         .route("/agents/spawn", post(agent_spawn_handler))
         .route("/agents/:child/status", get(agent_status_handler))
         .route("/agents/:child/tail", get(agent_tail_handler))
@@ -522,6 +540,35 @@ pub(super) async fn stop_handler(
         )
             .into_response(),
     }
+}
+
+pub(super) async fn agent_profiles_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    let (_parent_session_token, identity) = match require_session_context(&state, &headers) {
+        Ok(ctx) => ctx,
+        Err(resp) => return resp,
+    };
+
+    let cfg = state.config.get();
+    let profiles = cfg
+        .containers
+        .iter()
+        .map(|profile| AgentProfileResponse {
+            name: profile.name.clone(),
+            agent: crate::config::infer_agent_kind_from_argv(profile.command.as_deref()),
+            image: profile.image.clone(),
+            image_present: crate::container::docker_image_exists(&profile.image).unwrap_or(false),
+            command: profile.command.clone(),
+        })
+        .collect();
+
+    Json(AgentProfilesResponse {
+        workspace: identity.project,
+        profiles,
+    })
+    .into_response()
 }
 
 pub(super) async fn agent_spawn_handler(
@@ -977,7 +1024,7 @@ mod tests {
         confine_host_cwd_to_workspace, resolve_exec_argv_aliases, resolve_host_cwd,
         resolve_host_cwd_in_workspace,
     };
-    use crate::config::{AgentKind, AliasValue};
+    use crate::config::{AgentKind, AliasValue, ContainerDef};
     use crate::server::SessionRegistry;
     use crate::shared_config::SharedConfig;
     use crate::state::StateManager;
@@ -1217,8 +1264,20 @@ mod tests {
         sessions: SessionRegistry,
         exec_jobs: super::ExecJobRegistry,
     ) -> super::ServerState {
+        server_state_with_config(
+            sessions,
+            exec_jobs,
+            Arc::new(crate::config::Config::default()),
+        )
+    }
+
+    fn server_state_with_config(
+        sessions: SessionRegistry,
+        exec_jobs: super::ExecJobRegistry,
+        config: Arc<crate::config::Config>,
+    ) -> super::ServerState {
         super::ServerState {
-            config: SharedConfig::new(Arc::new(crate::config::Config::default())),
+            config: SharedConfig::new(config),
             state: test_state_manager(),
             pending_tx: mpsc::channel(1).0,
             stop_tx: mpsc::channel(1).0,
@@ -1228,6 +1287,27 @@ mod tests {
             sessions,
             exec_jobs,
             activity_tx: mpsc::unbounded_channel().0,
+        }
+    }
+
+    fn container_def(name: &str, command: &[&str]) -> ContainerDef {
+        ContainerDef {
+            name: name.to_string(),
+            image: "harness-hat-default:local".to_string(),
+            image_stem: "default".to_string(),
+            profile: None,
+            mount_target: PathBuf::from("/workspace"),
+            command: Some(command.iter().map(|item| item.to_string()).collect()),
+            grayscale_palette: false,
+            mouse_scroll: Default::default(),
+            starter_network_allowlist: Vec::new(),
+            mcp_log_paths: Vec::new(),
+            mcp_log_pattern: None,
+            mounts: Vec::new(),
+            env: HashMap::new(),
+            env_passthrough: Vec::new(),
+            bypass_proxy: Vec::new(),
+            localhost_forwards: Vec::new(),
         }
     }
 
@@ -1262,6 +1342,44 @@ mod tests {
     fn agent_terminal_state_serializes_launching() {
         let value = serde_json::to_value(super::AgentTerminalState::Launching).unwrap();
         assert_eq!(value, serde_json::json!("launching"));
+    }
+
+    #[tokio::test]
+    async fn agent_profiles_handler_lists_configured_spawn_profiles() {
+        let sessions = SessionRegistry::default();
+        sessions.insert(
+            "parent-session".to_string(),
+            super::SessionIdentity {
+                project: "workspace-a".to_string(),
+                container_id: "parent-container".to_string(),
+                mount_target: "/workspace".to_string(),
+            },
+        );
+        let config = Arc::new(crate::config::Config {
+            containers: vec![
+                container_def("qwen", &["qwen"]),
+                container_def("codex", &["codex"]),
+            ],
+            ..crate::config::Config::default()
+        });
+        let state = server_state_with_config(sessions, super::ExecJobRegistry::default(), config);
+
+        let response = super::agent_profiles_handler(
+            State(Arc::new(state)),
+            auth_headers("test_token", "parent-session"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["workspace"], "workspace-a");
+        assert_eq!(body["profiles"][0]["name"], "qwen");
+        assert_eq!(body["profiles"][0]["agent"], "none");
+        assert_eq!(body["profiles"][0]["command"], serde_json::json!(["qwen"]));
+        assert!(body["profiles"][0]["image_present"].is_boolean());
+        assert_eq!(body["profiles"][1]["name"], "codex");
+        assert_eq!(body["profiles"][1]["agent"], "codex");
     }
 
     #[tokio::test]

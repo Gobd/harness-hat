@@ -2,7 +2,25 @@
 
 This changelog is derived from git history and the current working tree.
 
-## 0.4.0 Future
+## 0.5.0 May 11th, 2026
+
+### Added
+- Container profiles can now set `mouse_scroll = "auto"`, `"harness"`, or `"agent"` to control whether mouse wheel events scroll Harness Hat history or pass through to the inner agent TUI.
+- Container profiles can now define fixed environment variables with `env = { NAME = "value" }`.
+- Container profiles can now define `localhost_forwards` entries that expose selected host TCP services as `localhost:<port>` inside the container.
+- Terminal panes now show a `Ctrl+G` fullscreen hint in both normal and fullscreen terminal views.
+- `agentctl list` now reports the configured subagent profiles that the current container can launch.
+
+### Changed
+- The bundled OpenCode profile and package have been replaced by a Pi profile using `@earendil-works/pi-coding-agent`, command `pi`, common provider allowlist entries, and a `~/.pi` state mount.
+- The default manager proxy port changed from `8081` to `28781` to avoid common local development port conflicts.
+- Passthrough launches now honor profile fixed environment variables, mouse scroll routing, and localhost forwards.
+
+### Fixed
+- `localhost_forwards` now work with `strict_network` by resolving the Docker host alias before `tun2proxy` starts and allowing only the configured forwarded host ports through the strict egress filter.
+
+
+## 0.4.0 May 8th, 2026
 
 ### Added
 - Scoped proxy listeners now require per-session proxy authentication before accepting HTTP or CONNECT traffic.
@@ -163,7 +181,7 @@ This changelog is derived from git history and the current working tree.
 - The legacy sync subsystem (`src/sync`) and watcher-driven sync codepaths.
 - Unused `walkdir` dependency and stale sync-related code.
 - Obsolete `src-files-dump.md` artifact.
-- Legacy per-agent Dockerfile subdirectories under `docker/{claude,codex,gemini,opencode}`.
+- Legacy per-agent Dockerfile subdirectories under `docker/`.
 - Legacy `docker/ubuntu-24.04.Dockerfile` base filename (replaced by `docker/void-claw-base.dockerfile`).
 
 ## [0.1.0]

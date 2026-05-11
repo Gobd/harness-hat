@@ -209,12 +209,15 @@ mod tests {
                 "--dangerously-skip-permissions".to_string(),
             ]),
             grayscale_palette: false,
+            mouse_scroll: crate::config::MouseScrollMode::Auto,
             starter_network_allowlist: Vec::new(),
             mcp_log_paths: Vec::new(),
             mcp_log_pattern: None,
             mounts: Vec::new(),
+            env: std::collections::HashMap::new(),
             env_passthrough: Vec::new(),
             bypass_proxy: Vec::new(),
+            localhost_forwards: Vec::new(),
         };
 
         assert_eq!(
@@ -236,12 +239,15 @@ mod tests {
             mount_target: default_mount_target(),
             command: None,
             grayscale_palette: true,
+            mouse_scroll: crate::config::MouseScrollMode::Auto,
             starter_network_allowlist: Vec::new(),
             mcp_log_paths: Vec::new(),
             mcp_log_pattern: None,
             mounts: Vec::new(),
+            env: std::collections::HashMap::new(),
             env_passthrough: Vec::new(),
             bypass_proxy: Vec::new(),
+            localhost_forwards: Vec::new(),
         };
         assert_eq!(App::container_command_for_profile(&profile), None);
     }

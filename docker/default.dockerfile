@@ -12,7 +12,7 @@ USER root
 RUN npm install -g \
     @openai/codex \
     @google/gemini-cli \
-    opencode-ai \
+    @earendil-works/pi-coding-agent \
     @anthropic-ai/claude-code
 USER ubuntu
 

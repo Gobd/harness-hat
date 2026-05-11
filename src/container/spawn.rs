@@ -80,6 +80,7 @@ pub fn spawn(
         .unwrap_or_default();
     let mut launch_notes = Vec::new();
     let subagent_launch = proxy_priority == crate::proxy::SourcePriority::Subagent;
+    let agent_kind = crate::config::infer_agent_kind_from_argv(command_argv);
 
     let mut docker_args: Vec<String> = vec![
         "run".to_string(),
@@ -154,6 +155,9 @@ pub fn spawn(
         .context("failed to create temp env file")?;
 
     write_ca_env_entries(&mut env_file)?;
+    for (key, value) in &ctr.env {
+        write_env_file_entry(&mut env_file, key, value)?;
+    }
     for (key, value) in extra_env {
         write_env_file_entry(&mut env_file, key, value)?;
     }
@@ -187,6 +191,9 @@ pub fn spawn(
         "HARNESS_HAT_PROXY_CONN_LIMIT",
         proxy_conn_limit.to_string(),
     )?;
+    if let Some(forwards) = format_localhost_forwards(&ctr.localhost_forwards) {
+        write_env_file_entry(&mut env_file, "HARNESS_HAT_LOCALHOST_FORWARDS", forwards)?;
+    }
     if !strict_network {
         write_env_file_entry(&mut env_file, "HTTP_PROXY", &container_proxy_url)?;
         write_env_file_entry(&mut env_file, "HTTPS_PROXY", &container_proxy_url)?;
@@ -237,7 +244,7 @@ pub fn spawn(
     }
 
     for name in &ctr.env_passthrough {
-        if extra_env.iter().any(|(key, _)| key == name) {
+        if ctr.env.contains_key(name) || extra_env.iter().any(|(key, _)| key == name) {
             continue;
         }
         docker_args.push("-e".to_string());
@@ -333,7 +340,8 @@ pub fn spawn(
     Ok((
         ContainerSession {
             container_name: ctr.name.clone(),
-            agent_kind: crate::config::infer_agent_kind_from_argv(command_argv),
+            agent_kind,
+            mouse_scroll: ctr.mouse_scroll,
             container_id,
             docker_name,
             project: project_name.to_owned(),
@@ -587,6 +595,25 @@ fn proxy_addr_without_auth(proxy_url: &str) -> String {
         .to_string()
 }
 
+fn format_localhost_forwards(forwards: &[crate::config::LocalhostForward]) -> Option<String> {
+    if forwards.is_empty() {
+        return None;
+    }
+    Some(
+        forwards
+            .iter()
+            .map(|forward| {
+                format!(
+                    "{}:{}",
+                    forward.container_port,
+                    forward.effective_host_port()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
 /// Launch a one-shot passthrough container session.
 ///
 /// Unlike `spawn`, this path does not inject harness-hat proxy/hostdo runtime
@@ -736,6 +763,7 @@ pub fn spawn_passthrough(
     Ok(ContainerSession {
         container_name: format!("passthrough-{image_name}"),
         agent_kind: crate::config::infer_agent_kind_from_argv(Some(command_argv)),
+        mouse_scroll: crate::config::MouseScrollMode::Auto,
         container_id,
         docker_name: docker_run_name,
         project: project_name.to_owned(),
@@ -764,10 +792,10 @@ pub fn spawn_passthrough(
 #[cfg(test)]
 mod tests {
     use super::{
-        HARNESS_HAT_CA_BUNDLE_PATH, HARNESS_HAT_CA_CERT_PATH, prepare_subagent_mount_snapshot,
-        proxy_addr_without_auth, write_ca_env_entries,
+        HARNESS_HAT_CA_BUNDLE_PATH, HARNESS_HAT_CA_CERT_PATH, format_localhost_forwards,
+        prepare_subagent_mount_snapshot, proxy_addr_without_auth, write_ca_env_entries,
     };
-    use crate::config::{ContainerMount, MountMode};
+    use crate::config::{ContainerMount, LocalhostForward, MountMode};
     use std::path::PathBuf;
 
     #[test]
@@ -801,6 +829,24 @@ mod tests {
         )));
         assert!(env.contains(&format!("NODE_EXTRA_CA_CERTS={HARNESS_HAT_CA_CERT_PATH}\n")));
         assert!(!env.contains(&format!("SSL_CERT_FILE={HARNESS_HAT_CA_CERT_PATH}\n")));
+    }
+
+    #[test]
+    fn localhost_forwards_are_encoded_for_init_script() {
+        let forwards = vec![
+            LocalhostForward {
+                container_port: 8081,
+                host_port: None,
+            },
+            LocalhostForward {
+                container_port: 9090,
+                host_port: Some(19090),
+            },
+        ];
+        assert_eq!(
+            format_localhost_forwards(&forwards).as_deref(),
+            Some("8081:8081,9090:19090")
+        );
     }
 
     #[test]

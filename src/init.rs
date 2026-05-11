@@ -226,12 +226,7 @@ mod tests {
             ("codex", "~/.codex", "/home/ubuntu/.codex"),
             ("codex", "~/.config/codex", "/home/ubuntu/.config/codex"),
             ("gemini", "~/.gemini", "/home/ubuntu/.gemini"),
-            ("opencode", "~/.opencode", "/home/ubuntu/.opencode"),
-            (
-                "opencode",
-                "~/.config/opencode",
-                "/home/ubuntu/.config/opencode",
-            ),
+            ("pi", "~/.pi", "/home/ubuntu/.pi"),
         ] {
             let mounts = &parsed
                 .container_profiles
