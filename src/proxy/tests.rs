@@ -14,6 +14,18 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is before unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("harness-hat-{prefix}-{nanos}"));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
     #[test]
     fn decode_source_from_proxy_authorization_works() {
         let auth_payload = format!(
@@ -38,8 +50,8 @@ mod tests {
 
     #[test]
     fn source_connection_limit_is_per_container_identity() {
-        let ca =
-            Arc::new(CaStore::load_or_create(&std::env::temp_dir().join("proxy-test-ca")).unwrap());
+        let ca_dir = unique_temp_dir("proxy-test-ca");
+        let ca = Arc::new(CaStore::load_or_create(&ca_dir).unwrap());
         let raw = r#"
 docker_dir = "/tmp"
 [workspace]
@@ -84,8 +96,8 @@ global_rules_file = "/tmp/global.toml""#;
 
     #[test]
     fn scoped_source_connection_limit_is_per_session_token() {
-        let ca =
-            Arc::new(CaStore::load_or_create(&std::env::temp_dir().join("proxy-test-ca")).unwrap());
+        let ca_dir = unique_temp_dir("proxy-test-ca");
+        let ca = Arc::new(CaStore::load_or_create(&ca_dir).unwrap());
         let raw = r#"
 docker_dir = "/tmp"
 [workspace]

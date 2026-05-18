@@ -9,6 +9,11 @@ use crate::config::{
     default_mount_target,
 };
 
+const WORKSPACE_SIDEBAR_HOTKEY_POOL: &[char] = &[
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's',
+    't', 'u', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+];
+
 // ── Rule loading ─────────────────────────────────────────────────────────────
 
 /// Load and compose rules for a specific project (global + that project's
@@ -75,6 +80,71 @@ pub fn load(path: &Path) -> Result<Config> {
     canonicalize_workspace_paths(&mut config)?;
     ensure_logging_instance_id(path, &raw, &mut config)?;
     Ok(config)
+}
+
+pub fn workspace_sidebar_hotkey_pool() -> &'static [char] {
+    WORKSPACE_SIDEBAR_HOTKEY_POOL
+}
+
+pub fn normalize_workspace_sidebar_hotkey(raw: &str) -> Option<char> {
+    let mut chars = raw.trim().chars();
+    let ch = chars.next()?.to_ascii_lowercase();
+    if chars.next().is_some() || !workspace_sidebar_hotkey_pool().contains(&ch) {
+        return None;
+    }
+    Some(ch)
+}
+
+pub fn resolve_workspace_sidebar_hotkeys(workspaces: &[WorkspaceConfig]) -> Vec<Option<char>> {
+    let mut out = vec![None; workspaces.len()];
+    let mut used = std::collections::HashSet::new();
+
+    for (idx, workspace) in workspaces.iter().enumerate() {
+        let Some(raw) = workspace.sidebar_hotkey.as_deref() else {
+            continue;
+        };
+        let Some(ch) = normalize_workspace_sidebar_hotkey(raw) else {
+            continue;
+        };
+        if used.insert(ch) {
+            out[idx] = Some(ch);
+        }
+    }
+
+    for (idx, workspace) in workspaces.iter().enumerate() {
+        if out[idx].is_some() {
+            continue;
+        }
+
+        let preferred = workspace
+            .name
+            .chars()
+            .map(|ch| ch.to_ascii_lowercase())
+            .filter(|ch| workspace_sidebar_hotkey_pool().contains(ch));
+
+        let fallback = workspace_sidebar_hotkey_pool().iter().copied();
+        let choice = preferred.chain(fallback).find(|ch| used.insert(*ch));
+        out[idx] = choice;
+    }
+
+    out
+}
+
+pub fn select_workspace_sidebar_hotkey(
+    existing_workspaces: &[WorkspaceConfig],
+    workspace_name: &str,
+) -> Option<char> {
+    let mut workspaces = existing_workspaces.to_vec();
+    workspaces.push(WorkspaceConfig {
+        name: workspace_name.to_string(),
+        canonical_path: PathBuf::new(),
+        sidebar_hotkey: None,
+        hostdo: None,
+    });
+    resolve_workspace_sidebar_hotkeys(&workspaces)
+        .into_iter()
+        .last()
+        .flatten()
 }
 
 fn validate_config_version(version: u32, path: &Path) -> Result<()> {
@@ -395,7 +465,6 @@ fn validate(config: &Config) -> Result<()> {
             proj.name,
             proj.canonical_path.display()
         );
-
         if let Some(he) = &proj.hostdo {
             if let Some(aliases) = &he.command_aliases {
                 for (alias, target) in aliases {
@@ -596,6 +665,16 @@ pub fn effective_denied_fragments(
         .as_ref()
         .and_then(|he| he.denied_argument_fragments.clone())
         .unwrap_or_else(|| defaults.hostdo.denied_argument_fragments.clone())
+}
+
+/// Effective common utility blocklist for hostdo.
+#[instrument(skip(defaults))]
+pub fn effective_hostdo_block_common(defaults: &DefaultsConfig) -> Vec<String> {
+    if defaults.hostdo.hostdo_block_common.is_empty() {
+        crate::config::builtin_hostdo_block_common()
+    } else {
+        defaults.hostdo.hostdo_block_common.clone()
+    }
 }
 
 /// Effective hostdo command aliases for a project.

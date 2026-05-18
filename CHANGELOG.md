@@ -2,6 +2,28 @@
 
 This changelog is derived from git history and the current working tree.
 
+## 0.6.0 May 18th, 2026
+
+### Added
+- `[defaults.hostdo].hostdo_block_common` now lets config override a built-in blocklist of common shell/file utilities that should not be run through `hostdo`.
+- `hostdo --help` now prints detailed usage, timeout and image forms, hostdo policy guidance, rule examples, blocked-command guidance, and approval-wait guidance, and it points agents at project `harness-rules.toml` files for current allowlists and aliases.
+- Generated starter `harness-rules.toml` files now document `hostdo --timeout` usage for commands that need an explicit host-side timeout.
+- Workspaces can now persist `sidebar_hotkey` assignments in `harness-hat.toml`, with deterministic hotkey assignment for newly created workspaces.
+- Hostdo activity detail panes now show the effective command CWD.
+- The default Docker image now installs `pnpm`, `typescript`, and `tsx` alongside the bundled agent CLIs.
+
+### Changed
+- Prompted `hostdo` requests now enter the exec job protocol immediately and emit `Waiting for developer approval... (20s)` while a developer approval modal is pending.
+- Sidebar workspace hotkeys now use bare `a-z0-9` keys while the sidebar is focused, jump to the first selectable child row in that workspace section, hide their badges outside sidebar focus, and no longer compete with sidebar-only letter bindings. Sidebar navigation now uses arrow keys and `Enter`, and log fullscreen moved to `Alt+O`.
+- Mouse-wheel viewport scrolling in terminal panes is now twice as fast.
+- Approval and confirm modals now require `Ctrl+...` shortcuts instead of bare `y/n/r/d`, `Enter`, or `Esc` so typing into an agent cannot accidentally approve or deny a request.
+
+### Fixed
+- Approval modals are now global across workspaces and remain visible in sidebar previews, terminal fullscreen, and log fullscreen views instead of only appearing in the originating workspace.
+- `hostdo` now hard-denies common shell/file utilities such as `ls`, `cat`, `grep`, `find`, and `rm`, steering agents toward host-side build, package, compiler, and test tooling.
+- Proxy tests now use unique temporary CA directories to avoid cross-test contamination.
+
+
 ## 0.5.0 May 11th, 2026
 
 ### Added

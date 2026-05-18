@@ -11,6 +11,8 @@ use crate::config::AliasValue;
 pub struct WorkspaceConfig {
     pub name: String,
     pub canonical_path: PathBuf,
+    #[serde(default)]
+    pub sidebar_hotkey: Option<String>,
     pub hostdo: Option<WorkspaceHostdo>,
 }
 
@@ -19,6 +21,7 @@ impl Default for WorkspaceConfig {
         Self {
             name: String::new(),
             canonical_path: PathBuf::new(),
+            sidebar_hotkey: None,
             hostdo: None,
         }
     }

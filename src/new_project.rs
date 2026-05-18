@@ -130,6 +130,7 @@ pub fn append_project_block(
     config_path: &Path,
     project_name: &str,
     canonical_path: &Path,
+    sidebar_hotkey: Option<char>,
 ) -> Result<()> {
     anyhow::ensure!(
         !project_name.trim().is_empty(),
@@ -139,13 +140,17 @@ pub fn append_project_block(
     let name = toml_basic_string(project_name)?;
     let canonical = toml_basic_string(&canonical_path.display().to_string())?;
 
+    let hotkey_line = sidebar_hotkey
+        .map(|ch| format!("sidebar_hotkey = \"{}\"\n", ch.to_ascii_lowercase()))
+        .unwrap_or_default();
+
     let block = format!(
         r#"
 
 [[workspaces]]
 name = {name}
 canonical_path = {canonical}
-"#
+{hotkey_line}"#
     );
 
     use std::io::Write;
@@ -278,6 +283,20 @@ mod tests {
     }
 
     #[test]
+    fn starter_rules_header_includes_hostdo_timeout_guidance() {
+        let root = unique_temp_dir("rules-timeout-guidance");
+        let canon = root.join("canon");
+        fs::create_dir_all(&canon).expect("create canon");
+
+        let wrote = write_rules_if_missing(&canon, ProjectType::Rust).expect("write rules");
+        assert!(wrote);
+
+        let rendered = fs::read_to_string(canon.join("harness-rules.toml")).expect("read rules");
+        assert!(rendered.contains("hostdo --timeout <seconds> ..."));
+        assert!(rendered.contains("hostdo --timeout 120 cargo test"));
+    }
+
+    #[test]
     fn config_append_block_parses_direct_workspace() {
         let root = unique_temp_dir("append-config");
         let config_path = root.join("harness-hat.toml");
@@ -300,11 +319,12 @@ global_rules_file = "{}"
         );
         fs::write(&config_path, raw).expect("write base config");
 
-        append_project_block(&config_path, "proj", &canon).expect("append");
+        append_project_block(&config_path, "proj", &canon, Some('p')).expect("append");
         let cfg: Config = crate::config::load(&config_path).expect("load");
 
         let proj = cfg.workspaces.first().expect("project");
         assert_eq!(proj.name, "proj");
+        assert_eq!(proj.sidebar_hotkey.as_deref(), Some("p"));
         assert_eq!(
             proj.canonical_path,
             canon.canonicalize().expect("canonical workspace")
@@ -334,7 +354,7 @@ global_rules_file = "{}"
         );
         fs::write(&config_path, raw).expect("write base config");
 
-        append_project_block(&config_path, "proj", &canon).expect("append");
+        append_project_block(&config_path, "proj", &canon, None).expect("append");
         let cfg: Config = crate::config::load(&config_path).expect("load");
 
         let proj = cfg.workspaces.first().expect("project");

@@ -269,7 +269,7 @@ impl App {
                 // Otherwise, treat the scroll wheel as a viewport scroll gesture, without
                 // requiring explicit scroll-mode activation.
                 let max_scrollback = session.term.lock().history_size();
-                let lines_per_tick = 3usize;
+                let lines_per_tick = 6usize;
                 match mouse.kind {
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft => {
                         self.terminal_scroll = self.terminal_scroll.saturating_add(lines_per_tick);

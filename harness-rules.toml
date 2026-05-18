@@ -185,28 +185,6 @@ approval_mode = "auto"
 [[hostdo.commands]]
 argv = [
     "cargo",
-    "test",
-    "workspace_rules",
-]
-cwd = "$WORKSPACE"
-timeout_secs = 60
-concurrency = "queue"
-approval_mode = "auto"
-
-[[hostdo.commands]]
-argv = [
-    "cargo",
-    "test",
-]
-image = "rust"
-cwd = "$WORKSPACE"
-timeout_secs = 120
-concurrency = "queue"
-approval_mode = "auto"
-
-[[hostdo.commands]]
-argv = [
-    "cargo",
     "fmt",
 ]
 cwd = "$WORKSPACE"
@@ -248,16 +226,6 @@ timeout_secs = 60
 concurrency = "queue"
 approval_mode = "auto"
 
-[[hostdo.commands]]
-argv = [
-    "cargo",
-    "test",
-    "proxy::tests",
-]
-cwd = "$WORKSPACE"
-timeout_secs = 60
-concurrency = "queue"
-approval_mode = "auto"
 
 [[hostdo.commands]]
 argv = [
@@ -503,29 +471,6 @@ approval_mode = "auto"
 
 [[hostdo.commands]]
 argv = [
-    "cargo",
-    "test",
-    "tui::tests",
-    "sidebar",
-]
-cwd = "$WORKSPACE"
-timeout_secs = 60
-concurrency = "queue"
-approval_mode = "auto"
-
-[[hostdo.commands]]
-argv = [
-    "cargo",
-    "test",
-    "sidebar",
-]
-cwd = "$WORKSPACE"
-timeout_secs = 60
-concurrency = "queue"
-approval_mode = "auto"
-
-[[hostdo.commands]]
-argv = [
     "rustfmt",
     "--check",
     "src/init.rs",
@@ -536,17 +481,6 @@ timeout_secs = 60
 concurrency = "queue"
 approval_mode = "auto"
 
-[[hostdo.commands]]
-argv = [
-    "cargo",
-    "test",
-    "sample_config_writes_parseable_docker_dir",
-    "add_existing_agent_session_mounts_imports_present_paths_for_all_agents",
-]
-cwd = "$WORKSPACE"
-timeout_secs = 60
-concurrency = "queue"
-approval_mode = "auto"
 
 [[hostdo.commands]]
 argv = [
@@ -558,38 +492,7 @@ timeout_secs = 60
 concurrency = "queue"
 approval_mode = "auto"
 
-[[hostdo.commands]]
-argv = [
-    "cargo",
-    "test",
-    "gemini_home",
-]
-cwd = "$WORKSPACE"
-timeout_secs = 60
-concurrency = "queue"
-approval_mode = "auto"
 
-[[hostdo.commands]]
-argv = [
-    "cargo",
-    "test",
-    "terminal_bottom_lines",
-]
-cwd = "$WORKSPACE"
-timeout_secs = 60
-concurrency = "queue"
-approval_mode = "auto"
-
-[[hostdo.commands]]
-argv = [
-    "cargo",
-    "test",
-    "sidebar_child_indent",
-]
-cwd = "$WORKSPACE"
-timeout_secs = 60
-concurrency = "queue"
-approval_mode = "auto"
 
 [[hostdo.commands]]
 argv = [
@@ -602,24 +505,25 @@ timeout_secs = 60
 concurrency = "queue"
 approval_mode = "auto"
 
+
+[hostdo.command_aliases.fmt]
+cmd = "cargo fmt"
+cwd = "$WORKSPACE"
+
 [hostdo.command_aliases.test]
 cmd = "cargo test"
-cwd = "$WORKSPACE"
-
-[hostdo.command_aliases.check]
-cmd = "cargo check"
-cwd = "$WORKSPACE"
-
-[hostdo.command_aliases.lint]
-cmd = "cargo clippy"
 cwd = "$WORKSPACE"
 
 [hostdo.command_aliases.build]
 cmd = "cargo build"
 cwd = "$WORKSPACE"
 
-[hostdo.command_aliases.fmt]
-cmd = "cargo fmt"
+[hostdo.command_aliases.lint]
+cmd = "cargo clippy"
+cwd = "$WORKSPACE"
+
+[hostdo.command_aliases.check]
+cmd = "cargo check"
 cwd = "$WORKSPACE"
 
 [network]

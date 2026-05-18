@@ -179,6 +179,11 @@ pub struct HostdoDefaults {
     /// List of exact executable names that are always denied, regardless of other rules.
     #[serde(default = "default_denied_executables")]
     pub denied_executables: Vec<String>,
+    /// When empty, harness-hat uses its built-in list of common shell/file utilities
+    /// that should not be run through hostdo. When non-empty, this list overrides
+    /// the built-in defaults.
+    #[serde(default)]
+    pub hostdo_block_common: Vec<String>,
     /// List of argument fragments (substrings) that, if present in any command's argv, will cause the command to be denied.
     #[serde(default)]
     pub denied_argument_fragments: Vec<String>,
@@ -215,6 +220,18 @@ fn default_denied_executables() -> Vec<String> {
     .collect()
 }
 
+pub fn builtin_hostdo_block_common() -> Vec<String> {
+    [
+        "ls", "dir", "cat", "grep", "egrep", "fgrep", "rg", "find", "fd", "sed", "awk", "head",
+        "tail", "less", "more", "sort", "uniq", "cut", "xargs", "wc", "cp", "mv", "rm", "mkdir",
+        "rmdir", "touch", "chmod", "chown", "ln", "readlink", "realpath", "stat", "du", "df",
+        "tar", "zip", "unzip",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 impl Default for HostdoDefaults {
     fn default() -> Self {
         Self {
@@ -223,6 +240,7 @@ impl Default for HostdoDefaults {
             token_env_var: default_token_env(),
             max_timeout_secs: default_max_timeout_secs(),
             denied_executables: default_denied_executables(),
+            hostdo_block_common: Vec::new(),
             denied_argument_fragments: vec![],
             command_aliases: HashMap::new(),
         }

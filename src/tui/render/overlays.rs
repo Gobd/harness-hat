@@ -20,26 +20,26 @@ pub(crate) fn render_exec_approval_overlay(
 
     let action_line = Line::from(vec![
         Span::styled(
-            "[y/↵] ",
+            "[^Y] ",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("Approve  ", Style::default().fg(Color::White)),
         Span::styled(
-            "[r] ",
+            "[^R] ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("Always allow  ", Style::default().fg(Color::White)),
         Span::styled(
-            "[n/Esc] ",
+            "[^N] ",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         Span::styled("Deny  ", Style::default().fg(Color::White)),
         Span::styled(
-            "[d] ",
+            "[^D] ",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         Span::styled("Always deny", Style::default().fg(Color::White)),
@@ -161,26 +161,26 @@ pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Re
 
     let action_line = Line::from(vec![
         Span::styled(
-            "[y/↵] ",
+            "[^Y] ",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("Allow  ", Style::default().fg(Color::White)),
         Span::styled(
-            "[r] ",
+            "[^R] ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("Always allow  ", Style::default().fg(Color::White)),
         Span::styled(
-            "[n/Esc] ",
+            "[^N] ",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         Span::styled("Deny  ", Style::default().fg(Color::White)),
         Span::styled(
-            "[d] ",
+            "[^D] ",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         Span::styled("Always deny", Style::default().fg(Color::White)),
@@ -381,14 +381,14 @@ pub(crate) fn render_remove_workspace_confirm_overlay(frame: &mut Frame, app: &A
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                "[y/↵] ",
+                "[^Y] ",
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("Remove  ", Style::default().fg(Color::White)),
             Span::styled(
-                "[n/Esc] ",
+                "[^N] ",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -452,7 +452,7 @@ pub(crate) fn render_base_rules_changed_overlay(frame: &mut Frame, app: &App, ar
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                "[Enter/Esc] ",
+                "[^Y] ",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),

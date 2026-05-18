@@ -1,8 +1,11 @@
 #[cfg(test)]
 mod tests {
     use crate::config::{
-        Config, ContainerMount, DefaultsConfig, MountMode, MouseScrollMode, image_tag_for_stem,
-        load, load_composed_rules_for_workspace, merge_mounts, merge_unique_strings,
+        Config, ContainerMount, DefaultsConfig, MountMode, MouseScrollMode,
+        builtin_hostdo_block_common, effective_hostdo_block_common, image_tag_for_stem, load,
+        load_composed_rules_for_workspace, merge_mounts, merge_unique_strings,
+        normalize_workspace_sidebar_hotkey, resolve_workspace_sidebar_hotkeys,
+        select_workspace_sidebar_hotkey, workspace_sidebar_hotkey_pool,
     };
     use crate::rules::{ApprovalMode, NetworkPolicy};
     use std::fs;
@@ -63,6 +66,26 @@ canonical_path = "{}"
     #[test]
     fn defaults_hostdo_max_timeout_defaults_to_one_hour() {
         assert_eq!(DefaultsConfig::default().hostdo.max_timeout_secs, 60 * 60);
+    }
+
+    #[test]
+    fn defaults_hostdo_block_common_uses_builtin_list_when_empty() {
+        let defaults = DefaultsConfig::default();
+        assert!(defaults.hostdo.hostdo_block_common.is_empty());
+        assert_eq!(
+            effective_hostdo_block_common(&defaults),
+            builtin_hostdo_block_common()
+        );
+    }
+
+    #[test]
+    fn effective_hostdo_block_common_uses_configured_override_when_present() {
+        let mut defaults = DefaultsConfig::default();
+        defaults.hostdo.hostdo_block_common = vec!["git".to_string(), "hg".to_string()];
+        assert_eq!(
+            effective_hostdo_block_common(&defaults),
+            vec!["git".to_string(), "hg".to_string()]
+        );
     }
 
     #[test]
@@ -624,6 +647,150 @@ canonical_path = "{}"
         assert_eq!(
             cfg.workspaces[0].canonical_path,
             workspace_path.canonicalize().expect("canonical workspace")
+        );
+    }
+
+    #[test]
+    fn load_accepts_workspace_sidebar_hotkey() {
+        let root = unique_temp_dir("workspace-sidebar-hotkey");
+        let cfg_path = root.join("harness-hat.toml");
+        let docker_dir = root.join("docker-root");
+        let workspace_path = root.join("workspace-a");
+        fs::create_dir_all(&docker_dir).expect("create docker dir");
+        fs::create_dir_all(&workspace_path).expect("create workspace dir");
+
+        let raw = format!(
+            r#"
+docker_dir = "{}"
+[workspace]
+
+[manager]
+global_rules_file = "{}"
+[[workspaces]]
+name = "workspace-a"
+canonical_path = "{}"
+sidebar_hotkey = "R"
+"#,
+            docker_dir.display(),
+            root.join("global-rules.toml").display(),
+            workspace_path.display()
+        );
+        fs::write(&cfg_path, raw).expect("write config");
+        let cfg = load(&cfg_path).expect("config should load");
+        assert_eq!(cfg.workspaces[0].sidebar_hotkey.as_deref(), Some("R"));
+        assert_eq!(normalize_workspace_sidebar_hotkey("R"), Some('r'));
+    }
+
+    #[test]
+    fn load_accepts_extended_workspace_sidebar_hotkeys() {
+        let root = unique_temp_dir("workspace-sidebar-hotkey-extended");
+        let cfg_path = root.join("harness-hat.toml");
+        let docker_dir = root.join("docker-root");
+        let workspace_path = root.join("workspace-a");
+        fs::create_dir_all(&docker_dir).expect("create docker dir");
+        fs::create_dir_all(&workspace_path).expect("create workspace dir");
+
+        let raw = format!(
+            r#"
+docker_dir = "{}"
+[workspace]
+
+[manager]
+global_rules_file = "{}"
+[[workspaces]]
+name = "images"
+canonical_path = "{}"
+sidebar_hotkey = "i"
+"#,
+            docker_dir.display(),
+            root.join("global-rules.toml").display(),
+            workspace_path.display()
+        );
+        fs::write(&cfg_path, raw).expect("write config");
+
+        let cfg = load(&cfg_path).expect("config should load");
+        assert_eq!(cfg.workspaces[0].sidebar_hotkey.as_deref(), Some("i"));
+        assert_eq!(normalize_workspace_sidebar_hotkey("i"), Some('i'));
+        assert_eq!(normalize_workspace_sidebar_hotkey("7"), Some('7'));
+    }
+
+    #[test]
+    fn resolve_workspace_sidebar_hotkeys_uses_remaining_hotkey_pool() {
+        let workspaces = workspace_sidebar_hotkey_pool()
+            .iter()
+            .enumerate()
+            .map(|(idx, ch)| crate::config::WorkspaceConfig {
+                name: format!("workspace-{ch}-{idx}"),
+                canonical_path: Path::new("/tmp").join(format!("ws-{idx}")),
+                sidebar_hotkey: Some(ch.to_string()),
+                hostdo: None,
+            })
+            .chain(std::iter::once(crate::config::WorkspaceConfig {
+                name: "images".to_string(),
+                canonical_path: Path::new("/tmp/extended").to_path_buf(),
+                sidebar_hotkey: None,
+                hostdo: None,
+            }))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            resolve_workspace_sidebar_hotkeys(&workspaces)
+                .last()
+                .copied()
+                .flatten(),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_workspace_sidebar_hotkeys_prefers_configured_then_name_based_choices() {
+        let workspaces = vec![
+            crate::config::WorkspaceConfig {
+                name: "rust-api".to_string(),
+                canonical_path: Path::new("/tmp/a").to_path_buf(),
+                sidebar_hotkey: Some("p".to_string()),
+                hostdo: None,
+            },
+            crate::config::WorkspaceConfig {
+                name: "frontend".to_string(),
+                canonical_path: Path::new("/tmp/b").to_path_buf(),
+                sidebar_hotkey: None,
+                hostdo: None,
+            },
+            crate::config::WorkspaceConfig {
+                name: "payments".to_string(),
+                canonical_path: Path::new("/tmp/c").to_path_buf(),
+                sidebar_hotkey: Some("p".to_string()),
+                hostdo: None,
+            },
+        ];
+
+        assert_eq!(
+            resolve_workspace_sidebar_hotkeys(&workspaces),
+            vec![Some('p'), Some('f'), Some('a')]
+        );
+    }
+
+    #[test]
+    fn select_workspace_sidebar_hotkey_uses_first_available_name_match() {
+        let existing = vec![
+            crate::config::WorkspaceConfig {
+                name: "frontend".to_string(),
+                canonical_path: Path::new("/tmp/a").to_path_buf(),
+                sidebar_hotkey: Some("f".to_string()),
+                hostdo: None,
+            },
+            crate::config::WorkspaceConfig {
+                name: "payments".to_string(),
+                canonical_path: Path::new("/tmp/b").to_path_buf(),
+                sidebar_hotkey: Some("p".to_string()),
+                hostdo: None,
+            },
+        ];
+
+        assert_eq!(
+            select_workspace_sidebar_hotkey(&existing, "rust-api"),
+            Some('r')
         );
     }
 

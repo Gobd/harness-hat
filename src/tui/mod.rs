@@ -200,6 +200,7 @@ pub struct App {
 /// Cached workspace metadata for the sidebar.
 pub struct WorkspaceStatus {
     pub name: String,
+    pub sidebar_hotkey: Option<char>,
 }
 
 #[derive(Debug)]

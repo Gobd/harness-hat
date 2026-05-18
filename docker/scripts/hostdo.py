@@ -31,6 +31,108 @@ import urllib.parse
 
 # 6-minute timeout: 5-minute approval window + headroom for slow commands.
 _TIMEOUT = 360
+_APPROVAL_WAIT_NOTICE_SECS = 20
+
+_HELP_TEXT = """hostdo — harness-hat container-side command bridge
+
+Routes commands through the harness-hat host execution server for policy
+enforcement and developer approval.
+
+Usage:
+  hostdo <command> [args...]
+  hostdo --image <docker-image> <command> [args...]
+  hostdo --image=<docker-image> <command> [args...]
+  hostdo --timeout <seconds> <command> [args...]
+  hostdo --timeout=<seconds> <command> [args...]
+  hostdo --image <docker-image> --timeout <seconds> <command> [args...]
+  hostdo --help
+
+Options:
+  --image <docker-image>
+      Run the command in a short-lived Docker runner instead of directly on
+      the host.
+
+  --timeout <seconds>
+      Request a command timeout in seconds. The manager may cap or deny this
+      based on its configured limits and matching hostdo rules.
+
+  --help, -h
+      Show this help text and exit.
+
+Host-side commands:
+  - Use `hostdo ...` when you need host-side build/package tooling such as
+    cargo, npm, pnpm, yarn, go, make, pytest, or similar commands.
+  - Examples: `hostdo cargo test`, `hostdo npm install`,
+    `hostdo go test ./...`.
+  - Only use `hostdo --image <docker-image> ...` when the user explicitly asks
+    you to run against a Docker image or containerized runner.
+  - `hostdo --image` runs a command in a short-lived Docker runner instead of
+    directly on the host.
+  - Examples: `hostdo --image node:20 npm test`,
+    `hostdo --image rust:1.88 cargo test`.
+  - `hostdo` requests are policy checked against the `[hostdo]` rules below
+    and may prompt the developer.
+  - Read this workspace's `harness-rules.toml` for the current allowlisted
+    commands, aliases, and any project-specific rule updates.
+  - Prefer existing auto-approved `hostdo` commands or
+    `hostdo.command_aliases` before asking for a new host command approval.
+
+Blocked common commands:
+  - `hostdo` is not meant for basic shell/file utilities such as `ls`, `grep`,
+    `rm`, `cat`, `find`, or similar commands.
+  - Use it for host-side build, package, compiler, and test tooling instead.
+
+Rule model:
+  default_policy: what happens when a command doesn't match any rule below.
+    auto   — run without prompting (use with caution)
+    prompt — ask the developer in the TUI (default)
+    deny   — reject silently
+
+  Passthrough command (exact argv match, auto-approved):
+    [[hostdo.commands]]
+    argv = ["cargo", "test"]  # run inside container with `hostdo cargo test`
+    cwd = "$WORKSPACE"        # execution cwd only, not part of approval matching
+    timeout_secs = 60
+    approval_mode = "auto"
+
+  Short-lived Docker runner (exact argv + image match, auto-approved):
+    [[hostdo.commands]]
+    argv = ["npm", "test"]    # run with `hostdo --image node:20 npm test`
+    image = "node:20"
+    cwd = "$WORKSPACE"
+    timeout_secs = 60
+    approval_mode = "auto"
+
+  Command alias (agent sends `hostdo tests`, expands server-side):
+    [hostdo.command_aliases]
+    tests = "cargo test"  # run inside container with `hostdo tests`
+    build = { cmd = "cargo build --release", cwd = "$WORKSPACE" }
+
+  $WORKSPACE = workspace path on the host.
+
+Exit status:
+  - Mirrors the executed command's exit code on success.
+  - Exits 1 on infrastructure, parsing, policy, or approval errors.
+
+Notes:
+  - The user may be prompted to approve `hostdo` commands or agent-triggered
+    network requests.
+  - Allow extra time for the user to review those prompts before assuming the
+    command is hung.
+  - If something appears to be hanging, it may be waiting for developer
+    approval in harness-hat.
+"""
+
+
+def _print_usage(stream) -> None:
+    print(
+        "usage: hostdo [--image <docker-image>] [--timeout <seconds>] <command> [args...]",
+        file=stream,
+    )
+
+
+def _print_help() -> None:
+    print(_HELP_TEXT)
 
 
 def _parse_positive_int(raw: str, label: str) -> int:
@@ -88,11 +190,8 @@ def _parse_hostdo_args(argv: list[str]):
         sys.exit(1)
     if not command_argv:
         print("hostdo: no command specified", file=sys.stderr)
-        print(
-            "usage: hostdo [--image <docker-image>] "
-            "[--timeout <seconds>] <command> [args...]",
-            file=sys.stderr,
-        )
+        _print_usage(sys.stderr)
+        print("run `hostdo --help` for detailed usage and policy guidance", file=sys.stderr)
         sys.exit(1)
 
     return command_argv, image, timeout_secs
@@ -194,6 +293,34 @@ def _emit_job_message(data: dict, last_message):
     return last_message
 
 
+def _emit_approval_wait_message(
+    data: dict,
+    approval_wait_started_at,
+    last_notice_elapsed_secs,
+):
+    if data.get("phase") != "pending_approval":
+        return None, None
+
+    now = time.monotonic()
+    if approval_wait_started_at is None:
+        approval_wait_started_at = now
+
+    elapsed_secs = int(now - approval_wait_started_at)
+    next_notice_secs = (
+        ((elapsed_secs // _APPROVAL_WAIT_NOTICE_SECS) + 1) * _APPROVAL_WAIT_NOTICE_SECS
+    )
+    if elapsed_secs >= _APPROVAL_WAIT_NOTICE_SECS and elapsed_secs >= next_notice_secs - _APPROVAL_WAIT_NOTICE_SECS:
+        notice_secs = (elapsed_secs // _APPROVAL_WAIT_NOTICE_SECS) * _APPROVAL_WAIT_NOTICE_SECS
+        if notice_secs != last_notice_elapsed_secs:
+            print(
+                f"hostdo: Waiting for developer approval... ({notice_secs}s)",
+                file=sys.stderr,
+            )
+            last_notice_elapsed_secs = notice_secs
+
+    return approval_wait_started_at, last_notice_elapsed_secs
+
+
 def _poll_exec_job(
     opener: urllib.request.OpenerDirector,
     base_url: str,
@@ -205,6 +332,8 @@ def _poll_exec_job(
     data = initial
     last_message = None
     consecutive_poll_errors = 0
+    approval_wait_started_at = None
+    last_approval_notice_secs = None
 
     while True:
         state = data.get("state")
@@ -218,7 +347,15 @@ def _poll_exec_job(
             print(f"hostdo: failed — unexpected job state: {state}", file=sys.stderr)
             sys.exit(1)
 
-        last_message = _emit_job_message(data, last_message)
+        approval_wait_started_at, last_approval_notice_secs = _emit_approval_wait_message(
+            data,
+            approval_wait_started_at,
+            last_approval_notice_secs,
+        )
+        if data.get("phase") != "pending_approval":
+            approval_wait_started_at = None
+            last_approval_notice_secs = None
+            last_message = _emit_job_message(data, last_message)
         poll_after_ms = int(data.get("poll_after_ms", 1000))
         time.sleep(max(poll_after_ms, 100) / 1000)
 
@@ -261,9 +398,13 @@ def _poll_exec_job(
 
 def main() -> None:
     argv = sys.argv[1:]
+    if len(argv) == 1 and argv[0] in ("--help", "-h"):
+        _print_help()
+        sys.exit(0)
     if not argv:
         print("hostdo: no command specified", file=sys.stderr)
-        print("usage: hostdo [--image <docker-image>] [--timeout <seconds>] <command> [args...]", file=sys.stderr)
+        _print_usage(sys.stderr)
+        print("run `hostdo --help` for detailed usage and policy guidance", file=sys.stderr)
         sys.exit(1)
     command_argv, image, timeout_secs = _parse_hostdo_args(argv)
 

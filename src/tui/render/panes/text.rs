@@ -85,9 +85,9 @@ pub(crate) fn status_bar_keys(app: &App) -> &'static str {
     match app.focus {
         Focus::Sidebar => {
             if app.build_is_running() {
-                " [↑↓/jk]navigate  [↵/l]select  [^C]cancel build  [o]log  [^Q]quit"
+                " [↑↓]navigate  [↵]select  [A-Z/0-9]workspace  [^C]cancel build  [Alt+o]log  [^Q]quit"
             } else {
-                " [↑↓/jk]navigate  [↵/l]select  [o]log  [^Q]quit"
+                " [↑↓]navigate  [↵]select  [A-Z/0-9]workspace  [Alt+o]log  [^Q]quit"
             }
         }
         Focus::Terminal if app.scroll_mode => {

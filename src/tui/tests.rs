@@ -1,4 +1,7 @@
-use super::{App, Focus, SidebarItem, restore_terminal_output};
+use super::{
+    App, BaseRulesChangedState, Focus, RemoveWorkspaceConfirmState, SidebarItem,
+    restore_terminal_output,
+};
 use crate::activity::{Activity, ActivityEvent, ActivityKind, ActivityState};
 use crate::ca::CaStore;
 use crate::config::Config;
@@ -97,15 +100,31 @@ fn encode_sgr_mouse_ignores_move() {
     assert!(super::app::encode_sgr_mouse(mouse).is_none());
 }
 
-fn build_test_app() -> App {
+fn build_test_app_with_workspaces(workspaces: &[(&str, Option<char>)]) -> App {
     let root = unique_temp_dir("tui-build-flow");
     let global_rules_file = root.join("global-rules.toml");
     let workspace_root = root.join("workspace");
     let docker_dir = root.join("docker-root");
-    let project_path = root.join("project-a");
     std::fs::create_dir_all(&workspace_root).expect("create workspace");
     std::fs::create_dir_all(&docker_dir).expect("create docker dir");
-    std::fs::create_dir_all(&project_path).expect("create project path");
+    let workspace_blocks = workspaces
+        .iter()
+        .map(|(name, hotkey)| {
+            let project_path = root.join(name);
+            std::fs::create_dir_all(&project_path).expect("create project path");
+            let hotkey_line = hotkey
+                .map(|ch| format!("sidebar_hotkey = \"{}\"\n", ch))
+                .unwrap_or_default();
+            format!(
+                r#"
+[[workspaces]]
+name = "{name}"
+canonical_path = "{}"
+{hotkey_line}"#,
+                project_path.display()
+            )
+        })
+        .collect::<String>();
 
     let cfg_path = root.join("harness-hat.toml");
     let raw = format!(
@@ -116,10 +135,7 @@ docker_dir = "{}"
 
 [manager]
 global_rules_file = "{}"
-
-[[workspaces]]
-name = "project-a"
-canonical_path = "{}"
+{}
 
 [container_profiles.test]
 image = "missing-image"
@@ -127,7 +143,7 @@ command = ["test-agent"]
 "#,
         docker_dir.display(),
         global_rules_file.display(),
-        project_path.display()
+        workspace_blocks
     );
     std::fs::write(&cfg_path, raw).expect("write test config");
     let config: Config = crate::config::load(&cfg_path).expect("load minimal config");
@@ -162,6 +178,10 @@ command = ["test-agent"]
         root.join("ca/ca.crt").display().to_string(),
     )
     .expect("App::new")
+}
+
+fn build_test_app() -> App {
+    build_test_app_with_workspaces(&[("project-a", Some('p'))])
 }
 
 fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -241,6 +261,81 @@ fn duplicate_network_prompts_do_not_merge_across_workspaces() {
         super::app::approvals::pending_network_request_count(&app.pending_net[1]),
         1
     );
+}
+
+#[test]
+fn exec_modal_ignores_bare_keys_and_requires_ctrl_shortcuts() {
+    let mut app = build_test_app();
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+
+    app.pending_exec.push(crate::server::PendingItem {
+        id: "pending-ctrl".to_string(),
+        activity_id: "activity-ctrl".to_string(),
+        cancel_flag,
+        project: "project-a".to_string(),
+        container_id: Some("container-a".to_string()),
+        argv: vec!["cargo".into(), "test".into()],
+        image: None,
+        timeout_secs: 60,
+        cwd: std::path::PathBuf::from("/workspace"),
+        rule_cwd: std::path::PathBuf::from("/workspace"),
+        matched_command: None,
+        response_tx: Some(tx),
+    });
+
+    app.handle_key(key(KeyCode::Char('n'), KeyModifiers::NONE));
+    assert_eq!(app.pending_exec.len(), 1);
+
+    app.handle_key(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
+    assert!(app.pending_exec.is_empty());
+}
+
+#[test]
+fn network_modal_ignores_bare_keys_and_requires_ctrl_shortcuts() {
+    let mut app = build_test_app();
+    let (item, mut rx) =
+        pending_network_item("project-a", "GET", "example.com", Some(443), "/v1/models");
+    app.enqueue_pending_network(item);
+
+    app.handle_key(key(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert_eq!(app.pending_net.len(), 1);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    app.handle_key(key(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert!(app.pending_net.is_empty());
+    assert!(matches!(rx.try_recv(), Ok(NetworkDecision::Allow)));
+}
+
+#[test]
+fn remove_workspace_confirm_ignores_bare_keys_and_requires_ctrl_shortcuts() {
+    let mut app = build_test_app();
+    app.remove_workspace_confirm = Some(RemoveWorkspaceConfirmState {
+        workspace_name: "project-a".to_string(),
+    });
+
+    app.handle_key(key(KeyCode::Char('n'), KeyModifiers::NONE));
+    assert!(app.remove_workspace_confirm.is_some());
+
+    app.handle_key(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
+    assert!(app.remove_workspace_confirm.is_none());
+}
+
+#[test]
+fn base_rules_alert_ignores_bare_keys_and_requires_ctrl_shortcuts() {
+    let mut app = build_test_app();
+    app.base_rules_changed = Some(BaseRulesChangedState {
+        path: std::path::PathBuf::from("/tmp/harness-rules.toml"),
+    });
+
+    app.handle_key(key(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert!(app.base_rules_changed.is_some());
+
+    app.handle_key(key(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert!(app.base_rules_changed.is_none());
 }
 
 #[test]
@@ -438,6 +533,7 @@ fn activity_events_update_history_and_state() {
             argv: vec!["cargo".into(), "test".into()],
             image: None,
             timeout_secs: 60,
+            cwd: std::path::PathBuf::from("/workspace"),
         },
         ActivityState::PendingApproval,
         cancel_flag,
@@ -475,6 +571,7 @@ fn hostdo_command_timer_starts_on_running_state() {
             argv: vec!["cargo".into(), "test".into()],
             image: Some("rust".into()),
             timeout_secs: 120,
+            cwd: std::path::PathBuf::from("/workspace"),
         },
         ActivityState::Running,
         Arc::new(AtomicBool::new(false)),
@@ -534,6 +631,7 @@ fn activity_cancel_marks_flag_and_pending_hostdo() {
             argv: vec!["cargo".into(), "test".into()],
             image: None,
             timeout_secs: 60,
+            cwd: std::path::PathBuf::from("/workspace"),
         },
         ActivityState::PendingApproval,
         cancel_flag.clone(),
@@ -563,6 +661,32 @@ fn activity_cancel_marks_flag_and_pending_hostdo() {
     assert!(app.pending_exec.is_empty());
     let activity = app.activity_by_id(&id).expect("activity exists");
     assert_eq!(activity.state, ActivityState::Cancelled);
+}
+
+#[test]
+fn exec_modal_selection_is_global_not_session_scoped() {
+    let mut app = build_test_app();
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+
+    app.pending_exec.push(crate::server::PendingItem {
+        id: "pending-global".to_string(),
+        activity_id: "activity-global".to_string(),
+        cancel_flag,
+        project: "project-a".to_string(),
+        container_id: Some("container-a".to_string()),
+        argv: vec!["cargo".into(), "test".into()],
+        image: None,
+        timeout_secs: 60,
+        cwd: std::path::PathBuf::from("/workspace"),
+        rule_cwd: std::path::PathBuf::from("/workspace"),
+        matched_command: None,
+        response_tx: Some(tx),
+    });
+
+    assert_eq!(app.active_session, None);
+    assert_eq!(app.active_exec_modal_idx(), Some(0));
+    assert!(app.has_pending_approval_modal());
 }
 
 #[test]
@@ -704,6 +828,7 @@ fn sidebar_activity_items_collapse_network_rows_per_session() {
             argv: vec!["cargo".to_string(), "test".to_string()],
             image: None,
             timeout_secs: 60,
+            cwd: std::path::PathBuf::from("/workspace"),
         },
         ActivityState::Running,
         Arc::new(AtomicBool::new(false)),
@@ -747,6 +872,7 @@ fn sidebar_activity_items_collapse_network_rows_per_session() {
             argv: vec!["git".to_string(), "status".to_string()],
             image: None,
             timeout_secs: 60,
+            cwd: std::path::PathBuf::from("/workspace"),
         },
         ActivityState::Complete,
         Arc::new(AtomicBool::new(false)),
@@ -824,6 +950,44 @@ fn sidebar_selection_preserves_item_when_activity_rows_shift_indices() {
     ];
     app.restore_sidebar_selection(selected.as_ref(), &after_remove);
     assert_eq!(app.sidebar_idx, 3);
+}
+
+#[test]
+fn sidebar_hotkey_selects_first_workspace_child_in_sidebar() {
+    let mut app =
+        build_test_app_with_workspaces(&[("project-a", Some('p')), ("rust-api", Some('r'))]);
+    app.focus = Focus::Sidebar;
+    app.sidebar_idx = 0;
+
+    app.handle_sidebar_key(key(KeyCode::Char('r'), KeyModifiers::NONE));
+
+    let items = app.sidebar_items();
+    assert_eq!(items.get(app.sidebar_idx), Some(&SidebarItem::Launch(1)));
+}
+
+#[test]
+fn sidebar_hotkey_selects_extended_workspace_key_directly() {
+    let mut app =
+        build_test_app_with_workspaces(&[("project-a", Some('p')), ("images", Some('i'))]);
+    app.focus = Focus::Sidebar;
+    app.sidebar_idx = 1;
+
+    app.handle_sidebar_key(key(KeyCode::Char('i'), KeyModifiers::NONE));
+
+    let items = app.sidebar_items();
+    assert_eq!(items.get(app.sidebar_idx), Some(&SidebarItem::Launch(1)));
+}
+
+#[test]
+fn sidebar_hotkey_does_not_quit_when_workspace_uses_q() {
+    let mut app = build_test_app_with_workspaces(&[("queue", Some('q'))]);
+    app.focus = Focus::Sidebar;
+
+    app.handle_sidebar_key(key(KeyCode::Char('q'), KeyModifiers::NONE));
+
+    let items = app.sidebar_items();
+    assert_eq!(items.get(app.sidebar_idx), Some(&SidebarItem::Launch(0)));
+    assert!(!app.should_quit);
 }
 
 #[test]

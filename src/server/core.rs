@@ -230,6 +230,7 @@ pub(super) async fn exec_handler(
             argv: exec_argv.clone(),
             image: exec_target.image().map(str::to_string),
             timeout_secs,
+            cwd: host_cwd.clone(),
         },
         initial_activity_state,
         cancel_flag.clone(),
@@ -337,6 +338,33 @@ pub(super) async fn exec_handler(
 
     if state.pending_tx.send(pending).await.is_err() {
         return server_deny("manager is shutting down".to_string());
+    }
+
+    if supports_exec_jobs {
+        return start_approval_wait_job(
+            CommandRun {
+                state: state.clone(),
+                target: exec_target.clone(),
+                argv: exec_argv.clone(),
+                host_cwd: host_cwd.clone(),
+                env_vars: exec::resolve_env(env_profile.as_deref(), &cfg),
+                timeout_secs,
+                workspace_path: workspace_path_buf.clone(),
+                runner_mount_target: runner_mount_target.clone(),
+                runner_cwd: runner_cwd.clone(),
+                audit_project: identity_project.clone(),
+                audit_cwd: req.cwd.clone(),
+                decision_kind: DecisionKind::Approved,
+                decision_label: "approved".to_string(),
+                allow_background_job: true,
+                activity_id: activity_id.clone(),
+                cancel_flag: cancel_flag.clone(),
+            },
+            response_rx,
+            identity_project.clone(),
+            req.cwd.clone(),
+            exec_argv.clone(),
+        );
     }
 
     // Await the developer decision (and execution) under the span.
@@ -717,6 +745,258 @@ fn start_image_pull_job(run: CommandRun, image: String) -> Response {
     );
 
     (StatusCode::ACCEPTED, Json(status)).into_response()
+}
+
+fn start_approval_wait_job(
+    run: CommandRun,
+    response_rx: oneshot::Receiver<ApprovalDecision>,
+    identity_project: String,
+    audit_cwd: String,
+    exec_argv: Vec<String>,
+) -> Response {
+    let status = run.state.exec_jobs.insert(ExecJobStatus {
+        state: ExecJobState::Running,
+        job_id: String::new(),
+        project: run.audit_project.clone(),
+        phase: Some(ExecJobPhase::PendingApproval),
+        image: run.target.image().map(str::to_string),
+        message: "Waiting for developer approval.".to_string(),
+        progress: None,
+        poll_after_ms: Some(1000),
+        exit_code: None,
+        stdout: None,
+        stderr: None,
+        reason: None,
+    });
+    let job_id = status.job_id.clone();
+    let registry = run.state.exec_jobs.clone();
+    let state = run.state.clone();
+    let activity_id = run.activity_id.clone();
+    let cancel_flag = run.cancel_flag.clone();
+    let span = tracing::Span::current();
+
+    tokio::spawn(
+        async move {
+            let approval_start = Instant::now();
+            let decision = match tokio::time::timeout(Duration::from_secs(300), response_rx).await {
+                Ok(Ok(d)) => d,
+                Ok(Err(_)) | Err(_) => {
+                    finish_activity_by_id(
+                        &state.activity_tx,
+                        &activity_id,
+                        ActivityState::Failed,
+                        "approval timed out",
+                    );
+                    let wait_ms = approval_start.elapsed().as_millis() as i64;
+                    tracing::Span::current().record("decision", "timed_out");
+                    tracing::Span::current().record("approval_wait_ms", wait_ms);
+                    record_command_audit(
+                        &state,
+                        &identity_project,
+                        &exec_argv,
+                        &audit_cwd,
+                        DecisionKind::TimedOut,
+                        None,
+                        None,
+                    )
+                    .await;
+                    set_job_failed(
+                        &registry,
+                        &job_id,
+                        "approval timed out (5 minutes)".to_string(),
+                    );
+                    return;
+                }
+            };
+
+            let approval_wait_ms = approval_start.elapsed().as_millis() as i64;
+            tracing::Span::current().record("approval_wait_ms", approval_wait_ms);
+
+            match decision {
+                ApprovalDecision::Deny => {
+                    let cancelled = cancel_flag.load(std::sync::atomic::Ordering::SeqCst);
+                    let (activity_state, reason) = if cancelled {
+                        (ActivityState::Cancelled, "cancelled".to_string())
+                    } else {
+                        (ActivityState::Denied, "denied by developer".to_string())
+                    };
+                    finish_activity_by_id(
+                        &state.activity_tx,
+                        &activity_id,
+                        activity_state,
+                        &reason,
+                    );
+                    tracing::Span::current().record("decision", "denied");
+                    record_command_audit(
+                        &state,
+                        &identity_project,
+                        &exec_argv,
+                        &audit_cwd,
+                        DecisionKind::Denied,
+                        None,
+                        None,
+                    )
+                    .await;
+                    set_job_failed(&registry, &job_id, reason);
+                }
+                ApprovalDecision::Approve { remember } => {
+                    run_job_after_approval(
+                        run,
+                        &registry,
+                        &job_id,
+                        if remember {
+                            DecisionKind::Remembered
+                        } else {
+                            DecisionKind::Approved
+                        },
+                        if remember { "remembered" } else { "approved" },
+                    )
+                    .await;
+                }
+            }
+        }
+        .instrument(span),
+    );
+
+    (StatusCode::ACCEPTED, Json(status)).into_response()
+}
+
+async fn run_job_after_approval(
+    mut run: CommandRun,
+    registry: &crate::server::ExecJobRegistry,
+    job_id: &str,
+    decision_kind: DecisionKind,
+    decision_label: &str,
+) {
+    run.decision_kind = decision_kind;
+    run.decision_label = decision_label.to_string();
+    run.allow_background_job = true;
+
+    if let exec::ExecTarget::DockerImage(image) = run.target.clone() {
+        match exec::docker_image_present(&image).await {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = run.state.activity_tx.send(ActivityEvent::State {
+                    id: run.activity_id.clone(),
+                    state: ActivityState::PullingImage,
+                    status: Some(format!("pulling Docker image '{image}'")),
+                });
+                registry.update(job_id, |status| {
+                    status.state = ExecJobState::Running;
+                    status.phase = Some(ExecJobPhase::PullingImage);
+                    status.image = Some(image.clone());
+                    status.message =
+                        format!("Developer approved request; pulling Docker image '{image}'.");
+                    status.progress = Some(ExecJobProgress {
+                        kind: "indeterminate".to_string(),
+                        id: None,
+                        status: None,
+                        detail: None,
+                    });
+                    status.poll_after_ms = Some(1000);
+                    status.reason = None;
+                });
+                let activity_tx = run.state.activity_tx.clone();
+                let activity_id = run.activity_id.clone();
+                let progress_image = image.clone();
+                let progress_registry = registry.clone();
+                let progress_job_id = job_id.to_string();
+                match exec::pull_docker_image_cancelable(
+                    &image,
+                    IMAGE_PULL_TIMEOUT_SECS,
+                    run.cancel_flag.clone(),
+                    move |progress| {
+                        let message = format!(
+                            "Pulling Docker image '{}': {}",
+                            progress_image, progress.message
+                        );
+                        let _ = activity_tx.send(ActivityEvent::Line {
+                            id: activity_id.clone(),
+                            line: message.clone(),
+                        });
+                        progress_registry.update(&progress_job_id, |status| {
+                            status.state = ExecJobState::Running;
+                            status.phase = Some(ExecJobPhase::PullingImage);
+                            status.message = message;
+                            status.poll_after_ms = Some(1000);
+                            status.progress = Some(ExecJobProgress {
+                                kind: "docker_pull".to_string(),
+                                id: progress.id,
+                                status: progress.status,
+                                detail: progress.detail,
+                            });
+                        });
+                    },
+                )
+                .await
+                {
+                    Ok(result) if result.exit_code == 0 => {}
+                    Ok(result) => {
+                        let reason = pull_failure_reason(&result);
+                        set_job_failed(registry, job_id, reason.clone());
+                        finish_activity(&run, ActivityState::Failed, reason);
+                        return;
+                    }
+                    Err(e) => {
+                        let reason = e.to_string();
+                        set_job_failed(registry, job_id, reason.clone());
+                        finish_error_activity(&run, reason);
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                let reason = format!("checking docker image failed: {e}");
+                set_job_failed(registry, job_id, reason.clone());
+                finish_error_activity(&run, reason);
+                return;
+            }
+        }
+    }
+
+    let _ = run.state.activity_tx.send(ActivityEvent::State {
+        id: run.activity_id.clone(),
+        state: ActivityState::Running,
+        status: Some("running command".to_string()),
+    });
+    registry.update(job_id, |status| {
+        status.state = ExecJobState::Running;
+        status.phase = Some(ExecJobPhase::RunningCommand);
+        status.message = format!(
+            "Developer approved request; running {}.",
+            run.argv.join(" ")
+        );
+        status.progress = None;
+        status.poll_after_ms = Some(1000);
+        status.reason = None;
+    });
+
+    match run.execute().await {
+        Ok(result) => {
+            record_success(&run, &result).await;
+            registry.update(job_id, |status| {
+                status.state = ExecJobState::Complete;
+                status.phase = None;
+                status.message = format!("Command finished with exit code {}.", result.exit_code);
+                status.progress = None;
+                status.poll_after_ms = None;
+                status.exit_code = Some(result.exit_code);
+                status.stdout = Some(result.stdout.clone());
+                status.stderr = Some(result.stderr.clone());
+                status.reason = None;
+            });
+            finish_activity(
+                &run,
+                ActivityState::Complete,
+                format!("exit code {}", result.exit_code),
+            );
+        }
+        Err(e) => {
+            let reason = e.to_string();
+            set_job_failed(registry, job_id, reason.clone());
+            finish_error_activity(&run, reason);
+        }
+    }
 }
 
 async fn record_success(run: &CommandRun, result: &exec::ExecResult) {

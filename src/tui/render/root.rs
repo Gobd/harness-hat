@@ -22,6 +22,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             .split(area);
         render_log_fullscreen(frame, app, split[0]);
         render_status_bar_log(frame, app, split[1]);
+        render_terminal_overlays(frame, app, split[0]);
         if app.base_rules_changed.is_some() {
             render_base_rules_changed_overlay(frame, app, area);
         }
@@ -30,14 +31,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     if app.terminal_fullscreen {
         if let Some(si) = app.active_session.filter(|&si| si < app.sessions.len()) {
-            let has_modal = !app.pending_net.is_empty()
-                || app
-                    .active_session
-                    .map(|active| !app.pending_for_session(active).is_empty())
-                    .unwrap_or(false);
+            let has_modal = app.has_pending_approval_modal();
 
             render_terminal(frame, app, area, si, has_modal, true);
-            render_terminal_overlays(frame, app, area, si);
+            render_terminal_overlays(frame, app, area);
             if app.base_rules_changed.is_some() {
                 render_base_rules_changed_overlay(frame, app, area);
             } else if app.remove_workspace_confirm.is_some() {
@@ -45,6 +42,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             }
         } else {
             render_idle(frame, area);
+            render_terminal_overlays(frame, app, area);
             if app.base_rules_changed.is_some() {
                 render_base_rules_changed_overlay(frame, app, area);
             } else if app.remove_workspace_confirm.is_some() {
@@ -83,6 +81,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     render_sidebar(frame, app, main_row[0]);
     render_right_pane(frame, app, main_row[2]);
+    render_terminal_overlays(frame, app, main_row[2]);
     if show_log_pane {
         render_log(frame, app, outer[1]);
         render_status_bar(frame, app, outer[2]);
@@ -190,13 +189,18 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|item| match item {
             SidebarItem::Workspace(pi) => {
                 let proj = &app.workspaces[*pi];
-                ListItem::new(Line::from(vec![
+                let mut spans = vec![
                     Span::styled("● ", Style::default().fg(Color::Green)),
                     Span::styled(
                         proj.name.clone(),
                         Style::default().add_modifier(Modifier::BOLD),
                     ),
-                ]))
+                ];
+                if focused && let Some(hotkey) = proj.sidebar_hotkey {
+                    let badge = format!("  [{}]", hotkey.to_ascii_uppercase());
+                    spans.push(Span::styled(badge, Style::default().fg(Color::DarkGray)));
+                }
+                ListItem::new(Line::from(spans))
             }
             SidebarItem::Session(si) => {
                 let session = &app.sessions[*si];

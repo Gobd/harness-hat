@@ -55,6 +55,7 @@ pub enum CommandMatch<'a> {
 pub enum DenyReason {
     DeniedExecutable(String),
     DeniedArgumentFragment(String),
+    UnsupportedHostdoUtility(String),
     EmptyArgv,
     InvalidImage(String),
 }
@@ -66,6 +67,10 @@ impl std::fmt::Display for DenyReason {
             Self::DeniedArgumentFragment(frag) => {
                 write!(f, "argument contains denied fragment '{frag}'")
             }
+            Self::UnsupportedHostdoUtility(exe) => write!(
+                f,
+                "command '{exe}' is blocked in hostdo; use hostdo only for host-side build, package, compiler, or test tooling such as cargo, rustc, npm, pnpm, yarn, go, make, or pytest"
+            ),
             Self::EmptyArgv => write!(f, "argv must not be empty"),
             Self::InvalidImage(reason) => write!(f, "{reason}"),
         }
@@ -179,6 +184,11 @@ pub fn check_denied(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(exe);
+
+    let blocked_common = config::effective_hostdo_block_common(&config.defaults);
+    if blocked_common.iter().any(|blocked| blocked == exe_base) {
+        return Some(DenyReason::UnsupportedHostdoUtility(exe_base.to_string()));
+    }
 
     if denied_exes.iter().any(|d| d == exe || d == exe_base) {
         return Some(DenyReason::DeniedExecutable(exe.to_string()));
@@ -830,20 +840,27 @@ mod tests {
 
         assert!(
             check_denied(
-                &["ls".into(), "file; cat /etc/shadow".into()],
+                &["cargo".into(), "file; cat /etc/shadow".into()],
                 &proj,
                 &config
             )
             .is_some()
         );
-        assert!(check_denied(&["ls".into(), "file && rm -rf /".into()], &proj, &config).is_some());
         assert!(
-            check_denied(&["ls".into(), "file | grep secret".into()], &proj, &config).is_some()
+            check_denied(&["cargo".into(), "file && rm -rf /".into()], &proj, &config).is_some()
         );
-        assert!(check_denied(&["ls".into(), "file \n /".into()], &proj, &config).is_some());
+        assert!(
+            check_denied(
+                &["cargo".into(), "file | grep secret".into()],
+                &proj,
+                &config
+            )
+            .is_some()
+        );
+        assert!(check_denied(&["cargo".into(), "file \n /".into()], &proj, &config).is_some());
 
         // Clean
-        assert!(check_denied(&["ls".into(), "clean-file".into()], &proj, &config).is_none());
+        assert!(check_denied(&["cargo".into(), "clean-file".into()], &proj, &config).is_none());
     }
 
     #[test]
@@ -853,15 +870,52 @@ mod tests {
         config.defaults.hostdo.denied_executables = vec!["cat".to_string()];
 
         assert!(check_denied(&["cat".into(), "secret.txt".into()], &proj, &config).is_some());
-        assert!(check_denied(&["ls".into(), "file.txt".into()], &proj, &config).is_none());
+        assert!(check_denied(&["cargo".into(), "file.txt".into()], &proj, &config).is_none());
 
         // Per-project deny
         proj.hostdo = Some(WorkspaceHostdo {
-            denied_executables: Some(vec!["ls".to_string()]),
+            denied_executables: Some(vec!["cargo".to_string()]),
             denied_argument_fragments: None,
             command_aliases: None,
         });
-        assert!(check_denied(&["ls".into(), "file.txt".into()], &proj, &config).is_some());
+        assert!(check_denied(&["cargo".into(), "file.txt".into()], &proj, &config).is_some());
+    }
+
+    #[test]
+    fn check_denied_blocks_shell_utilities_in_hostdo() {
+        let proj = WorkspaceConfig::default();
+        let config = Config::default();
+
+        let err = check_denied(
+            &["grep".into(), "needle".into(), "file.txt".into()],
+            &proj,
+            &config,
+        )
+        .expect("grep should be blocked");
+        assert!(matches!(err, DenyReason::UnsupportedHostdoUtility(ref exe) if exe == "grep"));
+        assert!(
+            err.to_string().contains(
+                "use hostdo only for host-side build, package, compiler, or test tooling"
+            ),
+            "unexpected message: {err}"
+        );
+
+        let err = check_denied(&["/bin/ls".into(), "-la".into()], &proj, &config)
+            .expect("ls should be blocked by basename");
+        assert!(matches!(err, DenyReason::UnsupportedHostdoUtility(ref exe) if exe == "ls"));
+    }
+
+    #[test]
+    fn check_denied_uses_configured_hostdo_common_block_override() {
+        let proj = WorkspaceConfig::default();
+        let mut config = Config::default();
+        config.defaults.hostdo.hostdo_block_common = vec!["git".to_string()];
+
+        assert!(check_denied(&["grep".into(), "needle".into()], &proj, &config).is_none());
+
+        let err = check_denied(&["git".into(), "status".into()], &proj, &config)
+            .expect("git should be blocked by configured override");
+        assert!(matches!(err, DenyReason::UnsupportedHostdoUtility(ref exe) if exe == "git"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -66,6 +67,7 @@ pub enum ActivityKind {
         argv: Vec<String>,
         image: Option<String>,
         timeout_secs: u64,
+        cwd: PathBuf,
     },
     Network {
         method: String,
@@ -301,6 +303,7 @@ mod tests {
                 argv: vec!["cargo".to_string(), "test".to_string()],
                 image: None,
                 timeout_secs: 60,
+                cwd: PathBuf::from("/workspace"),
             },
             ActivityState::Running,
             cancel_flag,
@@ -323,6 +326,7 @@ mod tests {
                 argv: vec!["cargo".to_string(), "test".to_string()],
                 image: Some("rust".to_string()),
                 timeout_secs: 120,
+                cwd: PathBuf::from("/workspace"),
             },
             ActivityState::Running,
             Arc::new(AtomicBool::new(false)),
@@ -340,6 +344,7 @@ mod tests {
                 argv: vec!["cargo".to_string(), "test".to_string()],
                 image: Some("rust".to_string()),
                 timeout_secs: 120,
+                cwd: PathBuf::from("/workspace"),
             },
             ActivityState::PullingImage,
             Arc::new(AtomicBool::new(false)),
@@ -367,6 +372,7 @@ mod tests {
                 argv: vec!["cargo".to_string(), "test".to_string()],
                 image: None,
                 timeout_secs: 60,
+                cwd: PathBuf::from("/workspace"),
             },
             ActivityState::Running,
             cancel_flag,

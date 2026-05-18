@@ -8,13 +8,11 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         let selected = app.sidebar_items().get(app.sidebar_idx).cloned();
         match selected {
             Some(SidebarItem::Session(si)) if si < app.sessions.len() => {
-                let has_modal =
-                    !app.pending_for_session(si).is_empty() || !app.pending_net.is_empty();
+                let has_modal = app.has_pending_approval_modal();
                 // Sidebar-selected session is a preview, so keep it visually
                 // muted even when no modal is active.
                 let preview_dimmed = true;
                 render_terminal(frame, app, area, si, preview_dimmed || has_modal, false);
-                render_terminal_overlays(frame, app, area, si);
             }
             Some(SidebarItem::Activity(id)) => {
                 render_activity_detail(frame, app, area, id.as_str(), true);
@@ -96,29 +94,19 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let has_modal = app
-        .active_session
-        .map(|si| !app.pending_for_session(si).is_empty() || !app.pending_net.is_empty())
-        .unwrap_or(false);
+    let has_modal = app.has_pending_approval_modal();
 
     match app.active_session {
         Some(si) if si < app.sessions.len() => {
             render_terminal(frame, app, area, si, has_modal, false);
-            render_terminal_overlays(frame, app, area, si);
         }
         _ => render_idle(frame, area),
     }
 }
 
-pub(crate) fn render_terminal_overlays(
-    frame: &mut Frame,
-    app: &mut App,
-    area: Rect,
-    session_idx: usize,
-) {
-    let pending_exec = app.pending_for_session(session_idx);
-    if !pending_exec.is_empty() {
-        render_exec_approval_overlay(frame, app, area, pending_exec[0]);
+pub(crate) fn render_terminal_overlays(frame: &mut Frame, app: &mut App, area: Rect) {
+    if let Some(idx) = app.active_exec_modal_idx() {
+        render_exec_approval_overlay(frame, app, area, idx);
         return;
     }
 
@@ -170,10 +158,18 @@ pub(crate) fn render_activity_detail(
             argv,
             image,
             timeout_secs,
+            cwd,
         } => {
             lines.push(Line::from(vec![
                 Span::styled("  Command : ", Style::default().fg(tone(Color::DarkGray))),
                 Span::styled(activity.title(), Style::default().fg(tone(Color::White))),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  CWD     : ", Style::default().fg(tone(Color::DarkGray))),
+                Span::styled(
+                    app.portable_cwd(cwd, &activity.project),
+                    Style::default().fg(tone(Color::White)),
+                ),
             ]));
             if let Some(image) = image {
                 lines.push(Line::from(vec![
@@ -830,6 +826,7 @@ mod tests {
                 argv: vec!["cargo".to_string(), "test".to_string()],
                 image: Some("rust".to_string()),
                 timeout_secs: 120,
+                cwd: std::path::PathBuf::from("/workspace"),
             },
             ActivityState::PullingImage,
             Arc::new(AtomicBool::new(false)),

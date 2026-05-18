@@ -87,6 +87,7 @@ pub enum ExecJobState {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecJobPhase {
+    PendingApproval,
     CheckingImage,
     PullingImage,
     RunningCommand,

@@ -13,7 +13,10 @@ RUN npm install -g \
     @openai/codex \
     @google/gemini-cli \
     @earendil-works/pi-coding-agent \
-    @anthropic-ai/claude-code
+    @anthropic-ai/claude-code \
+    pnpm \
+    typescript \
+    tsx
 USER ubuntu
 
 ENV PATH="/home/ubuntu/.local/bin:${PATH}"

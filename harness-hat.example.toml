@@ -52,6 +52,11 @@ max_timeout_secs = 3600
 # These are common shell escape or privilege escalation paths.
 denied_executables = ["sh", "bash", "zsh", "fish", "csh", "ksh", "sudo", "su", "doas"]
 
+# Common shell/file utilities that should not be run through hostdo.
+# This example spells out the built-in default list.
+# Set a different non-empty list here to replace these defaults.
+hostdo_block_common = ["ls", "dir", "cat", "grep", "egrep", "fgrep", "rg", "find", "fd", "sed", "awk", "head", "tail", "less", "more", "sort", "uniq", "cut", "xargs", "wc", "cp", "mv", "rm", "mkdir", "rmdir", "touch", "chmod", "chown", "ln", "readlink", "realpath", "stat", "du", "df", "tar", "zip", "unzip"]
+
 # Additional string fragments that are denied if they appear in any argument.
 denied_argument_fragments = []
 

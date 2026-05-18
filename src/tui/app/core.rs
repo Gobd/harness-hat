@@ -118,8 +118,12 @@ impl App {
         let workspaces = cfg
             .workspaces
             .iter()
+            .zip(crate::config::resolve_workspace_sidebar_hotkeys(
+                &cfg.workspaces,
+            ))
             .map(|p| WorkspaceStatus {
-                name: p.name.clone(),
+                name: p.0.name.clone(),
+                sidebar_hotkey: p.1,
             })
             .collect();
 
@@ -721,8 +725,34 @@ impl App {
     }
 
     pub(crate) fn active_exec_modal_idx(&self) -> Option<usize> {
-        let si = self.active_session?;
-        self.pending_for_session(si).into_iter().next()
+        (!self.pending_exec.is_empty()).then_some(0)
+    }
+
+    pub(crate) fn has_pending_approval_modal(&self) -> bool {
+        self.active_exec_modal_idx().is_some() || !self.pending_net.is_empty()
+    }
+
+    pub(crate) fn sidebar_workspace_hotkey_target(&self, hotkey: char) -> Option<usize> {
+        let items = self.sidebar_items();
+        let workspace_idx = items.iter().position(|item| match item {
+            SidebarItem::Workspace(pi) => {
+                self.workspaces
+                    .get(*pi)
+                    .and_then(|workspace| workspace.sidebar_hotkey)
+                    == Some(hotkey)
+            }
+            _ => false,
+        })?;
+
+        items
+            .iter()
+            .enumerate()
+            .skip(workspace_idx + 1)
+            .take_while(|(_, item)| {
+                !matches!(item, SidebarItem::Workspace(_) | SidebarItem::NewWorkspace)
+            })
+            .find(|(_, item)| Self::sidebar_item_is_selectable(item))
+            .map(|(idx, _)| idx)
     }
 
     pub(crate) fn session_is_loading(&self, session_idx: usize) -> bool {

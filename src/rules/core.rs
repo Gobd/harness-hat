@@ -659,6 +659,11 @@ const RULES_FILE_HEADER: &str = "\
 # - Examples: `hostdo cargo test`, `hostdo npm install`, `hostdo go test ./...`.
 # - Only use `hostdo --image <docker-image> ...` when the user explicitly asks
 #   you to run against a Docker image or containerized runner.
+# - Use `hostdo --timeout <seconds> ...` when the user explicitly asks for a
+#   longer or shorter host-side command timeout, or when a command exits before
+#   finishing and clearly needs more time than the default rule allows.
+# - Examples: `hostdo --timeout 120 cargo test`,
+#   `hostdo --timeout 1800 npm run build`.
 # - `hostdo --image` runs a command in a short-lived Docker runner instead of
 #   directly on the host.
 # - Examples: `hostdo --image node:20 npm test`,

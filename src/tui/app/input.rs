@@ -50,19 +50,16 @@ impl App {
         }
 
         if self.base_rules_changed.is_some() {
-            match key.code {
-                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('y') | KeyCode::Char('n') => {
-                    self.base_rules_changed = None;
-                }
-                _ => {}
+            if control_hotkey_char(key) == Some('y') {
+                self.base_rules_changed = None;
             }
             return;
         }
 
         if self.remove_workspace_confirm.is_some() {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => self.finish_remove_workspace_confirm(true),
-                KeyCode::Char('n') | KeyCode::Esc => self.finish_remove_workspace_confirm(false),
+            match control_hotkey_char(key) {
+                Some('y') => self.finish_remove_workspace_confirm(true),
+                Some('n') => self.finish_remove_workspace_confirm(false),
                 _ => {}
             }
             return;
@@ -78,21 +75,21 @@ impl App {
         }
 
         if let Some(idx) = self.active_exec_modal_idx() {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => self.approve_exec(idx, false),
-                KeyCode::Char('r') => self.approve_exec(idx, true),
-                KeyCode::Char('n') | KeyCode::Esc => self.deny_exec(idx),
-                KeyCode::Char('d') => self.deny_exec_forever(idx),
+            match control_hotkey_char(key) {
+                Some('y') => self.approve_exec(idx, false),
+                Some('r') => self.approve_exec(idx, true),
+                Some('n') => self.deny_exec(idx),
+                Some('d') => self.deny_exec_forever(idx),
                 _ => {}
             }
             return;
         }
         if !self.pending_net.is_empty() {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => self.approve_net(0),
-                KeyCode::Char('r') => self.approve_net_forever(0),
-                KeyCode::Char('n') | KeyCode::Esc => self.deny_net(0),
-                KeyCode::Char('d') => self.deny_net_forever(0),
+            match control_hotkey_char(key) {
+                Some('y') => self.approve_net(0),
+                Some('r') => self.approve_net_forever(0),
+                Some('n') => self.deny_net(0),
+                Some('d') => self.deny_net_forever(0),
                 _ => {}
             }
             return;
@@ -194,19 +191,31 @@ impl App {
 
     pub(crate) fn handle_sidebar_key(&mut self, key: KeyEvent) {
         let items = self.sidebar_items();
+
+        if !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && let KeyCode::Char(ch) = key.code
+            && let Some(idx) = self.sidebar_workspace_hotkey_target(ch.to_ascii_lowercase())
+        {
+            self.sidebar_idx = idx;
+            self.update_sidebar_preview(&items);
+            self.ensure_sidebar_visible(&items, 10);
+            return;
+        }
         match key.code {
-            KeyCode::Char('q') => {
-                self.should_quit = true;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 self.sidebar_move_up(&items);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 self.sidebar_move_down(&items);
             }
-            KeyCode::Char('o') => self.open_log_fullscreen(),
-            KeyCode::Enter | KeyCode::Char('l') => self.handle_sidebar_enter(&items),
+            KeyCode::Enter => self.handle_sidebar_enter(&items),
             _ => {}
+        }
+
+        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::ALT) {
+            self.open_log_fullscreen();
         }
     }
 
@@ -494,6 +503,7 @@ impl App {
             self.set_new_project_error(format!("workspace name already exists: '{name}'"));
             return;
         }
+        let sidebar_hotkey = crate::config::select_workspace_sidebar_hotkey(&cfg.workspaces, &name);
 
         match crate::new_project::write_rules_if_missing(&workspace_path, project_type) {
             Ok(false) => {}
@@ -514,6 +524,7 @@ impl App {
             &self.loaded_config_path,
             &name,
             &workspace_path,
+            sidebar_hotkey,
         ) {
             self.set_new_project_error(format!("failed updating config: {e}"));
             return;
@@ -530,7 +541,10 @@ impl App {
         self.config.set(std::sync::Arc::new(new_config));
         self.refresh_projects_cache();
 
-        self.push_log(format!("added workspace '{name}'"), false);
+        let hotkey_note = sidebar_hotkey
+            .map(|ch| format!(" with sidebar hotkey {}", ch.to_ascii_uppercase()))
+            .unwrap_or_default();
+        self.push_log(format!("added workspace '{name}'{hotkey_note}"), false);
         self.new_project = None;
         self.focus = Focus::Sidebar;
 

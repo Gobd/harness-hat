@@ -6,8 +6,12 @@ impl App {
         self.workspaces = cfg
             .workspaces
             .iter()
+            .zip(crate::config::resolve_workspace_sidebar_hotkeys(
+                &cfg.workspaces,
+            ))
             .map(|p| WorkspaceStatus {
-                name: p.name.clone(),
+                name: p.0.name.clone(),
+                sidebar_hotkey: p.1,
             })
             .collect();
     }
