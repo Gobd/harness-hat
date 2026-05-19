@@ -17,6 +17,7 @@ RUN npm install -g \
     pnpm \
     typescript \
     tsx
+RUN curl -fsSL https://bun.sh/install | bash
 USER ubuntu
 
 ENV PATH="/home/ubuntu/.local/bin:${PATH}"

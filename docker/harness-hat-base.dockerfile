@@ -47,8 +47,46 @@ RUN cargo install --locked --version "${TUN2PROXY_VERSION}" --bin tun2proxy-bin 
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG UBUNTU_ARCHIVE_MIRRORS="http://archive.ubuntu.com/ubuntu/ http://us.archive.ubuntu.com/ubuntu/ http://mirrors.edge.kernel.org/ubuntu/ http://mirror.us.leaseweb.net/ubuntu/"
+ARG UBUNTU_PORTS_MIRRORS="http://ports.ubuntu.com/ubuntu-ports/ http://mirror.us.leaseweb.net/ubuntu-ports/ http://mirrors.edge.kernel.org/ubuntu-ports/"
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Ubuntu archive and ports mirrors can be unreachable from some networks. Try a
+# short list before the first package install and leave apt pointed at the first
+# mirror that works.
+RUN set -eu; \
+    sources=/etc/apt/sources.list.d/ubuntu.sources; \
+    upstream=; \
+    mirrors=; \
+    if grep -q 'http://ports.ubuntu.com/ubuntu-ports/' "$sources"; then \
+      upstream='http://ports.ubuntu.com/ubuntu-ports/'; \
+      mirrors="$UBUNTU_PORTS_MIRRORS"; \
+    elif grep -q 'http://archive.ubuntu.com/ubuntu/' "$sources"; then \
+      upstream='http://archive.ubuntu.com/ubuntu/'; \
+      mirrors="$UBUNTU_ARCHIVE_MIRRORS"; \
+    fi; \
+    if [ -n "$upstream" ]; then \
+      cp "$sources" /tmp/ubuntu.sources.orig; \
+      selected_mirror=; \
+      for mirror in $mirrors; do \
+        sed \
+          -e "s#${upstream}#${mirror}#g" \
+          -e "s#http://security.ubuntu.com/ubuntu/#${mirror}#g" \
+          /tmp/ubuntu.sources.orig > "$sources"; \
+        rm -rf /var/lib/apt/lists/*; \
+        if apt-get update -o APT::Update::Error-Mode=any; then \
+          selected_mirror="$mirror"; \
+          break; \
+        fi; \
+      done; \
+      if [ -z "$selected_mirror" ]; then \
+        cp /tmp/ubuntu.sources.orig "$sources"; \
+        echo "No Ubuntu mirror worked from configured mirror list" >&2; \
+        exit 1; \
+      fi; \
+      echo "Using Ubuntu mirror: $selected_mirror"; \
+    fi
+
+RUN apt-get update -o APT::Update::Error-Mode=any && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
       gnupg \
@@ -74,7 +112,7 @@ RUN set -eu; \
       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg; \
     echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
       > /etc/apt/sources.list.d/nodesource.list; \
-    apt-get update && apt-get install -y --no-install-recommends nodejs \
+    apt-get update -o APT::Update::Error-Mode=any && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/hostdo.py /usr/local/bin/hostdo

@@ -2,6 +2,12 @@
 
 This changelog is derived from git history and the current working tree.
 
+## 0.7.0 Future
+
+### Changed
+- Updated dockerfiles.
+
+
 ## 0.6.0 May 18th, 2026
 
 ### Added
