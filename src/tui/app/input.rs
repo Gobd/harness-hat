@@ -70,8 +70,13 @@ impl App {
                 || (key.code == KeyCode::Char('b')
                     && key.modifiers.contains(KeyModifiers::CONTROL)))
         {
-            self.focus_sidebar_shortcut();
-            return;
+            if self.focus == Focus::Activity && self.scroll_mode && key.code == KeyCode::Esc {
+                // In activity scroll mode, Esc should first exit scroll mode just
+                // like terminal scroll mode.
+            } else {
+                self.focus_sidebar_shortcut();
+                return;
+            }
         }
 
         if let Some(idx) = self.active_exec_modal_idx() {
@@ -262,6 +267,12 @@ impl App {
         if items.is_empty() || visible_height == 0 {
             return;
         }
+        if self.sidebar_idx <= 1 {
+            // Keep the first workspace title row visible when the first
+            // selectable row is focused.
+            self.sidebar_offset = 0;
+            return;
+        }
         if self.sidebar_idx < self.sidebar_offset {
             self.sidebar_offset = self.sidebar_idx;
         } else if self.sidebar_idx >= self.sidebar_offset + visible_height {
@@ -330,6 +341,9 @@ impl App {
                 self.preview_session = self.active_session;
                 self.active_activity = Some(id);
                 self.active_network_session = None;
+                self.scroll_mode = false;
+                self.scroll_mouse_passthrough = false;
+                self.terminal_scroll = 0;
                 self.focus = Focus::Activity;
                 self.active_settings_project = None;
             }
@@ -339,6 +353,17 @@ impl App {
     }
 
     pub(crate) fn handle_activity_key(&mut self, key: KeyEvent) {
+        if self.scroll_mode {
+            self.handle_scroll_mode_key(key);
+            return;
+        }
+
+        if is_scroll_mode_toggle_key(key) {
+            self.scroll_mode = true;
+            self.scroll_mouse_passthrough = false;
+            return;
+        }
+
         if key.code == KeyCode::Esc {
             self.focus_sidebar_shortcut();
         }

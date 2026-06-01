@@ -237,11 +237,19 @@ impl App {
     }
 
     pub(crate) fn handle_scroll_mode_key(&mut self, key: KeyEvent) {
-        let half_page = self
-            .active_session
-            .and_then(|si| self.sessions.get(si))
-            .map(|s| s.term.lock().screen_lines().max(2) / 2)
-            .unwrap_or(15);
+        let half_page = match self.focus {
+            Focus::Activity => self
+                .active_activity
+                .as_deref()
+                .and_then(|id| self.activity_by_id(id))
+                .map(|a| a.terminal.term.lock().screen_lines().max(2) / 2)
+                .unwrap_or(15),
+            _ => self
+                .active_session
+                .and_then(|si| self.sessions.get(si))
+                .map(|s| s.term.lock().screen_lines().max(2) / 2)
+                .unwrap_or(15),
+        };
 
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {

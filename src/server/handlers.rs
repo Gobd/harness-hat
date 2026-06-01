@@ -64,6 +64,8 @@ pub struct ExecRequest {
     pub image: Option<String>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub detach: bool,
 }
 
 /// Response payload returned by the hostdo HTTP endpoint.
@@ -90,6 +92,7 @@ pub enum ExecJobPhase {
     PendingApproval,
     CheckingImage,
     PullingImage,
+    StartingCommand,
     RunningCommand,
 }
 
@@ -113,6 +116,12 @@ pub struct ExecJobStatus {
     #[serde(skip_serializing)]
     pub project: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    pub timeout_secs: u64,
+    pub argv: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<ExecJobPhase>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
@@ -129,6 +138,62 @@ pub struct ExecJobStatus {
     pub stderr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing)]
+    pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    #[serde(skip_serializing)]
+    pub stdin_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+}
+
+/// Response payload returned by the hostdo job list endpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecJobListResponse {
+    pub jobs: Vec<ExecJobStatus>,
+}
+
+/// Response payload returned by the hostdo job read endpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecJobOutputResponse {
+    pub job_id: String,
+    pub state: ExecJobState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<ExecJobPhase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Query parameters accepted by the hostdo job read endpoint.
+#[derive(Debug, Deserialize)]
+pub struct ExecJobOutputQuery {
+    #[serde(default)]
+    pub stream: Option<String>,
+    #[serde(default)]
+    pub tail: Option<usize>,
+}
+
+/// Response payload returned by the hostdo job kill endpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecJobKillResponse {
+    pub ok: bool,
+    pub job_id: String,
+    pub message: String,
+}
+
+/// Request payload accepted by the hostdo job stdin endpoint.
+#[derive(Debug, Deserialize)]
+pub struct ExecJobSendRequest {
+    pub input: String,
+}
+
+/// Response payload returned by the hostdo job stdin endpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecJobSendResponse {
+    pub ok: bool,
+    pub job_id: String,
+    pub message: String,
 }
 
 /// Error payload returned by the hostdo HTTP endpoint.
@@ -411,6 +476,21 @@ impl ExecJobRegistry {
             .and_then(|map| map.get(job_id).cloned())
     }
 
+    pub fn list_project(&self, project: &str) -> Vec<ExecJobStatus> {
+        self.inner
+            .lock()
+            .map(|map| {
+                let mut jobs: Vec<_> = map
+                    .values()
+                    .filter(|status| status.project == project)
+                    .cloned()
+                    .collect();
+                jobs.sort_by(|a, b| a.job_id.cmp(&b.job_id));
+                jobs
+            })
+            .unwrap_or_default()
+    }
+
     pub fn update<F>(&self, job_id: &str, update: F)
     where
         F: FnOnce(&mut ExecJobStatus),
@@ -449,7 +529,11 @@ pub async fn run_with_listener(
     // The server state is wrapped in Arc so it can be shared immutably across multiple handler instances.
     let router = Router::new()
         .route("/exec", post(super::core::exec_handler))
+        .route("/exec/jobs", get(exec_jobs_list_handler))
         .route("/exec/jobs/:job_id", get(exec_job_handler))
+        .route("/exec/jobs/:job_id/output", get(exec_job_output_handler))
+        .route("/exec/jobs/:job_id/kill", post(exec_job_kill_handler))
+        .route("/exec/jobs/:job_id/input", post(exec_job_send_handler))
         .route("/container/stop", post(stop_handler))
         .route("/agents/profiles", get(agent_profiles_handler))
         .route("/agents/spawn", post(agent_spawn_handler))
@@ -462,6 +546,22 @@ pub async fn run_with_listener(
 
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+/// Returns all visible hostdo execution jobs for the caller's workspace.
+pub(super) async fn exec_jobs_list_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    let identity = match require_session_identity(&state, &headers) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    Json(ExecJobListResponse {
+        jobs: state.exec_jobs.list_project(&identity.project),
+    })
+    .into_response()
 }
 
 /// Returns status for a long-running hostdo execution job.
@@ -477,6 +577,196 @@ pub(super) async fn exec_job_handler(
 
     match state.exec_jobs.get(&job_id) {
         Some(status) if status.project == identity.project => Json(status).into_response(),
+        Some(_) | None => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "not_found".into(),
+                reason: "no exec job matched the request".into(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// Returns currently captured output for a hostdo execution job.
+pub(super) async fn exec_job_output_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(job_id): AxumPath<String>,
+    Query(query): Query<ExecJobOutputQuery>,
+) -> Response {
+    let identity = match require_session_identity(&state, &headers) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    let stream = query.stream.as_deref().unwrap_or("all");
+    if !matches!(stream, "all" | "stdout" | "stderr") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid_request".into(),
+                reason: "stream must be one of: all, stdout, stderr".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    match state.exec_jobs.get(&job_id) {
+        Some(status) if status.project == identity.project => {
+            let stdout = output_for_query(
+                status.stdout.unwrap_or_default(),
+                query.tail,
+                stream != "stderr",
+            );
+            let stderr = output_for_query(
+                status.stderr.unwrap_or_default(),
+                query.tail,
+                stream != "stdout",
+            );
+            Json(ExecJobOutputResponse {
+                job_id: status.job_id,
+                state: status.state,
+                phase: status.phase,
+                exit_code: status.exit_code,
+                stdout,
+                stderr,
+                reason: status.reason,
+            })
+            .into_response()
+        }
+        Some(_) | None => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "not_found".into(),
+                reason: "no exec job matched the request".into(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+fn output_for_query(output: String, tail: Option<usize>, include: bool) -> String {
+    if !include {
+        return String::new();
+    }
+    match tail {
+        Some(lines) => tail_lines(&output, lines),
+        None => output,
+    }
+}
+
+fn tail_lines(output: &str, lines: usize) -> String {
+    if lines == 0 || output.is_empty() {
+        return String::new();
+    }
+    let mut tail: Vec<&str> = output.lines().rev().take(lines).collect();
+    tail.reverse();
+    let mut out = tail.join("\n");
+    if !out.is_empty() && output.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Requests cancellation for a running hostdo execution job.
+pub(super) async fn exec_job_kill_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(job_id): AxumPath<String>,
+) -> Response {
+    let identity = match require_session_identity(&state, &headers) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    match state.exec_jobs.get(&job_id) {
+        Some(status) if status.project == identity.project => {
+            if !matches!(status.state, ExecJobState::Running) {
+                return Json(ExecJobKillResponse {
+                    ok: false,
+                    job_id,
+                    message: "job is not running".to_string(),
+                })
+                .into_response();
+            }
+            if let Some(cancel_flag) = status.cancel_flag {
+                cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                state.exec_jobs.update(&job_id, |status| {
+                    status.message = "cancel requested".to_string();
+                });
+                Json(ExecJobKillResponse {
+                    ok: true,
+                    job_id,
+                    message: "cancel requested".to_string(),
+                })
+                .into_response()
+            } else {
+                Json(ExecJobKillResponse {
+                    ok: false,
+                    job_id,
+                    message: "job cannot be cancelled".to_string(),
+                })
+                .into_response()
+            }
+        }
+        Some(_) | None => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "not_found".into(),
+                reason: "no exec job matched the request".into(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// Sends stdin bytes to a running hostdo execution job.
+pub(super) async fn exec_job_send_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(job_id): AxumPath<String>,
+    Json(req): Json<ExecJobSendRequest>,
+) -> Response {
+    let identity = match require_session_identity(&state, &headers) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    match state.exec_jobs.get(&job_id) {
+        Some(status) if status.project == identity.project => {
+            if !matches!(status.state, ExecJobState::Running) {
+                return Json(ExecJobSendResponse {
+                    ok: false,
+                    job_id,
+                    message: "job is not running".to_string(),
+                })
+                .into_response();
+            }
+            if let Some(stdin_tx) = status.stdin_tx {
+                match stdin_tx.send(req.input.into_bytes()) {
+                    Ok(()) => Json(ExecJobSendResponse {
+                        ok: true,
+                        job_id,
+                        message: "input sent".to_string(),
+                    })
+                    .into_response(),
+                    Err(_) => Json(ExecJobSendResponse {
+                        ok: false,
+                        job_id,
+                        message: "job stdin is closed".to_string(),
+                    })
+                    .into_response(),
+                }
+            } else {
+                Json(ExecJobSendResponse {
+                    ok: false,
+                    job_id,
+                    message: "job does not accept stdin".to_string(),
+                })
+                .into_response()
+            }
+        }
         Some(_) | None => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -1032,14 +1322,17 @@ mod tests {
     use axum::{
         Json,
         body::to_bytes,
-        extract::{Path as AxumPath, State},
+        extract::{Path as AxumPath, Query, State},
         http::{HeaderMap, StatusCode},
         response::IntoResponse,
     };
     use std::collections::HashMap;
     use std::path::Path;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     use tokio::sync::mpsc;
 
     fn test_state_manager() -> StateManager {
@@ -1234,6 +1527,10 @@ mod tests {
             state: super::ExecJobState::Running,
             job_id: String::new(),
             project: project.to_string(),
+            container: Some("container-a".to_string()),
+            timeout_secs: 60,
+            argv: vec!["cargo".to_string(), "test".to_string()],
+            cwd: Some("/workspace".to_string()),
             phase: Some(super::ExecJobPhase::PullingImage),
             image: Some("rust".to_string()),
             message: "pulling image".to_string(),
@@ -1248,6 +1545,8 @@ mod tests {
             stdout: None,
             stderr: None,
             reason: None,
+            cancel_flag: None,
+            stdin_tx: None,
         }
     }
 
@@ -1570,6 +1869,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["state"], "running");
         assert_eq!(body["job_id"], inserted.job_id);
+        assert_eq!(body["timeout_secs"], 60);
         assert_eq!(body["phase"], "pulling_image");
         assert_eq!(body["image"], "rust");
         assert!(body.get("project").is_none());
@@ -1612,6 +1912,173 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn exec_jobs_list_handler_returns_project_jobs_only() {
+        let sessions = SessionRegistry::default();
+        sessions.insert(
+            "session-a".to_string(),
+            super::SessionIdentity {
+                project: "project-a".to_string(),
+                container_id: "container-a".to_string(),
+                mount_target: "/workspace".to_string(),
+            },
+        );
+        let registry = super::ExecJobRegistry::default();
+        let visible = registry.insert(job_status("project-a"));
+        let _hidden = registry.insert(job_status("project-b"));
+        let state = server_state(sessions, registry);
+
+        let response = super::exec_jobs_list_handler(
+            State(Arc::new(state)),
+            auth_headers("test_token", "session-a"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let jobs = body["jobs"].as_array().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0]["job_id"], visible.job_id);
+        assert_eq!(jobs[0]["timeout_secs"], 60);
+        assert_eq!(jobs[0]["argv"], serde_json::json!(["cargo", "test"]));
+    }
+
+    #[tokio::test]
+    async fn exec_job_output_handler_returns_captured_output() {
+        let sessions = SessionRegistry::default();
+        sessions.insert(
+            "session-a".to_string(),
+            super::SessionIdentity {
+                project: "project-a".to_string(),
+                container_id: "container-a".to_string(),
+                mount_target: "/workspace".to_string(),
+            },
+        );
+        let registry = super::ExecJobRegistry::default();
+        let inserted = registry.insert(job_status("project-a"));
+        registry.update(&inserted.job_id, |status| {
+            status.stdout = Some("out\n".to_string());
+            status.stderr = Some("err\n".to_string());
+        });
+        let state = server_state(sessions, registry);
+
+        let response = super::exec_job_output_handler(
+            State(Arc::new(state)),
+            auth_headers("test_token", "session-a"),
+            AxumPath(inserted.job_id),
+            Query(super::ExecJobOutputQuery {
+                stream: None,
+                tail: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["stdout"], "out\n");
+        assert_eq!(body["stderr"], "err\n");
+    }
+
+    #[tokio::test]
+    async fn exec_job_output_handler_filters_and_tails_streams() {
+        let sessions = SessionRegistry::default();
+        sessions.insert(
+            "session-a".to_string(),
+            super::SessionIdentity {
+                project: "project-a".to_string(),
+                container_id: "container-a".to_string(),
+                mount_target: "/workspace".to_string(),
+            },
+        );
+        let registry = super::ExecJobRegistry::default();
+        let inserted = registry.insert(job_status("project-a"));
+        registry.update(&inserted.job_id, |status| {
+            status.stdout = Some("one\ntwo\nthree\n".to_string());
+            status.stderr = Some("err-one\nerr-two\n".to_string());
+        });
+        let state = server_state(sessions, registry);
+
+        let response = super::exec_job_output_handler(
+            State(Arc::new(state)),
+            auth_headers("test_token", "session-a"),
+            AxumPath(inserted.job_id),
+            Query(super::ExecJobOutputQuery {
+                stream: Some("stdout".to_string()),
+                tail: Some(2),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["stdout"], "two\nthree\n");
+        assert_eq!(body["stderr"], "");
+    }
+
+    #[tokio::test]
+    async fn exec_job_kill_handler_sets_cancel_flag() {
+        let sessions = SessionRegistry::default();
+        sessions.insert(
+            "session-a".to_string(),
+            super::SessionIdentity {
+                project: "project-a".to_string(),
+                container_id: "container-a".to_string(),
+                mount_target: "/workspace".to_string(),
+            },
+        );
+        let registry = super::ExecJobRegistry::default();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let mut status = job_status("project-a");
+        status.cancel_flag = Some(cancel_flag.clone());
+        let inserted = registry.insert(status);
+        let state = server_state(sessions, registry);
+
+        let response = super::exec_job_kill_handler(
+            State(Arc::new(state)),
+            auth_headers("test_token", "session-a"),
+            AxumPath(inserted.job_id),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(cancel_flag.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn exec_job_send_handler_forwards_input_to_running_job() {
+        let sessions = SessionRegistry::default();
+        sessions.insert(
+            "session-a".to_string(),
+            super::SessionIdentity {
+                project: "project-a".to_string(),
+                container_id: "container-a".to_string(),
+                mount_target: "/workspace".to_string(),
+            },
+        );
+        let registry = super::ExecJobRegistry::default();
+        let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel();
+        let mut status = job_status("project-a");
+        status.stdin_tx = Some(stdin_tx);
+        let inserted = registry.insert(status);
+        let state = server_state(sessions, registry);
+
+        let response = super::exec_job_send_handler(
+            State(Arc::new(state)),
+            auth_headers("test_token", "session-a"),
+            AxumPath(inserted.job_id),
+            Json(super::ExecJobSendRequest {
+                input: "hello\n".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(stdin_rx.recv().await.unwrap(), b"hello\n".to_vec());
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::config::{self, Config, WorkspaceConfig};
@@ -260,9 +260,61 @@ pub async fn run_command_streaming<F>(
     env_vars: &HashMap<String, String>,
     timeout_secs: u64,
     cancel_flag: Arc<AtomicBool>,
+    on_output: F,
+) -> Result<ExecResult>
+where
+    F: FnMut(bool, String) + Send,
+{
+    run_command_streaming_with_start(
+        argv,
+        cwd,
+        env_vars,
+        timeout_secs,
+        cancel_flag,
+        || {},
+        on_output,
+    )
+    .await
+}
+
+pub async fn run_command_streaming_with_start<S, F>(
+    argv: &[String],
+    cwd: &Path,
+    env_vars: &HashMap<String, String>,
+    timeout_secs: u64,
+    cancel_flag: Arc<AtomicBool>,
+    on_start: S,
+    on_output: F,
+) -> Result<ExecResult>
+where
+    S: FnOnce() + Send,
+    F: FnMut(bool, String) + Send,
+{
+    run_command_streaming_with_input(
+        argv,
+        cwd,
+        env_vars,
+        timeout_secs,
+        cancel_flag,
+        None,
+        on_start,
+        on_output,
+    )
+    .await
+}
+
+pub async fn run_command_streaming_with_input<S, F>(
+    argv: &[String],
+    cwd: &Path,
+    env_vars: &HashMap<String, String>,
+    timeout_secs: u64,
+    cancel_flag: Arc<AtomicBool>,
+    stdin_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    on_start: S,
     mut on_output: F,
 ) -> Result<ExecResult>
 where
+    S: FnOnce() + Send,
     F: FnMut(bool, String) + Send,
 {
     anyhow::ensure!(!argv.is_empty(), "argv must not be empty");
@@ -273,10 +325,16 @@ where
     cmd.envs(env_vars);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    if stdin_rx.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    configure_process_group(&mut cmd);
 
     let started = Instant::now();
     let mut child = cmd.spawn()?;
-    run_spawned_child_streaming(
+    let stdin_task = start_stdin_writer(&mut child, stdin_rx);
+    on_start();
+    let result = run_spawned_child_streaming(
         &mut child,
         started,
         timeout_secs,
@@ -289,7 +347,9 @@ where
             }
         },
     )
-    .await
+    .await;
+    abort_stdin_task(stdin_task);
+    result
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,6 +429,7 @@ where
         .arg(image)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    configure_process_group(&mut cmd);
 
     let started = Instant::now();
     let mut child = cmd.spawn()?;
@@ -444,15 +505,19 @@ where
     }
     drop(line_tx);
 
+    let process_group_id = child_process_group_id(child);
+    let timeout = Duration::from_secs(timeout_secs);
     let mut stdout = String::new();
     let mut stderr = String::new();
     let status = loop {
         if cancel_flag.load(Ordering::SeqCst) {
-            let _ = child.kill().await;
+            terminate_child_process_tree(child, process_group_id).await;
+            abort_reader_tasks(&mut reader_tasks);
             anyhow::bail!("{label} cancelled");
         }
-        if started.elapsed() >= Duration::from_secs(timeout_secs) {
-            let _ = child.kill().await;
+        if started.elapsed() >= timeout {
+            terminate_child_process_tree(child, process_group_id).await;
+            abort_reader_tasks(&mut reader_tasks);
             anyhow::bail!("{label} timed out after {timeout_secs}s");
         }
         if let Some(status) = child.try_wait()? {
@@ -469,8 +534,31 @@ where
         }
     };
 
-    while let Some((is_stderr, line)) = line_rx.recv().await {
-        on_line(is_stderr, line, true, &mut stdout, &mut stderr);
+    terminate_process_group_gracefully(process_group_id);
+    let mut sent_sigkill = false;
+    loop {
+        if started.elapsed() >= timeout {
+            terminate_process_group_forcefully(process_group_id);
+            abort_reader_tasks(&mut reader_tasks);
+            anyhow::bail!("{label} timed out after {timeout_secs}s");
+        }
+
+        tokio::select! {
+            line = line_rx.recv() => {
+                let Some((is_stderr, line)) = line else {
+                    break;
+                };
+                on_line(is_stderr, line, true, &mut stdout, &mut stderr);
+            }
+            _ = tokio::time::sleep(Duration::from_millis(250)), if !sent_sigkill => {
+                terminate_process_group_forcefully(process_group_id);
+                sent_sigkill = true;
+            }
+            _ = tokio::time::sleep(Duration::from_secs(2)), if sent_sigkill => {
+                abort_reader_tasks(&mut reader_tasks);
+                break;
+            }
+        }
     }
     for task in reader_tasks {
         let _ = task.await;
@@ -482,6 +570,84 @@ where
         stderr,
         duration_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+fn configure_process_group(cmd: &mut tokio::process::Command) {
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            let rc = libc::setpgid(0, 0);
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    #[cfg(not(unix))]
+    let _ = cmd;
+}
+
+#[cfg(unix)]
+fn child_process_group_id(child: &tokio::process::Child) -> Option<i32> {
+    child.id().and_then(|pid| i32::try_from(pid).ok())
+}
+
+#[cfg(not(unix))]
+fn child_process_group_id(_: &tokio::process::Child) -> Option<i32> {
+    None
+}
+
+#[cfg(unix)]
+fn terminate_process_group(process_group_id: Option<i32>, signal: i32) {
+    if let Some(pgid) = process_group_id {
+        unsafe {
+            let _ = libc::kill(-pgid, signal);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(_: Option<i32>, _: i32) {}
+
+fn terminate_process_group_gracefully(process_group_id: Option<i32>) {
+    #[cfg(unix)]
+    terminate_process_group(process_group_id, libc::SIGTERM);
+    #[cfg(not(unix))]
+    let _ = process_group_id;
+}
+
+fn terminate_process_group_forcefully(process_group_id: Option<i32>) {
+    #[cfg(unix)]
+    terminate_process_group(process_group_id, libc::SIGKILL);
+    #[cfg(not(unix))]
+    let _ = process_group_id;
+}
+
+async fn terminate_child_process_tree(
+    child: &mut tokio::process::Child,
+    process_group_id: Option<i32>,
+) {
+    #[cfg(unix)]
+    if process_group_id.is_some() {
+        terminate_process_group_gracefully(process_group_id);
+        if tokio::time::timeout(Duration::from_millis(250), child.wait())
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        terminate_process_group_forcefully(process_group_id);
+    }
+
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+}
+
+fn abort_reader_tasks(reader_tasks: &mut Vec<tokio::task::JoinHandle<()>>) {
+    for task in reader_tasks.drain(..) {
+        task.abort();
+    }
 }
 
 async fn read_process_progress<R>(mut reader: R, is_stderr: bool, tx: mpsc::Sender<(bool, String)>)
@@ -677,20 +843,90 @@ pub async fn run_target_command_streaming<F>(
 where
     F: FnMut(bool, String) + Send,
 {
+    run_target_command_streaming_with_start(
+        target,
+        argv,
+        host_cwd,
+        env_vars,
+        timeout_secs,
+        workspace_host_path,
+        workspace_container_path,
+        runner_cwd,
+        cancel_flag,
+        || {},
+        on_output,
+    )
+    .await
+}
+
+pub async fn run_target_command_streaming_with_start<S, F>(
+    target: &ExecTarget,
+    argv: &[String],
+    host_cwd: &Path,
+    env_vars: &HashMap<String, String>,
+    timeout_secs: u64,
+    workspace_host_path: &Path,
+    workspace_container_path: &Path,
+    runner_cwd: &Path,
+    cancel_flag: Arc<AtomicBool>,
+    on_start: S,
+    on_output: F,
+) -> Result<ExecResult>
+where
+    S: FnOnce() + Send,
+    F: FnMut(bool, String) + Send,
+{
+    run_target_command_streaming_with_input(
+        target,
+        argv,
+        host_cwd,
+        env_vars,
+        timeout_secs,
+        workspace_host_path,
+        workspace_container_path,
+        runner_cwd,
+        cancel_flag,
+        None,
+        on_start,
+        on_output,
+    )
+    .await
+}
+
+pub async fn run_target_command_streaming_with_input<S, F>(
+    target: &ExecTarget,
+    argv: &[String],
+    host_cwd: &Path,
+    env_vars: &HashMap<String, String>,
+    timeout_secs: u64,
+    workspace_host_path: &Path,
+    workspace_container_path: &Path,
+    runner_cwd: &Path,
+    cancel_flag: Arc<AtomicBool>,
+    stdin_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    on_start: S,
+    on_output: F,
+) -> Result<ExecResult>
+where
+    S: FnOnce() + Send,
+    F: FnMut(bool, String) + Send,
+{
     match target {
         ExecTarget::Host => {
-            run_command_streaming(
+            run_command_streaming_with_input(
                 argv,
                 host_cwd,
                 env_vars,
                 timeout_secs,
                 cancel_flag,
+                stdin_rx,
+                on_start,
                 on_output,
             )
             .await
         }
         ExecTarget::DockerImage(image) => {
-            run_docker_command_streaming(
+            run_docker_command_streaming_with_input(
                 image,
                 argv,
                 env_vars,
@@ -699,6 +935,8 @@ where
                 workspace_container_path,
                 runner_cwd,
                 cancel_flag,
+                stdin_rx,
+                on_start,
                 on_output,
             )
             .await
@@ -739,9 +977,73 @@ pub async fn run_docker_command_streaming<F>(
     workspace_container_path: &Path,
     container_cwd: &Path,
     cancel_flag: Arc<AtomicBool>,
+    on_output: F,
+) -> Result<ExecResult>
+where
+    F: FnMut(bool, String) + Send,
+{
+    run_docker_command_streaming_with_start(
+        image,
+        argv,
+        env_vars,
+        timeout_secs,
+        workspace_host_path,
+        workspace_container_path,
+        container_cwd,
+        cancel_flag,
+        || {},
+        on_output,
+    )
+    .await
+}
+
+pub async fn run_docker_command_streaming_with_start<S, F>(
+    image: &str,
+    argv: &[String],
+    env_vars: &HashMap<String, String>,
+    timeout_secs: u64,
+    workspace_host_path: &Path,
+    workspace_container_path: &Path,
+    container_cwd: &Path,
+    cancel_flag: Arc<AtomicBool>,
+    on_start: S,
+    on_output: F,
+) -> Result<ExecResult>
+where
+    S: FnOnce() + Send,
+    F: FnMut(bool, String) + Send,
+{
+    run_docker_command_streaming_with_input(
+        image,
+        argv,
+        env_vars,
+        timeout_secs,
+        workspace_host_path,
+        workspace_container_path,
+        container_cwd,
+        cancel_flag,
+        None,
+        on_start,
+        on_output,
+    )
+    .await
+}
+
+pub async fn run_docker_command_streaming_with_input<S, F>(
+    image: &str,
+    argv: &[String],
+    env_vars: &HashMap<String, String>,
+    timeout_secs: u64,
+    workspace_host_path: &Path,
+    workspace_container_path: &Path,
+    container_cwd: &Path,
+    cancel_flag: Arc<AtomicBool>,
+    stdin_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    on_start: S,
     mut on_output: F,
 ) -> Result<ExecResult>
 where
+    S: FnOnce() + Send,
     F: FnMut(bool, String) + Send,
 {
     validate_image_name(image).map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -787,10 +1089,16 @@ where
     cmd.args(argv);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    if stdin_rx.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    configure_process_group(&mut cmd);
 
     let started = Instant::now();
     let mut child = cmd.spawn()?;
-    run_spawned_child_streaming(
+    let stdin_task = start_stdin_writer(&mut child, stdin_rx);
+    on_start();
+    let result = run_spawned_child_streaming(
         &mut child,
         started,
         timeout_secs,
@@ -803,7 +1111,31 @@ where
             }
         },
     )
-    .await
+    .await;
+    abort_stdin_task(stdin_task);
+    result
+}
+
+fn start_stdin_writer(
+    child: &mut tokio::process::Child,
+    stdin_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let mut stdin_rx = stdin_rx?;
+    let mut stdin = child.stdin.take()?;
+    Some(tokio::spawn(async move {
+        while let Some(bytes) = stdin_rx.recv().await {
+            if stdin.write_all(&bytes).await.is_err() {
+                break;
+            }
+            let _ = stdin.flush().await;
+        }
+    }))
+}
+
+fn abort_stdin_task(stdin_task: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(task) = stdin_task {
+        task.abort();
+    }
 }
 
 #[cfg(test)]
@@ -1105,5 +1437,134 @@ mod tests {
         assert!(seen_count < 260000);
         assert!(result.stdout.len() <= MAX_CAPTURE_BYTES);
         assert!(result.stderr.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_streaming_with_input_writes_to_child_stdin() {
+        let (stdin_tx, stdin_rx) = mpsc::unbounded_channel();
+        let result = run_command_streaming_with_input(
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                "IFS= read -r line; printf 'got:%s\\n' \"$line\"".to_string(),
+            ],
+            Path::new("."),
+            &HashMap::new(),
+            5,
+            Arc::new(AtomicBool::new(false)),
+            Some(stdin_rx),
+            move || {
+                stdin_tx.send(b"hello\n".to_vec()).unwrap();
+            },
+            |_, _| {},
+        )
+        .await
+        .expect("stream command with input");
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "got:hello\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_streaming_cleans_descendants_that_hold_pipes_after_parent_exit() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let pid_file = tempdir.path().join("child.pid");
+        let command = format!(
+            "sleep 30 & echo $! > {}; printf 'done\\n'",
+            pid_file.display()
+        );
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            run_command_streaming(
+                &["sh".to_string(), "-c".to_string(), command],
+                Path::new("."),
+                &HashMap::new(),
+                1,
+                Arc::new(AtomicBool::new(false)),
+                |_, _| {},
+            ),
+        )
+        .await
+        .expect("command should not hang on descendant-held pipes")
+        .expect("stream command");
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "done\n");
+
+        let child_pid = std::fs::read_to_string(&pid_file)
+            .expect("child pid written")
+            .trim()
+            .parse::<i32>()
+            .expect("child pid is numeric");
+        for _ in 0..50 {
+            if !process_exists(child_pid) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        panic!("descendant process {child_pid} survived parent exit cleanup");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_streaming_cancel_kills_descendant_processes() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let pid_file = tempdir.path().join("child.pid");
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let task_cancel_flag = cancel_flag.clone();
+
+        let task = tokio::spawn(async move {
+            run_command_streaming(
+                &[
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    format!("sleep 30 & echo $! > {}; wait", pid_file.display()),
+                ],
+                Path::new("."),
+                &HashMap::new(),
+                30,
+                task_cancel_flag,
+                |_, _| {},
+            )
+            .await
+        });
+
+        let mut child_pid = None;
+        for _ in 0..50 {
+            let candidate = tempdir.path().join("child.pid");
+            if let Ok(contents) = std::fs::read_to_string(&candidate)
+                && let Ok(pid) = contents.trim().parse::<i32>()
+            {
+                child_pid = Some(pid);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let child_pid = child_pid.expect("child pid written");
+
+        cancel_flag.store(true, Ordering::SeqCst);
+        let result = task.await.expect("join command task");
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+
+        for _ in 0..50 {
+            if !process_exists(child_pid) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        panic!("descendant process {child_pid} survived cancellation");
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: i32) -> bool {
+        unsafe {
+            libc::kill(pid, 0) == 0
+                || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        }
     }
 }

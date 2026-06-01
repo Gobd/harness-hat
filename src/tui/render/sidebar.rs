@@ -149,6 +149,8 @@ pub(crate) fn render_activity_detail(
         .border_style(Style::default().fg(tone(Color::Cyan)));
 
     let status_color = activity_status_color(&activity.state);
+    let activity_focused = !dimmed && app.focus == Focus::Activity;
+    let in_scroll_mode = activity_focused && app.scroll_mode;
     let mut lines = Vec::new();
     lines.push(Line::from(""));
     append_activity_summary_lines(&mut lines, activity, &tone);
@@ -240,12 +242,25 @@ pub(crate) fn render_activity_detail(
     if output_height > 0 {
         activity.terminal.resize(chunks[1].height, chunks[1].width);
         let mut term = activity.terminal.term.lock();
-        render_term_buffer(frame, chunks[1], &mut *term, dimmed, false, false, 0);
+        render_term_buffer(
+            frame,
+            chunks[1],
+            &mut *term,
+            dimmed,
+            false,
+            in_scroll_mode,
+            app.terminal_scroll,
+        );
     }
     if footer_height > 0 {
+        let footer = if in_scroll_mode {
+            "  SCROLL: [↑↓/jk]line  [PgUp/PgDn]page  [g/G]top/bottom  [Esc/q]exit scroll"
+        } else {
+            "  [^C] Cancel request   [^S] Scroll   [Esc/^B] Back to sidebar"
+        };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "  [^C] Cancel request   [Esc/^B] Back to sidebar",
+                footer,
                 Style::default().fg(tone(Color::DarkGray)),
             ))),
             chunks[2],
@@ -592,7 +607,7 @@ fn activity_status_color(state: &crate::activity::ActivityState) -> Color {
     match state {
         crate::activity::ActivityState::PendingApproval => Color::Yellow,
         crate::activity::ActivityState::PullingImage => Color::Yellow,
-        crate::activity::ActivityState::Running => Color::Yellow,
+        crate::activity::ActivityState::Running => Color::Cyan,
         crate::activity::ActivityState::Forwarding => Color::Yellow,
         crate::activity::ActivityState::Complete => Color::Green,
         crate::activity::ActivityState::Failed => Color::Red,
@@ -802,7 +817,7 @@ mod tests {
         );
         assert_eq!(
             activity_status_color(&ActivityState::Running),
-            Color::Yellow
+            Color::Cyan
         );
         assert_eq!(
             activity_status_color(&ActivityState::Forwarding),

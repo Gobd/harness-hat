@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument;
 
 use crate::activity::{Activity, ActivityEvent, ActivityKind, ActivityState};
@@ -296,13 +296,19 @@ pub(super) async fn exec_handler(
             runner_mount_target: runner_mount_target.clone(),
             runner_cwd: runner_cwd.clone(),
             audit_project: identity_project.clone(),
+            audit_container: identity_container_id.clone(),
             audit_cwd: req.cwd.clone(),
             decision_kind: DecisionKind::Auto,
             decision_label: "auto".to_string(),
             allow_background_job: supports_exec_jobs,
             activity_id: activity_id.clone(),
             cancel_flag: cancel_flag.clone(),
+            job_id: None,
+            stdin_rx: std::sync::Mutex::new(None),
         };
+        if req.detach {
+            return start_execution_job(run);
+        }
         return async move { execute_or_start_job(run).await }
             .instrument(span_rec)
             .await;
@@ -353,12 +359,15 @@ pub(super) async fn exec_handler(
                 runner_mount_target: runner_mount_target.clone(),
                 runner_cwd: runner_cwd.clone(),
                 audit_project: identity_project.clone(),
+                audit_container: identity_container_id.clone(),
                 audit_cwd: req.cwd.clone(),
                 decision_kind: DecisionKind::Approved,
                 decision_label: "approved".to_string(),
                 allow_background_job: true,
                 activity_id: activity_id.clone(),
                 cancel_flag: cancel_flag.clone(),
+                job_id: None,
+                stdin_rx: std::sync::Mutex::new(None),
             },
             response_rx,
             identity_project.clone(),
@@ -442,6 +451,7 @@ pub(super) async fn exec_handler(
                     runner_mount_target: runner_mount_target.clone(),
                     runner_cwd: runner_cwd.clone(),
                     audit_project: identity_project.clone(),
+                    audit_container: identity_container_id.clone(),
                     audit_cwd: req.cwd.clone(),
                     decision_kind: if remember {
                         DecisionKind::Remembered
@@ -452,8 +462,14 @@ pub(super) async fn exec_handler(
                     allow_background_job: supports_exec_jobs,
                     activity_id: activity_id.clone(),
                     cancel_flag: cancel_flag.clone(),
+                    job_id: None,
+                    stdin_rx: std::sync::Mutex::new(None),
                 };
-                execute_or_start_job(run).await
+                if req.detach {
+                    start_execution_job(run)
+                } else {
+                    execute_or_start_job(run).await
+                }
             }
         }
     }
@@ -472,19 +488,28 @@ struct CommandRun {
     runner_mount_target: PathBuf,
     runner_cwd: PathBuf,
     audit_project: String,
+    audit_container: String,
     audit_cwd: String,
     decision_kind: DecisionKind,
     decision_label: String,
     allow_background_job: bool,
     activity_id: String,
     cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    job_id: Option<String>,
+    stdin_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<Vec<u8>>>>,
 }
 
 impl CommandRun {
     async fn execute(&self) -> anyhow::Result<exec::ExecResult> {
         let activity_tx = self.state.activity_tx.clone();
         let activity_id = self.activity_id.clone();
-        exec::run_target_command_streaming(
+        let exec_jobs = self.state.exec_jobs.clone();
+        let job_id = self.job_id.clone();
+        let start_registry = self.state.exec_jobs.clone();
+        let start_job_id = self.job_id.clone();
+        let start_argv = self.argv.clone();
+        let stdin_rx = self.stdin_rx.lock().ok().and_then(|mut rx| rx.take());
+        exec::run_target_command_streaming_with_input(
             &self.target,
             &self.argv,
             &self.host_cwd,
@@ -494,15 +519,48 @@ impl CommandRun {
             &self.runner_mount_target,
             &self.runner_cwd,
             self.cancel_flag.clone(),
+            stdin_rx,
+            move || {
+                if let Some(job_id) = &start_job_id {
+                    start_registry.update(job_id, |status| {
+                        status.state = ExecJobState::Running;
+                        status.phase = Some(ExecJobPhase::RunningCommand);
+                        status.message = format!("Running {}.", start_argv.join(" "));
+                        status.poll_after_ms = Some(1000);
+                    });
+                }
+            },
             move |is_stderr, line| {
                 let stream = if is_stderr { "stderr" } else { "stdout" };
                 let _ = activity_tx.send(ActivityEvent::Line {
                     id: activity_id.clone(),
                     line: format!("{stream}: {line}"),
                 });
+                if let Some(job_id) = &job_id {
+                    exec_jobs.update(job_id, |status| {
+                        let output = if is_stderr {
+                            &mut status.stderr
+                        } else {
+                            &mut status.stdout
+                        };
+                        append_job_output(output, &line);
+                    });
+                }
             },
         )
         .await
+    }
+
+    fn with_job_id_and_stdin(
+        mut self,
+        job_id: String,
+        stdin_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    ) -> Self {
+        self.job_id = Some(job_id);
+        if let Ok(mut existing) = self.stdin_rx.lock() {
+            *existing = Some(stdin_rx);
+        }
+        self
     }
 }
 
@@ -526,6 +584,49 @@ async fn execute_or_start_job(run: CommandRun) -> Response {
     }
 
     execute_immediate(run).await
+}
+
+fn start_execution_job(run: CommandRun) -> Response {
+    let phase = match &run.target {
+        exec::ExecTarget::DockerImage(_) => Some(ExecJobPhase::CheckingImage),
+        exec::ExecTarget::Host => Some(ExecJobPhase::StartingCommand),
+    };
+    let (stdin_tx, stdin_rx) = mpsc::unbounded_channel();
+    let status = run.state.exec_jobs.insert(ExecJobStatus {
+        state: ExecJobState::Running,
+        job_id: String::new(),
+        project: run.audit_project.clone(),
+        container: Some(run.audit_container.clone()),
+        timeout_secs: run.timeout_secs,
+        argv: run.argv.clone(),
+        cwd: Some(run.host_cwd.display().to_string()),
+        phase,
+        image: run.target.image().map(str::to_string),
+        message: format!("Starting {}.", run.argv.join(" ")),
+        progress: None,
+        poll_after_ms: Some(1000),
+        exit_code: None,
+        stdout: Some(String::new()),
+        stderr: Some(String::new()),
+        reason: None,
+        cancel_flag: Some(run.cancel_flag.clone()),
+        stdin_tx: Some(stdin_tx),
+    });
+    let job_id = status.job_id.clone();
+    let registry = run.state.exec_jobs.clone();
+    let decision_kind = run.decision_kind.clone();
+    let decision_label = run.decision_label.clone();
+    let run = run.with_job_id_and_stdin(job_id.clone(), stdin_rx);
+    let span = tracing::Span::current();
+
+    tokio::spawn(
+        async move {
+            run_job_after_approval(run, &registry, &job_id, decision_kind, &decision_label).await;
+        }
+        .instrument(span),
+    );
+
+    (StatusCode::ACCEPTED, Json(status)).into_response()
 }
 
 async fn pull_image_then_execute(run: CommandRun, image: String) -> Response {
@@ -623,10 +724,15 @@ fn start_image_pull_job(run: CommandRun, image: String) -> Response {
         state: ActivityState::PullingImage,
         status: Some(format!("pulling Docker image '{image}'")),
     });
+    let (stdin_tx, stdin_rx) = mpsc::unbounded_channel();
     let status = run.state.exec_jobs.insert(ExecJobStatus {
         state: ExecJobState::Running,
         job_id: String::new(),
         project: run.audit_project.clone(),
+        container: Some(run.audit_container.clone()),
+        timeout_secs: run.timeout_secs,
+        argv: run.argv.clone(),
+        cwd: Some(run.host_cwd.display().to_string()),
         phase: Some(ExecJobPhase::PullingImage),
         image: Some(image.clone()),
         message: format!("Docker image '{image}' is not present locally; pulling it now."),
@@ -638,11 +744,14 @@ fn start_image_pull_job(run: CommandRun, image: String) -> Response {
         }),
         poll_after_ms: Some(1000),
         exit_code: None,
-        stdout: None,
-        stderr: None,
+        stdout: Some(String::new()),
+        stderr: Some(String::new()),
         reason: None,
+        cancel_flag: Some(run.cancel_flag.clone()),
+        stdin_tx: Some(stdin_tx),
     });
     let job_id = status.job_id.clone();
+    let run = run.with_job_id_and_stdin(job_id.clone(), stdin_rx);
     let registry = run.state.exec_jobs.clone();
     let activity_tx = run.state.activity_tx.clone();
     let activity_id = run.activity_id.clone();
@@ -687,9 +796,9 @@ fn start_image_pull_job(run: CommandRun, image: String) -> Response {
                 Ok(result) if result.exit_code == 0 => {
                     registry.update(&job_id, |status| {
                         status.state = ExecJobState::Running;
-                        status.phase = Some(ExecJobPhase::RunningCommand);
+                        status.phase = Some(ExecJobPhase::StartingCommand);
                         status.message =
-                            format!("Image '{image}' is ready; running {}.", run.argv.join(" "));
+                            format!("Image '{image}' is ready; starting {}.", run.argv.join(" "));
                         status.progress = None;
                         status.poll_after_ms = Some(1000);
                     });
@@ -727,6 +836,8 @@ fn start_image_pull_job(run: CommandRun, image: String) -> Response {
                         status.stdout = Some(result.stdout);
                         status.stderr = Some(result.stderr);
                         status.reason = None;
+                        status.cancel_flag = None;
+                        status.stdin_tx = None;
                     });
                     finish_activity(
                         &run,
@@ -754,21 +865,29 @@ fn start_approval_wait_job(
     audit_cwd: String,
     exec_argv: Vec<String>,
 ) -> Response {
+    let (stdin_tx, stdin_rx) = mpsc::unbounded_channel();
     let status = run.state.exec_jobs.insert(ExecJobStatus {
         state: ExecJobState::Running,
         job_id: String::new(),
         project: run.audit_project.clone(),
+        container: Some(run.audit_container.clone()),
+        timeout_secs: run.timeout_secs,
+        argv: run.argv.clone(),
+        cwd: Some(run.host_cwd.display().to_string()),
         phase: Some(ExecJobPhase::PendingApproval),
         image: run.target.image().map(str::to_string),
         message: "Waiting for developer approval.".to_string(),
         progress: None,
         poll_after_ms: Some(1000),
         exit_code: None,
-        stdout: None,
-        stderr: None,
+        stdout: Some(String::new()),
+        stderr: Some(String::new()),
         reason: None,
+        cancel_flag: Some(run.cancel_flag.clone()),
+        stdin_tx: Some(stdin_tx),
     });
     let job_id = status.job_id.clone();
+    let run = run.with_job_id_and_stdin(job_id.clone(), stdin_rx);
     let registry = run.state.exec_jobs.clone();
     let state = run.state.clone();
     let activity_id = run.activity_id.clone();
@@ -885,8 +1004,10 @@ async fn run_job_after_approval(
                     status.state = ExecJobState::Running;
                     status.phase = Some(ExecJobPhase::PullingImage);
                     status.image = Some(image.clone());
-                    status.message =
-                        format!("Developer approved request; pulling Docker image '{image}'.");
+                    status.message = format!(
+                        "{}; pulling Docker image '{image}'.",
+                        job_decision_message(decision_label)
+                    );
                     status.progress = Some(ExecJobProgress {
                         kind: "indeterminate".to_string(),
                         id: None,
@@ -961,9 +1082,10 @@ async fn run_job_after_approval(
     });
     registry.update(job_id, |status| {
         status.state = ExecJobState::Running;
-        status.phase = Some(ExecJobPhase::RunningCommand);
+        status.phase = Some(ExecJobPhase::StartingCommand);
         status.message = format!(
-            "Developer approved request; running {}.",
+            "{}; starting {}.",
+            job_decision_message(decision_label),
             run.argv.join(" ")
         );
         status.progress = None;
@@ -984,6 +1106,8 @@ async fn run_job_after_approval(
                 status.stdout = Some(result.stdout.clone());
                 status.stderr = Some(result.stderr.clone());
                 status.reason = None;
+                status.cancel_flag = None;
+                status.stdin_tx = None;
             });
             finish_activity(
                 &run,
@@ -1093,7 +1217,34 @@ fn set_job_failed(registry: &crate::server::ExecJobRegistry, job_id: &str, reaso
         status.progress = None;
         status.poll_after_ms = None;
         status.reason = Some(reason);
+        status.cancel_flag = None;
+        status.stdin_tx = None;
     });
+}
+
+fn job_decision_message(decision_label: &str) -> &'static str {
+    match decision_label {
+        "auto" => "Auto-approved request",
+        "remembered" => "Remembered approval",
+        "approved" => "Developer approved request",
+        _ => "Approved request",
+    }
+}
+
+const EXEC_JOB_CAPTURE_BYTES: usize = 1024 * 1024;
+
+fn append_job_output(output: &mut Option<String>, line: &str) {
+    let buf = output.get_or_insert_with(String::new);
+    if buf.len() >= EXEC_JOB_CAPTURE_BYTES {
+        return;
+    }
+    let remaining = EXEC_JOB_CAPTURE_BYTES - buf.len();
+    if line.len() < remaining {
+        buf.push_str(line);
+        buf.push('\n');
+    } else {
+        buf.push_str(&line[..remaining.min(line.len())]);
+    }
 }
 
 fn pull_failure_reason(result: &exec::ExecResult) -> String {

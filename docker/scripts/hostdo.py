@@ -12,9 +12,13 @@ Environment variables:
   HARNESS_HAT_SESSION_TOKEN  Per-session token injected by harness-hat     (required)
 
 Usage:
-  hostdo <command> [args...]
-  hostdo --image <docker-image> <command> [args...]
-  hostdo --timeout <seconds> <command> [args...]
+  hostdo run [--image <docker-image>] [--timeout <seconds>] <command> [args...]
+  hostdo list [--running] [--json]
+  hostdo status <job-id>
+  hostdo tail <job-id> [--rows <lines>|--all] [--stdout|--stderr] [--json]
+  hostdo send [--no-newline] <job-id> [text...]
+  hostdo stop <job-id>
+  hostdo --help
 
 Exit code mirrors the executed command; exits 1 on infrastructure errors.
 
@@ -31,7 +35,7 @@ import urllib.parse
 
 # 6-minute timeout: 5-minute approval window + headroom for slow commands.
 _TIMEOUT = 360
-_APPROVAL_WAIT_NOTICE_SECS = 20
+_APPROVAL_WAIT_NOTICE_SECS = 10
 
 _HELP_TEXT = """hostdo — harness-hat container-side command bridge
 
@@ -39,15 +43,42 @@ Routes commands through the harness-hat host execution server for policy
 enforcement and developer approval.
 
 Usage:
-  hostdo <command> [args...]
-  hostdo --image <docker-image> <command> [args...]
-  hostdo --image=<docker-image> <command> [args...]
-  hostdo --timeout <seconds> <command> [args...]
-  hostdo --timeout=<seconds> <command> [args...]
-  hostdo --image <docker-image> --timeout <seconds> <command> [args...]
+  hostdo run [--image <docker-image>] [--timeout <seconds>] <command> [args...]
+  hostdo list [--running] [--json]
+  hostdo status <job-id>
+  hostdo tail <job-id> [--rows <lines>|--all] [--stdout|--stderr] [--json]
+  hostdo send [--no-newline] <job-id> [text...]
+  hostdo stop <job-id>
   hostdo --help
 
 Options:
+  run
+      Start a hostdo command as a tracked job. This waits for developer approval
+      when needed, then prints the job id once the command starts.
+
+  list
+      List tracked hostdo jobs visible to this workspace.
+      Add --running to show only running jobs.
+      Add --json to print structured output.
+
+  status <job-id>
+      Print JSON status for a tracked hostdo job.
+
+  tail <job-id> [--rows <lines>|--all] [--stdout|--stderr] [--json]
+      Print captured output for a tracked hostdo job. Defaults to the last
+      24 lines. Use --all for full output and --stdout or --stderr to select
+      one stream. Add --json to print the full API response.
+
+  send [--no-newline] <job-id> [text...]
+      Send input to a tracked hostdo job. Text arguments are joined with spaces
+      and a trailing newline is added unless --no-newline is set. If no text is
+      supplied, stdin is forwarded as-is.
+      Prints JSON with ok/job_id/message.
+
+  stop <job-id>
+      Request cancellation for a tracked hostdo job.
+      Prints JSON with ok/job_id/message.
+
   --image <docker-image>
       Run the command in a short-lived Docker runner instead of directly on
       the host.
@@ -56,20 +87,33 @@ Options:
       Request a command timeout in seconds. The manager may cap or deny this
       based on its configured limits and matching hostdo rules.
 
-  --help, -h
+  --help
       Show this help text and exit.
 
 Host-side commands:
-  - Use `hostdo ...` when you need host-side build/package tooling such as
+  - Use `hostdo run ...` when you need host-side build/package tooling such as
     cargo, npm, pnpm, yarn, go, make, pytest, or similar commands.
-  - Examples: `hostdo cargo test`, `hostdo npm install`,
-    `hostdo go test ./...`.
-  - Only use `hostdo --image <docker-image> ...` when the user explicitly asks
+  - Examples: `hostdo run cargo test`, `hostdo run npm install`,
+    `hostdo run go test ./...`.
+  - Only use `hostdo run --image <docker-image> ...` when the user explicitly asks
     you to run against a Docker image or containerized runner.
-  - `hostdo --image` runs a command in a short-lived Docker runner instead of
+  - `hostdo run --image` runs a command in a short-lived Docker runner instead of
     directly on the host.
-  - Examples: `hostdo --image node:20 npm test`,
-    `hostdo --image rust:1.88 cargo test`.
+  - Examples: `hostdo run --image node:20 npm test`,
+    `hostdo run --image rust:1.88 cargo test`.
+  - Use `hostdo run ...` when command output needs to remain available after
+    launch, when you need to check status separately, or when you expect to
+    interact with the command over stdin.
+  - `hostdo run ...` waits for approval and command startup, then prints a job
+    id. Use `hostdo status <job-id>`, `hostdo tail <job-id>`, and
+    `hostdo stop <job-id>` to inspect or stop it.
+  - Use `hostdo tail <job-id> --rows <lines>` to inspect recent output, and
+    add `--stdout` or `--stderr` to select one stream.
+  - Use `hostdo tail <job-id> --all` to read full captured output.
+  - Use `hostdo send <job-id> "text"` to send one input line, or pipe data into
+    `hostdo send <job-id>` to forward stdin as-is.
+  - Use `hostdo list` to see tracked jobs for this workspace.
+  - Use `hostdo list --running` to show only currently running jobs.
   - `hostdo` requests are policy checked against the `[hostdo]` rules below
     and may prompt the developer.
   - Read this workspace's `harness-rules.toml` for the current allowlisted
@@ -90,22 +134,22 @@ Rule model:
 
   Passthrough command (exact argv match, auto-approved):
     [[hostdo.commands]]
-    argv = ["cargo", "test"]  # run inside container with `hostdo cargo test`
+    argv = ["cargo", "test"]  # run inside container with `hostdo run cargo test`
     cwd = "$WORKSPACE"        # execution cwd only, not part of approval matching
     timeout_secs = 60
     approval_mode = "auto"
 
   Short-lived Docker runner (exact argv + image match, auto-approved):
     [[hostdo.commands]]
-    argv = ["npm", "test"]    # run with `hostdo --image node:20 npm test`
+    argv = ["npm", "test"]    # run with `hostdo run --image node:20 npm test`
     image = "node:20"
     cwd = "$WORKSPACE"
     timeout_secs = 60
     approval_mode = "auto"
 
-  Command alias (agent sends `hostdo tests`, expands server-side):
+  Command alias (agent sends `hostdo run tests`, expands server-side):
     [hostdo.command_aliases]
-    tests = "cargo test"  # run inside container with `hostdo tests`
+    tests = "cargo test"  # run inside container with `hostdo run tests`
     build = { cmd = "cargo build --release", cwd = "$WORKSPACE" }
 
   $WORKSPACE = workspace path on the host.
@@ -126,7 +170,7 @@ Notes:
 
 def _print_usage(stream) -> None:
     print(
-        "usage: hostdo [--image <docker-image>] [--timeout <seconds>] <command> [args...]",
+        "usage: hostdo <run|list|status|tail|send|stop> ...",
         file=stream,
     )
 
@@ -285,6 +329,92 @@ def _exit_for_http_error(exc: urllib.error.HTTPError) -> None:
     sys.exit(1)
 
 
+def _auth_headers(token: str, session_token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "x-harness-hat-session-token": session_token,
+    }
+
+
+def _json_request(
+    opener: urllib.request.OpenerDirector,
+    base_url: str,
+    method: str,
+    path: str,
+    token: str,
+    session_token: str,
+    body_data=None,
+    timeout: int = 30,
+) -> dict:
+    data = None
+    headers = _auth_headers(token, session_token)
+    if body_data is not None:
+        data = json.dumps(body_data).encode()
+        headers["Content-Type"] = "application/json"
+    if path == "/exec":
+        headers["X-Hostdo-Pid"] = str(os.getpid())
+        headers["X-Hostdo-Protocol"] = "jobs"
+    req = urllib.request.Request(
+        f"{base_url}{path}",
+        data=data,
+        headers=headers,
+        method=method,
+    )
+    with opener.open(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def _json_request_with_fallback(
+    opener: urllib.request.OpenerDirector,
+    base_url: str,
+    method: str,
+    path: str,
+    token: str,
+    session_token: str,
+    body_data=None,
+    timeout: int = 30,
+) -> tuple[dict, str]:
+    last_err = None
+    attempted = []
+    for candidate_base in _candidate_base_urls(base_url):
+        attempted.append(candidate_base)
+        try:
+            return (
+                _json_request(
+                    opener,
+                    candidate_base,
+                    method,
+                    path,
+                    token,
+                    session_token,
+                    body_data,
+                    timeout,
+                ),
+                candidate_base,
+            )
+        except urllib.error.HTTPError as exc:
+            _exit_for_http_error(exc)
+        except urllib.error.URLError as exc:
+            last_err = exc
+            continue
+        except TimeoutError:
+            print("hostdo: request timed out", file=sys.stderr)
+            sys.exit(1)
+
+    reason = getattr(last_err, "reason", last_err)
+    print(f"hostdo: request failed: {reason}", file=sys.stderr)
+    print(
+        "  Is harness-hat running? Is HARNESS_HAT_URL correct? "
+        f"({base_url})",
+        file=sys.stderr,
+    )
+    if len(attempted) > 1:
+        print("  Tried endpoints:", file=sys.stderr)
+        for u in attempted:
+            print(f"    - {u}", file=sys.stderr)
+    sys.exit(1)
+
+
 def _emit_job_message(data: dict, last_message):
     message = data.get("message", "")
     if message and message != last_message:
@@ -396,9 +526,397 @@ def _poll_exec_job(
             sys.exit(1)
 
 
+def _poll_exec_job_until_started(
+    opener: urllib.request.OpenerDirector,
+    base_url: str,
+    job_id: str,
+    token: str,
+    session_token: str,
+    initial: dict,
+) -> dict:
+    data = initial
+    last_message = None
+    consecutive_poll_errors = 0
+    approval_wait_started_at = None
+    last_approval_notice_secs = None
+
+    while True:
+        state = data.get("state")
+        phase = data.get("phase")
+        if state == "complete" or (state == "running" and phase == "running_command"):
+            return data
+        if state == "failed":
+            reason = data.get("reason") or data.get("message") or "execution failed"
+            print(f"hostdo: failed — {reason}", file=sys.stderr)
+            sys.exit(1)
+        if state != "running":
+            print(f"hostdo: failed — unexpected job state: {state}", file=sys.stderr)
+            sys.exit(1)
+
+        approval_wait_started_at, last_approval_notice_secs = _emit_approval_wait_message(
+            data,
+            approval_wait_started_at,
+            last_approval_notice_secs,
+        )
+        if phase != "pending_approval":
+            approval_wait_started_at = None
+            last_approval_notice_secs = None
+            last_message = _emit_job_message(data, last_message)
+        poll_after_ms = int(data.get("poll_after_ms", 1000))
+        time.sleep(max(poll_after_ms, 100) / 1000)
+
+        try:
+            data = _json_request(
+                opener,
+                base_url,
+                "GET",
+                f"/exec/jobs/{urllib.parse.quote(job_id, safe='')}",
+                token,
+                session_token,
+                timeout=30,
+            )
+            consecutive_poll_errors = 0
+        except urllib.error.HTTPError as exc:
+            _exit_for_http_error(exc)
+        except urllib.error.URLError as exc:
+            consecutive_poll_errors += 1
+            reason = getattr(exc, "reason", exc)
+            if consecutive_poll_errors <= 3:
+                print(
+                    f"hostdo: waiting for exec job status after polling error: {reason}",
+                    file=sys.stderr,
+                )
+                continue
+            print(f"hostdo: request failed while polling exec job: {reason}", file=sys.stderr)
+            sys.exit(1)
+        except TimeoutError:
+            consecutive_poll_errors += 1
+            if consecutive_poll_errors <= 3:
+                print(
+                    "hostdo: waiting for exec job status after polling timeout",
+                    file=sys.stderr,
+                )
+                continue
+            print("hostdo: request timed out while polling exec job", file=sys.stderr)
+            sys.exit(1)
+
+
+def _print_job_id(data: dict) -> None:
+    job_id = data.get("job_id", "")
+    if not job_id:
+        print("hostdo: failed — response did not include a job id", file=sys.stderr)
+        sys.exit(1)
+    print(job_id)
+
+
+def _print_jobs_table(data: dict) -> None:
+    jobs = data.get("jobs", [])
+    print("JOB_ID\tCONTAINER\tSTATE\tPHASE\tTIMEOUT\tEXIT\tCOMMAND")
+    for job in jobs:
+        job_id = job.get("job_id", "")
+        container = job.get("container", "") or "-"
+        state = job.get("state", "")
+        phase = job.get("phase", "") or "-"
+        timeout_secs = job.get("timeout_secs")
+        timeout_text = "-" if timeout_secs is None else f"{timeout_secs}s"
+        exit_code = job.get("exit_code")
+        exit_text = "-" if exit_code is None else str(exit_code)
+        argv = " ".join(job.get("argv", []))
+        print(
+            f"{job_id}\t{container}\t{state}\t{phase}\t{timeout_text}\t{exit_text}\t{argv}"
+        )
+
+
+def _filter_jobs_running(data: dict) -> dict:
+    jobs = data.get("jobs", [])
+    filtered = [job for job in jobs if job.get("state") == "running"]
+    out = dict(data)
+    out["jobs"] = filtered
+    return out
+
+
+def _print_job_output(data: dict, selected_stream=None) -> None:
+    stdout = data.get("stdout", "")
+    stderr = data.get("stderr", "")
+    if selected_stream == "stdout":
+        sys.stdout.write(stdout)
+        sys.stdout.flush()
+        return
+    if selected_stream == "stderr":
+        sys.stdout.write(stderr)
+        sys.stdout.flush()
+        return
+    if stdout:
+        sys.stdout.write(stdout)
+        sys.stdout.flush()
+    if stderr:
+        sys.stderr.write(stderr)
+        sys.stderr.flush()
+
+
+def _parse_tail_args(argv: list[str]):
+    stream = None
+    rows = 24
+    include_all = False
+    json_mode = False
+    job_id = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--json":
+            json_mode = True
+            i += 1
+            continue
+        if arg == "--stdout":
+            if stream is not None:
+                print("hostdo: choose only one of --stdout or --stderr", file=sys.stderr)
+                sys.exit(1)
+            stream = "stdout"
+            i += 1
+            continue
+        if arg == "--stderr":
+            if stream is not None:
+                print("hostdo: choose only one of --stdout or --stderr", file=sys.stderr)
+                sys.exit(1)
+            stream = "stderr"
+            i += 1
+            continue
+        if arg == "--all":
+            include_all = True
+            i += 1
+            continue
+        if arg == "--rows":
+            if i + 1 >= len(argv):
+                print("hostdo: --rows requires a line count", file=sys.stderr)
+                sys.exit(1)
+            rows = _parse_positive_int(argv[i + 1], "--rows")
+            i += 2
+            continue
+        if arg.startswith("--rows="):
+            rows = _parse_positive_int(arg.split("=", 1)[1], "--rows")
+            i += 1
+            continue
+        if arg.startswith("-"):
+            print(f"hostdo: unknown tail option: {arg}", file=sys.stderr)
+            sys.exit(1)
+        if job_id is not None:
+            print("hostdo: tail requires exactly one job id", file=sys.stderr)
+            sys.exit(1)
+        job_id = arg
+        i += 1
+
+    if job_id is None:
+        print("hostdo: tail requires exactly one job id", file=sys.stderr)
+        sys.exit(1)
+    tail = None if include_all else rows
+    return job_id, stream, tail, json_mode
+
+
+def _tail_job_output(
+    opener: urllib.request.OpenerDirector,
+    base_url: str,
+    token: str,
+    session_token: str,
+    argv: list[str],
+) -> None:
+    job_id, stream, tail, json_mode = _parse_tail_args(argv)
+    query = {}
+    if stream is not None:
+        query["stream"] = stream
+    if tail is not None:
+        query["tail"] = str(tail)
+    suffix = ""
+    if query:
+        suffix = "?" + urllib.parse.urlencode(query)
+    quoted_job_id = urllib.parse.quote(job_id, safe="")
+    data, _ = _json_request_with_fallback(
+        opener,
+        base_url,
+        "GET",
+        f"/exec/jobs/{quoted_job_id}/output{suffix}",
+        token,
+        session_token,
+    )
+    if json_mode:
+        print(json.dumps(data, indent=2, sort_keys=True))
+    else:
+        _print_job_output(data, stream)
+
+
+def _send_job_input(
+    opener: urllib.request.OpenerDirector,
+    base_url: str,
+    token: str,
+    session_token: str,
+    argv: list[str],
+) -> None:
+    add_newline = True
+    i = 0
+    while i < len(argv) and argv[i].startswith("-"):
+        arg = argv[i]
+        if arg == "--no-newline":
+            add_newline = False
+            i += 1
+            continue
+        print(f"hostdo: unknown send option: {arg}", file=sys.stderr)
+        sys.exit(1)
+
+    if i >= len(argv):
+        print("hostdo: send requires a job id", file=sys.stderr)
+        sys.exit(1)
+    job_id = argv[i]
+    text_args = argv[i + 1 :]
+    if text_args:
+        input_text = " ".join(text_args)
+        if add_newline:
+            input_text += "\n"
+    else:
+        input_text = sys.stdin.read()
+
+    quoted_job_id = urllib.parse.quote(job_id, safe="")
+    data, _ = _json_request_with_fallback(
+        opener,
+        base_url,
+        "POST",
+        f"/exec/jobs/{quoted_job_id}/input",
+        token,
+        session_token,
+        body_data={"input": input_text},
+    )
+    print(json.dumps(data, indent=2, sort_keys=True))
+
+
+def _run_detached(
+    opener: urllib.request.OpenerDirector,
+    base_url: str,
+    token: str,
+    session_token: str,
+    argv: list[str],
+) -> None:
+    command_argv, image, timeout_secs = _parse_hostdo_args(argv)
+    try:
+        cwd = os.getcwd()
+    except OSError as exc:
+        print(f"hostdo: cannot determine working directory: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    body_data = {
+        "argv": command_argv,
+        "cwd": cwd,
+        "detach": True,
+    }
+    if image is not None:
+        body_data["image"] = image
+    if timeout_secs is not None:
+        body_data["timeout_secs"] = timeout_secs
+
+    data, selected_base = _json_request_with_fallback(
+        opener,
+        base_url,
+        "POST",
+        "/exec",
+        token,
+        session_token,
+        body_data=body_data,
+        timeout=_TIMEOUT,
+    )
+    if data.get("state") != "running":
+        _print_job_id(data)
+        return
+
+    job_id = data.get("job_id", "")
+    if not job_id:
+        print("hostdo: failed — running response did not include a job id", file=sys.stderr)
+        sys.exit(1)
+    data = _poll_exec_job_until_started(
+        opener,
+        selected_base,
+        job_id,
+        token,
+        session_token,
+        data,
+    )
+    _print_job_id(data)
+
+
+def _run_job_control(
+    opener: urllib.request.OpenerDirector,
+    base_url: str,
+    token: str,
+    session_token: str,
+    argv: list[str],
+) -> bool:
+    if not argv:
+        return False
+
+    subcommand = argv[0]
+    if subcommand == "run":
+        if len(argv) == 1:
+            print("hostdo: run requires a command", file=sys.stderr)
+            sys.exit(1)
+        _run_detached(opener, base_url, token, session_token, argv[1:])
+        return True
+
+    if subcommand == "list":
+        json_mode = False
+        running_only = False
+        for arg in argv[1:]:
+            if arg == "--json":
+                json_mode = True
+                continue
+            if arg == "--running":
+                running_only = True
+                continue
+            print("hostdo: list takes only --running and/or --json", file=sys.stderr)
+            sys.exit(1)
+        data, _ = _json_request_with_fallback(
+            opener, base_url, "GET", "/exec/jobs", token, session_token
+        )
+        if running_only:
+            data = _filter_jobs_running(data)
+        if json_mode:
+            print(json.dumps(data, indent=2, sort_keys=True))
+        else:
+            _print_jobs_table(data)
+        return True
+
+    if subcommand == "tail":
+        if len(argv) == 1:
+            print("hostdo: tail requires a job id", file=sys.stderr)
+            sys.exit(1)
+        _tail_job_output(opener, base_url, token, session_token, argv[1:])
+        return True
+
+    if subcommand == "send":
+        if len(argv) == 1:
+            print("hostdo: send requires a job id", file=sys.stderr)
+            sys.exit(1)
+        _send_job_input(opener, base_url, token, session_token, argv[1:])
+        return True
+
+    if subcommand in ("status", "stop"):
+        if len(argv) != 2:
+            print(f"hostdo: {subcommand} requires exactly one job id", file=sys.stderr)
+            sys.exit(1)
+        job_id = urllib.parse.quote(argv[1], safe="")
+        if subcommand == "status":
+            data, _ = _json_request_with_fallback(
+                opener, base_url, "GET", f"/exec/jobs/{job_id}", token, session_token
+            )
+            print(json.dumps(data, indent=2, sort_keys=True))
+            return True
+        data, _ = _json_request_with_fallback(
+            opener, base_url, "POST", f"/exec/jobs/{job_id}/kill", token, session_token
+        )
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return True
+
+    return False
+
+
 def main() -> None:
     argv = sys.argv[1:]
-    if len(argv) == 1 and argv[0] in ("--help", "-h"):
+    if len(argv) == 1 and argv[0] == "--help":
         _print_help()
         sys.exit(0)
     if not argv:
@@ -406,7 +924,10 @@ def main() -> None:
         _print_usage(sys.stderr)
         print("run `hostdo --help` for detailed usage and policy guidance", file=sys.stderr)
         sys.exit(1)
-    command_argv, image, timeout_secs = _parse_hostdo_args(argv)
+    if argv[0].startswith("-"):
+        print(f"hostdo: unknown option: {argv[0]}", file=sys.stderr)
+        _print_usage(sys.stderr)
+        sys.exit(1)
 
     base_url = os.environ.get("HARNESS_HAT_URL", "http://127.0.0.1:7878").rstrip("/")
 
@@ -425,90 +946,14 @@ def main() -> None:
         )
         sys.exit(1)
 
-    try:
-        cwd = os.getcwd()
-    except OSError as exc:
-        print(f"hostdo: cannot determine working directory: {exc}", file=sys.stderr)
-        sys.exit(1)
-
-    body_data = {
-        "argv": command_argv,
-        "cwd": cwd,
-    }
-    if image is not None:
-        body_data["image"] = image
-    if timeout_secs is not None:
-        body_data["timeout_secs"] = timeout_secs
-
-    body = json.dumps(body_data).encode()
-
     opener = _no_proxy_opener()
 
-    data = None
-    last_err = None
-    selected_base = None
-    attempted = []
-    for candidate_base in _candidate_base_urls(base_url):
-        attempted.append(candidate_base)
-        req = urllib.request.Request(
-            f"{candidate_base}/exec",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "X-Hostdo-Pid": str(os.getpid()),
-                "X-Hostdo-Protocol": "jobs",
-                "x-harness-hat-session-token": session_token,
-            },
-            method="POST",
-        )
-        try:
-            with opener.open(req, timeout=_TIMEOUT) as resp:
-                data = json.loads(resp.read())
-                selected_base = candidate_base
-                break
-        except urllib.error.HTTPError as exc:
-            _exit_for_http_error(exc)
-        except urllib.error.URLError as exc:
-            last_err = exc
-            continue
-        except TimeoutError:
-            print("hostdo: request timed out (6 minutes)", file=sys.stderr)
-            sys.exit(1)
-
-    if data is None:
-        reason = getattr(last_err, "reason", last_err)
-        print(f"hostdo: request failed: {reason}", file=sys.stderr)
-        print(
-            "  Is harness-hat running? Is HARNESS_HAT_URL correct? "
-            f"({base_url})",
-            file=sys.stderr,
-        )
-        if len(attempted) > 1:
-            print("  Tried endpoints:", file=sys.stderr)
-            for u in attempted:
-                print(f"    - {u}", file=sys.stderr)
-        sys.exit(1)
-
-    if data.get("state") == "running":
-        job_id = data.get("job_id", "")
-        if not job_id or selected_base is None:
-            print("hostdo: failed — running response did not include a job id", file=sys.stderr)
-            sys.exit(1)
-        data = _poll_exec_job(opener, selected_base, job_id, token, session_token, data)
-
-    stdout: str = data.get("stdout", "")
-    stderr: str = data.get("stderr", "")
-    exit_code: int = int(data.get("exit_code", 1))
-
-    if stdout:
-        sys.stdout.write(stdout)
-        sys.stdout.flush()
-    if stderr:
-        sys.stderr.write(stderr)
-        sys.stderr.flush()
-
-    sys.exit(exit_code)
+    if _run_job_control(opener, base_url, token, session_token, argv):
+        return
+    print(f"hostdo: unknown command: {argv[0]}", file=sys.stderr)
+    _print_usage(sys.stderr)
+    print("run `hostdo --help` for detailed usage and policy guidance", file=sys.stderr)
+    sys.exit(1)
 
 
 if __name__ == "__main__":

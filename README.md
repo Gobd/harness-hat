@@ -262,20 +262,33 @@ bridges.
 Run approved commands on the host, in the workspace:
 
 ```bash
-hostdo cargo test
-hostdo npm install
-hostdo --timeout 300 npm run build
+hostdo run cargo test
+hostdo run npm install
+hostdo run --timeout 300 npm run build
 ```
 
 Run an approved command in a short-lived Docker image:
 
 ```bash
-hostdo --image node:20 npm test
-hostdo --image rust:1.88 cargo test
+hostdo run --image node:20 npm test
+hostdo run --image rust:1.88 cargo test
 ```
 
 Rules match exact argv. Image-backed commands match both argv and image, so
-approving `hostdo npm test` does not approve `hostdo --image node:20 npm test`.
+approving `hostdo run npm test` does not approve `hostdo run --image node:20 npm test`.
+
+For tracked process orchestration, use the same control verbs as `agentctl`:
+
+```bash
+hostdo run npm run dev
+hostdo list
+hostdo list --running
+hostdo status <job-id>
+hostdo tail <job-id> --rows 80
+hostdo tail <job-id> --stderr
+hostdo send <job-id> "q"
+hostdo stop <job-id>
+```
 
 ### `agentctl`
 
@@ -410,10 +423,10 @@ When developing inside a Harness Hat-managed container, run host-side tooling
 through `hostdo`:
 
 ```bash
-hostdo cargo fmt --check
-hostdo cargo clippy --all-targets -- -D warnings
-hostdo cargo check --all-targets
-hostdo cargo test
+hostdo run cargo fmt --check
+hostdo run cargo clippy --all-targets -- -D warnings
+hostdo run cargo check --all-targets
+hostdo run cargo test
 ```
 ## License
 

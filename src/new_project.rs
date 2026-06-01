@@ -292,8 +292,11 @@ mod tests {
         assert!(wrote);
 
         let rendered = fs::read_to_string(canon.join("harness-rules.toml")).expect("read rules");
-        assert!(rendered.contains("hostdo --timeout <seconds> ..."));
-        assert!(rendered.contains("hostdo --timeout 120 cargo test"));
+        assert!(rendered.contains("hostdo run --timeout <seconds> ..."));
+        assert!(rendered.contains("hostdo run --timeout 120 cargo test"));
+        assert!(rendered.contains("hostdo run ..."));
+        assert!(rendered.contains("hostdo tail <job-id> --rows <lines>"));
+        assert!(rendered.contains("hostdo send <job-id>"));
     }
 
     #[test]

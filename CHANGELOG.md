@@ -2,10 +2,26 @@
 
 This changelog is derived from git history and the current working tree.
 
-## 0.7.0 Future
+## 0.7.0 Jun 1, 2026
+
+### Added
+- `hostdo run`, `hostdo list`, `hostdo status`, `hostdo tail`, and `hostdo stop` now provide a tracked host-side process workflow so agents can inspect output after launch instead of relying only on the initial terminal stream.
+- `hostdo tail` now supports `--rows <lines>`, `--all`, `--stdout`, `--stderr`, and `--json`, and `hostdo send` can forward input to tracked jobs.
+- `hostdo list` now includes a `CONTAINER` column.
+- `hostdo list --running` now filters output to only active hostdo jobs.
+- Activity detail panes now support scroll mode with `Ctrl+S` and terminal-style navigation keys.
 
 ### Changed
 - Updated dockerfiles.
+- **Breaking:** hostdo is now subcommand-only: use `hostdo run ...` for command execution; direct passthrough forms like `hostdo cargo test` and `hostdo --image ...` were removed.
+- **Breaking:** hostdo orchestration commands now mirror `agentctl` verbs: `read` was renamed to `tail`, `kill` was renamed to `stop`, `hostdo tail` defaults to 24 rows, and `hostdo send`/`hostdo stop` now emit JSON responses.
+- `hostdo run` now emits `Waiting for developer approval... (Xs)` notices every 10 seconds while approval is pending.
+- Running activity status text now uses the same light blue tone as the sidebar instead of yellow.
+
+### Fixed
+- Cancelling a sidebar `hostdo` task now terminates the command's full process group so shell or Docker child processes do not remain running after cancellation.
+- `hostdo` command timeouts now still apply while draining output from processes whose parent has exited but whose descendants kept stdout or stderr open.
+- Sidebar scrolling now keeps the first workspace title visible near the top; selecting the second sidebar row resets the sidebar scroll offset to the top.
 
 
 ## 0.6.0 May 18th, 2026

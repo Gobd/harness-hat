@@ -174,6 +174,11 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         } else if selected >= offset.saturating_add(visible) {
             offset = selected.saturating_add(1).saturating_sub(visible);
         }
+        if selected <= 1 {
+            // Keep the first workspace title visible when focusing the first
+            // selectable row(s) at the top of the sidebar.
+            offset = 0;
+        }
         app.sidebar_offset = offset.min(max_offset);
     } else {
         app.sidebar_offset = 0;

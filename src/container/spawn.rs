@@ -305,7 +305,7 @@ pub fn spawn(
     };
 
     let mut term_cfg = TermConfig::default();
-    term_cfg.scrolling_history = 50_000;
+    term_cfg.scrolling_history = 100_000;
     let term_size = TermSize {
         cols: cols as usize,
         lines: rows as usize,
@@ -729,7 +729,7 @@ pub fn spawn_passthrough(
     };
 
     let mut term_cfg = TermConfig::default();
-    term_cfg.scrolling_history = 50_000;
+    term_cfg.scrolling_history = 100_000;
     let term_size = TermSize {
         cols: cols as usize,
         lines: rows as usize,

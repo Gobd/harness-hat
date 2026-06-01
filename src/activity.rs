@@ -103,7 +103,7 @@ impl fmt::Debug for ActivityTerminal {
 impl ActivityTerminal {
     fn new() -> Self {
         let mut term_cfg = TermConfig::default();
-        term_cfg.scrolling_history = 50_000;
+        term_cfg.scrolling_history = 100_000;
         let term_size = TermSize {
             cols: 80,
             lines: 24,

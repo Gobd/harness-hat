@@ -150,7 +150,7 @@ pub struct RuleCommand {
     /// Optional Docker image for short-lived container execution.
     ///
     /// `None` means the command runs directly on the host. `Some(image)` means
-    /// the command only matches requests made as `hostdo --image <image> ...`.
+    /// the command only matches requests made as `hostdo run --image <image> ...`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     /// Absolute path on the host. Use the canonical project path.
@@ -654,20 +654,33 @@ const RULES_FILE_HEADER: &str = "\
 # - Do not assume host tools, credentials, or services are directly available in the container.
 #
 # Host-side commands:
-# - Use `hostdo ...` when you need host-side build/package tooling such as cargo,
+# - Use `hostdo run ...` when you need host-side build/package tooling such as cargo,
 #   npm, pnpm, yarn, go, make, pytest, or similar commands.
-# - Examples: `hostdo cargo test`, `hostdo npm install`, `hostdo go test ./...`.
-# - Only use `hostdo --image <docker-image> ...` when the user explicitly asks
+# - Examples: `hostdo run cargo test`, `hostdo run npm install`, `hostdo run go test ./...`.
+# - Only use `hostdo run --image <docker-image> ...` when the user explicitly asks
 #   you to run against a Docker image or containerized runner.
-# - Use `hostdo --timeout <seconds> ...` when the user explicitly asks for a
+# - Use `hostdo run --timeout <seconds> ...` when the user explicitly asks for a
 #   longer or shorter host-side command timeout, or when a command exits before
 #   finishing and clearly needs more time than the default rule allows.
-# - Examples: `hostdo --timeout 120 cargo test`,
-#   `hostdo --timeout 1800 npm run build`.
-# - `hostdo --image` runs a command in a short-lived Docker runner instead of
+# - Examples: `hostdo run --timeout 120 cargo test`,
+#   `hostdo run --timeout 1800 npm run build`.
+# - `hostdo run --image` runs a command in a short-lived Docker runner instead of
 #   directly on the host.
-# - Examples: `hostdo --image node:20 npm test`,
-#   `hostdo --image rust:1.88 cargo test`.
+# - Examples: `hostdo run --image node:20 npm test`,
+#   `hostdo run --image rust:1.88 cargo test`.
+# - Use `hostdo run ...` when command output needs to remain available after
+#   launch, when you need to check status separately, or when you expect to
+#   interact with the command over stdin.
+# - `hostdo run ...` waits for approval and command startup, then prints a job
+#   id. Use `hostdo status <job-id>`, `hostdo tail <job-id>`, and
+#   `hostdo stop <job-id>` to inspect or stop it.
+# - Use `hostdo tail <job-id> --rows <lines>` to inspect recent output, and
+#   add `--stdout` or `--stderr` to select one stream.
+# - Use `hostdo tail <job-id> --all` to read full captured output.
+# - Use `hostdo send <job-id> \"text\"` to send one input line, or pipe data into
+#   `hostdo send <job-id>` to forward stdin as-is.
+# - Use `hostdo list` to see tracked jobs for this workspace.
+# - Use `hostdo list --running` to show only currently running jobs.
 # - `hostdo` requests are policy checked against the `[hostdo]` rules below and may
 #   prompt the developer.
 # - Prefer existing auto-approved `hostdo` commands or `hostdo.command_aliases`
@@ -714,22 +727,22 @@ const RULES_FILE_HEADER: &str = "\
 #
 # Passthrough command (exact argv match, auto-approved):
 #   [[hostdo.commands]]
-#   argv = [\"cargo\", \"test\"] # run inside container with `hostdo cargo test`
+#   argv = [\"cargo\", \"test\"] # run inside container with `hostdo run cargo test`
 #   cwd = \"$WORKSPACE\"         # execution cwd only, not part of approval matching
 #   timeout_secs = 60
 #   approval_mode = \"auto\"
 #
 # Short-lived Docker runner (exact argv + image match, auto-approved):
 #   [[hostdo.commands]]
-#   argv = [\"npm\", \"test\"]     # run with `hostdo --image node:20 npm test`
+#   argv = [\"npm\", \"test\"]     # run with `hostdo run --image node:20 npm test`
 #   image = \"node:20\"
 #   cwd = \"$WORKSPACE\"
 #   timeout_secs = 60
 #   approval_mode = \"auto\"
 #
-# Command alias (agent sends `hostdo tests`, expands server-side):
+# Command alias (agent sends `hostdo run tests`, expands server-side):
 #   [hostdo.command_aliases]
-#   tests = \"cargo test\" # run inside container with `hostdo test`
+#   tests = \"cargo test\" # run inside container with `hostdo run tests`
 #   build = { cmd = \"cargo build --release\", cwd = \"$WORKSPACE\" }
 #
 # $WORKSPACE = workspace path on the host.

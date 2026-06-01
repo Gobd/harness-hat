@@ -1075,6 +1075,58 @@ fn network_status_bar_exposes_request_navigation() {
 }
 
 #[test]
+fn activity_ctrl_s_enables_scroll_mode_and_uses_scroll_keys() {
+    let mut app = build_test_app();
+    let activity = Activity::new(
+        "project-a".to_string(),
+        Some("container-a".to_string()),
+        ActivityKind::Hostdo {
+            argv: vec!["cargo".to_string(), "test".to_string()],
+            image: None,
+            timeout_secs: 60,
+            cwd: std::path::PathBuf::from("/workspace"),
+        },
+        ActivityState::Running,
+        Arc::new(AtomicBool::new(false)),
+    );
+    let id = activity.id.clone();
+    app.apply_activity_event(ActivityEvent::Started(Box::new(activity)));
+    app.active_activity = Some(id);
+    app.focus = Focus::Activity;
+
+    app.handle_key(key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    assert!(app.scroll_mode);
+    assert_eq!(app.terminal_scroll, 0);
+
+    app.handle_key(key(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.terminal_scroll, 1);
+
+    // First Esc exits scroll mode while staying on the activity pane.
+    app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.scroll_mode);
+    assert_eq!(app.focus, Focus::Activity);
+
+    // Second Esc performs the existing back-to-sidebar behavior.
+    app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.focus, Focus::Sidebar);
+}
+
+#[test]
+fn activity_status_bar_shows_scroll_shortcuts() {
+    let mut app = build_test_app();
+    app.focus = Focus::Activity;
+
+    let normal = super::render::status_bar_keys(&app);
+    assert!(normal.contains("[^C]cancel request"));
+    assert!(normal.contains("[^Q]quit"));
+
+    app.scroll_mode = true;
+    let scrolling = super::render::status_bar_keys(&app);
+    assert!(scrolling.contains("SCROLL:"));
+    assert!(scrolling.contains("[PgUp/PgDn]"));
+}
+
+#[test]
 fn right_pane_gap_only_shows_for_docker_build_views() {
     let mut app = build_test_app();
     assert_eq!(super::render::right_pane_gap_width(&app), 0);
@@ -1218,6 +1270,22 @@ fn sidebar_navigation_wraps_and_scrolls() {
     // Down -> NewWorkspace
     app.handle_sidebar_key(key(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(app.sidebar_idx, 3);
+}
+
+#[test]
+fn sidebar_second_row_selection_resets_scroll_to_top() {
+    let mut app = build_test_app_with_workspaces(&[
+        ("project-a", Some('a')),
+        ("project-b", Some('b')),
+        ("project-c", Some('c')),
+    ]);
+    let items = app.sidebar_items();
+    app.sidebar_offset = 5;
+    app.sidebar_idx = 1;
+
+    app.ensure_sidebar_visible(&items, 3);
+
+    assert_eq!(app.sidebar_offset, 0);
 }
 
 #[test]
