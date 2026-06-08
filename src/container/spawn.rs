@@ -7,32 +7,26 @@ use alacritty_terminal::tty;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use std::time::Instant;
 use tempfile::NamedTempFile;
 use tracing::info;
 use tracing::instrument;
 
-use crate::config::{ContainerDef, ContainerMount};
+use crate::config::ContainerDef;
 use crate::container::core::{
-    TermSize, loopback_to_host_docker, mount_mode_arg, sanitize_docker_name,
+    LABEL_ALIAS, LABEL_SESSION, LABEL_TEMPLATE, LABEL_WORKSPACE, TermSize, loopback_to_host_docker,
+    mount_mode_arg, parse_docker_label, sanitize_docker_name,
 };
 use crate::container::helpers::detect_default_colors;
 use crate::container::{ContainerSession, SessionEventProxy, compose_no_proxy, read_container_id};
 use crate::fs_util::write_env_file_entry;
 
 const PRIMARY_PROXY_CONN_LIMIT: usize = 0;
-const SUBAGENT_PROXY_CONN_LIMIT: usize = 16;
-const AGENT_CONFIG_SNAPSHOT_ROOT: &str = "/tmp/harness-hat-agent-config";
-const AGENT_CONFIG_SNAPSHOT_MANIFEST: &str = "/tmp/harness-hat-agent-config/manifest.tsv";
 const HARNESS_HAT_CA_CERT_PATH: &str = "/usr/local/share/ca-certificates/harness-hat-ca.crt";
 const HARNESS_HAT_CA_BUNDLE_PATH: &str = "/tmp/harness-hat-ca-bundle.crt";
-
-struct AgentConfigSnapshot {
-    tempdir: tempfile::TempDir,
-    targets: Vec<PathBuf>,
-}
+const CODER_HOME: &str = "/home/coder";
 
 /// Launch `docker run` for a container definition and wire it to a PTY-backed
 /// terminal session.
@@ -44,10 +38,10 @@ pub fn spawn(
     workspace_path: &Path,
     session_token: &str,
     token: &str,
-    exec_url: &str,
+    control_url: &str,
     proxy_url: &str,
     ca_cert_host_path: &str,
-    hostdo_script_host_path: Option<&Path>,
+    control_script_host_path: Option<&Path>,
     scoped_proxy: Option<crate::proxy::ScopedProxyListener>,
     proxy_priority: crate::proxy::SourcePriority,
     strict_network: bool,
@@ -70,17 +64,16 @@ pub fn spawn(
         sanitize_docker_name(&ctr.name),
         uuid::Uuid::new_v4().simple()
     );
+    let alias = allocate_session_alias();
 
-    let container_exec_url = loopback_to_host_docker(exec_url);
+    let container_control_url = loopback_to_host_docker(control_url);
     let container_proxy_url = loopback_to_host_docker(proxy_url);
     let container_proxy_addr = proxy_addr_without_auth(&container_proxy_url);
     let scoped_proxy_auth = scoped_proxy
         .as_ref()
         .map(|proxy| proxy.proxy_auth_token().to_string())
         .unwrap_or_default();
-    let mut launch_notes = Vec::new();
-    let subagent_launch = proxy_priority == crate::proxy::SourcePriority::Subagent;
-    let agent_kind = crate::config::infer_agent_kind_from_argv(command_argv);
+    let launch_notes = Vec::new();
 
     let mut docker_args: Vec<String> = vec![
         "run".to_string(),
@@ -90,6 +83,16 @@ pub fn spawn(
         docker_run_name.clone(),
         "--cidfile".to_string(),
         cidfile.display().to_string(),
+        // Discovery labels so `hh shell` can find and identify this session
+        // without the manager process being alive.
+        "--label".to_string(),
+        format!("{LABEL_ALIAS}={alias}"),
+        "--label".to_string(),
+        format!("{LABEL_WORKSPACE}={project_name}"),
+        "--label".to_string(),
+        format!("{LABEL_TEMPLATE}={}", ctr.name),
+        "--label".to_string(),
+        format!("{LABEL_SESSION}={session_token}"),
     ];
 
     #[cfg(target_os = "linux")]
@@ -125,6 +128,24 @@ pub fn spawn(
         }
     }
 
+    if let Some(memory) = ctr
+        .memory
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        docker_args.extend_from_slice(&["--memory".to_string(), memory.to_string()]);
+    }
+    if let Some(cpus) = ctr.cpus.as_deref().filter(|value| !value.trim().is_empty()) {
+        docker_args.extend_from_slice(&["--cpus".to_string(), cpus.to_string()]);
+    }
+    if let Some(shm_size) = ctr
+        .shm_size
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        docker_args.extend_from_slice(&["--shm-size".to_string(), shm_size.to_string()]);
+    }
+
     docker_args.extend_from_slice(&[
         "-v".to_string(),
         format!("{}:{}:rw", workspace_path.display(), mount_str),
@@ -134,19 +155,13 @@ pub fn spawn(
         mount_str.clone(),
     ]);
 
-    let hostdo_tempfile = match hostdo_script_host_path {
+    let control_tempfile = match control_script_host_path {
         Some(path) => Some(prepare_executable_helper_script(
             path,
-            "harness-hat-hostdo-",
+            "harness-hat-control-",
         )?),
         None => None,
     };
-    if let Some(hostdo) = hostdo_tempfile.as_ref() {
-        docker_args.extend_from_slice(&[
-            "-v".to_string(),
-            format!("{}:/usr/local/bin/hostdo:ro", hostdo.path().display()),
-        ]);
-    }
 
     // Prepare secure env file to prevent token leakage via `ps`
     let mut env_file = tempfile::Builder::new()
@@ -161,12 +176,18 @@ pub fn spawn(
     for (key, value) in extra_env {
         write_env_file_entry(&mut env_file, key, value)?;
     }
+    if should_inject_coder_home(&ctr.mounts)
+        && !ctr.env.contains_key("HOME")
+        && !extra_env.iter().any(|(key, _)| key == "HOME")
+    {
+        write_env_file_entry(&mut env_file, "HOME", CODER_HOME)?;
+    }
 
     write_env_file_entry(&mut env_file, "HARNESS_HAT_TOKEN", token)?;
     write_env_file_entry(&mut env_file, "HARNESS_HAT_SESSION_TOKEN", session_token)?;
     write_env_file_entry(&mut env_file, "HARNESS_HAT_PROJECT", project_name)?;
     write_env_file_entry(&mut env_file, "HARNESS_HAT_MOUNT_TARGET", &mount_str)?;
-    write_env_file_entry(&mut env_file, "HARNESS_HAT_URL", &container_exec_url)?;
+    write_env_file_entry(&mut env_file, "HARNESS_HAT_URL", &container_control_url)?;
     write_env_file_entry(
         &mut env_file,
         "HARNESS_HAT_STRICT_NETWORK",
@@ -182,14 +203,10 @@ pub fn spawn(
         "HARNESS_HAT_SCOPED_PROXY_AUTH",
         &scoped_proxy_auth,
     )?;
-    let proxy_conn_limit = match proxy_priority {
-        crate::proxy::SourcePriority::Primary => PRIMARY_PROXY_CONN_LIMIT,
-        crate::proxy::SourcePriority::Subagent => SUBAGENT_PROXY_CONN_LIMIT,
-    };
     write_env_file_entry(
         &mut env_file,
         "HARNESS_HAT_PROXY_CONN_LIMIT",
-        proxy_conn_limit.to_string(),
+        PRIMARY_PROXY_CONN_LIMIT.to_string(),
     )?;
     if let Some(forwards) = format_localhost_forwards(&ctr.localhost_forwards) {
         write_env_file_entry(&mut env_file, "HARNESS_HAT_LOCALHOST_FORWARDS", forwards)?;
@@ -205,39 +222,31 @@ pub fn spawn(
         write_env_file_entry(&mut env_file, "no_proxy", &no_proxy)?;
     }
 
-    let (effective_mounts, agent_config_snapshot) = if subagent_launch {
-        let (mounts, snapshot) = prepare_subagent_mount_snapshot(&ctr.mounts)?;
-        if let Some(snapshot) = snapshot.as_ref() {
-            docker_args.push("-v".to_string());
-            docker_args.push(format!(
-                "{}:{AGENT_CONFIG_SNAPSHOT_ROOT}:ro",
-                snapshot.tempdir.path().display()
-            ));
-            write_env_file_entry(
-                &mut env_file,
-                "HARNESS_HAT_AGENT_CONFIG_SNAPSHOT",
-                AGENT_CONFIG_SNAPSHOT_MANIFEST,
-            )?;
-            let note = format!(
-                "subagent snapshot copied from {} configured mount path(s)",
-                snapshot.targets.len()
-            );
-            info!("{note}");
-            launch_notes.push(note);
-        }
-        (mounts, snapshot)
-    } else {
-        (ctr.mounts.clone(), None)
-    };
-
     docker_args.push("--env-file".to_string());
     docker_args.push(env_file.path().display().to_string());
 
-    for mount in &effective_mounts {
+    // `.claude.json` is rewritten in place by every Claude Code instance
+    // (numStartups, project trust, etc.). Bind-mounting the host's live file
+    // means the host's own Claude and the container's Claude race on the same
+    // file, tearing it into `JSON Parse error: Unterminated string` corruption
+    // and resetting the host config (losing the OAuth account → the container
+    // appears logged out). Seeded mounts (see `should_seed_mount`) get a private
+    // per-session copy instead: the container reads the session through, then
+    // owns the file privately. The handles live for the container's lifetime.
+    let mut seed_tempfiles: Vec<NamedTempFile> = Vec::new();
+    for mount in &ctr.mounts {
+        let host_arg = match seed_private_mount(mount)? {
+            Some(tempfile) => {
+                let path = tempfile.path().display().to_string();
+                seed_tempfiles.push(tempfile);
+                path
+            }
+            None => mount.host.display().to_string(),
+        };
         docker_args.push("-v".to_string());
         docker_args.push(format!(
             "{}:{}:{}",
-            mount.host.display(),
+            host_arg,
             mount.container.display(),
             mount_mode_arg(&mount.mode),
         ));
@@ -340,14 +349,12 @@ pub fn spawn(
     Ok((
         ContainerSession {
             container_name: ctr.name.clone(),
-            agent_kind,
             mouse_scroll: ctr.mouse_scroll,
             container_id,
             docker_name,
+            alias,
             project: project_name.to_owned(),
             session_token: session_token.to_string(),
-            parent_session_token: None,
-            subagent_name: None,
             mount_target: mount_str,
             launched_at: Instant::now(),
             terminal_snapshot_hash: 0,
@@ -360,13 +367,58 @@ pub fn spawn(
             has_bell,
             exit_reported: false,
             _scoped_proxy: scoped_proxy,
-            _cred_tempfile: None,
+            _seed_tempfiles: seed_tempfiles,
             _env_tempfile: Some(env_file),
-            _hostdo_tempfile: hostdo_tempfile,
-            _agent_config_tempdir: agent_config_snapshot.map(|snapshot| snapshot.tempdir),
+            _control_tempfile: control_tempfile,
         },
         launch_notes,
     ))
+}
+
+/// Pick a zero-padded 4-digit id not currently used by a running harness-hat
+/// container. Randomness is derived from a fresh UUID to avoid pulling in a
+/// dedicated RNG dependency. Collisions among the ~10k space are rare; we retry
+/// a bounded number of times and fall back to a random value if every probe
+/// somehow clashes (effectively impossible for realistic session counts).
+fn allocate_session_alias() -> String {
+    let used = running_session_aliases();
+    for _ in 0..64 {
+        let candidate = random_four_digit();
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+    }
+    random_four_digit()
+}
+
+fn random_four_digit() -> String {
+    let bytes = uuid::Uuid::new_v4().into_bytes();
+    let value = u16::from_le_bytes([bytes[0], bytes[1]]) as u32 % 10_000;
+    format!("{value:04}")
+}
+
+fn running_session_aliases() -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    let output = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "--filter",
+            &format!("label={LABEL_ALIAS}"),
+            "--format",
+            "{{.Labels}}",
+        ])
+        .stderr(std::process::Stdio::null())
+        .output();
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some(alias) = parse_docker_label(line, LABEL_ALIAS) {
+                set.insert(alias);
+            }
+        }
+    }
+    set
 }
 
 fn write_ca_env_entries<W: Write>(env_file: &mut W) -> Result<()> {
@@ -384,162 +436,6 @@ fn write_ca_env_entries<W: Write>(env_file: &mut W) -> Result<()> {
         write_env_file_entry(env_file, var, HARNESS_HAT_CA_BUNDLE_PATH)?;
     }
     write_env_file_entry(env_file, "NODE_EXTRA_CA_CERTS", HARNESS_HAT_CA_CERT_PATH)?;
-    Ok(())
-}
-
-fn prepare_subagent_mount_snapshot(
-    mounts: &[ContainerMount],
-) -> Result<(Vec<ContainerMount>, Option<AgentConfigSnapshot>)> {
-    let effective_mounts = Vec::new();
-    let mut mappings: Vec<(String, PathBuf)> = Vec::new();
-    let tempdir = tempfile::Builder::new()
-        .prefix("harness-hat-agent-config-")
-        .tempdir()
-        .context("creating subagent config snapshot directory")?;
-
-    for (idx, mount) in mounts.iter().enumerate() {
-        if !mount.host.exists() {
-            continue;
-        }
-
-        let staged_name = format!("item-{idx}");
-        let staged_path = tempdir.path().join(&staged_name);
-        copy_snapshot_path(
-            &mount.host,
-            &staged_path,
-            mount.container.as_path(),
-            Path::new(""),
-        )
-        .with_context(|| format!("copying mount snapshot from {}", mount.host.display()))?;
-        mappings.push((staged_name.clone(), mount.container.clone()));
-    }
-
-    if mappings.is_empty() {
-        return Ok((effective_mounts, None));
-    }
-
-    let manifest_path = tempdir.path().join("manifest.tsv");
-    let mut manifest = std::fs::File::create(&manifest_path)
-        .with_context(|| format!("creating {}", manifest_path.display()))?;
-    for (staged_name, container_target) in &mappings {
-        writeln!(manifest, "{}\t{}", staged_name, container_target.display())
-            .context("writing subagent config manifest")?;
-    }
-    manifest
-        .flush()
-        .context("flushing subagent config manifest")?;
-
-    let targets = mappings
-        .into_iter()
-        .map(|(_, target)| target)
-        .collect::<Vec<_>>();
-    Ok((
-        effective_mounts,
-        Some(AgentConfigSnapshot { tempdir, targets }),
-    ))
-}
-
-fn copy_snapshot_path(
-    source: &Path,
-    dest: &Path,
-    container_target: &Path,
-    relative_path: &Path,
-) -> Result<()> {
-    let meta = std::fs::symlink_metadata(source)
-        .with_context(|| format!("reading metadata for {}", source.display()))?;
-    if meta.file_type().is_symlink() {
-        return Ok(());
-    }
-    if !should_snapshot_path(container_target, relative_path, meta.is_dir()) {
-        return Ok(());
-    }
-    if meta.is_dir() {
-        std::fs::create_dir_all(dest)
-            .with_context(|| format!("creating config snapshot dir {}", dest.display()))?;
-        copy_snapshot_dir(source, dest, container_target, relative_path)
-    } else {
-        copy_snapshot_file(source, dest)
-    }
-}
-
-fn copy_snapshot_dir(
-    source: &Path,
-    dest: &Path,
-    container_target: &Path,
-    relative_path: &Path,
-) -> Result<()> {
-    for entry in
-        std::fs::read_dir(source).with_context(|| format!("reading {}", source.display()))?
-    {
-        let entry = entry.with_context(|| format!("reading entry in {}", source.display()))?;
-        let name = entry.file_name();
-        let src = entry.path();
-        let meta = std::fs::symlink_metadata(&src)
-            .with_context(|| format!("reading metadata for {}", src.display()))?;
-        if meta.file_type().is_symlink() {
-            continue;
-        }
-        let dst = dest.join(&name);
-        let child_relative = relative_path.join(&name);
-        if !should_snapshot_path(container_target, &child_relative, meta.is_dir()) {
-            continue;
-        }
-        if meta.is_dir() {
-            std::fs::create_dir_all(&dst)
-                .with_context(|| format!("creating config snapshot dir {}", dst.display()))?;
-            copy_snapshot_dir(&src, &dst, container_target, &child_relative)?;
-        } else if meta.is_file() {
-            copy_snapshot_file(&src, &dst)?;
-        }
-    }
-    Ok(())
-}
-
-fn should_snapshot_path(container_target: &Path, relative_path: &Path, is_dir: bool) -> bool {
-    let is_codex_home = matches!(
-        container_target.to_str(),
-        Some("/home/ubuntu/.codex") | Some("/root/.codex")
-    );
-    if is_codex_home {
-        if let Some(first_component) = relative_path.components().next().and_then(|component| {
-            if let std::path::Component::Normal(name) = component {
-                name.to_str()
-            } else {
-                None
-            }
-        }) {
-            if matches!(first_component, ".tmp" | "log" | "sessions" | "tmp") {
-                return false;
-            }
-        }
-    }
-
-    if is_dir {
-        return true;
-    }
-
-    let Some(file_name) = relative_path.file_name().and_then(|name| name.to_str()) else {
-        return true;
-    };
-
-    if is_codex_home
-        && (file_name.ends_with(".sqlite")
-            || file_name.ends_with(".sqlite-wal")
-            || file_name.ends_with(".sqlite-shm"))
-    {
-        return false;
-    }
-
-    true
-}
-
-fn copy_snapshot_file(source: &Path, dest: &Path) -> Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating config snapshot dir {}", parent.display()))?;
-    }
-    std::fs::copy(source, dest)
-        .with_context(|| format!("copying {} to {}", source.display(), dest.display()))?;
     Ok(())
 }
 
@@ -614,189 +510,161 @@ fn format_localhost_forwards(forwards: &[crate::config::LocalhostForward]) -> Op
     )
 }
 
-/// Launch a one-shot passthrough container session.
+fn should_inject_coder_home(mounts: &[crate::config::ContainerMount]) -> bool {
+    mounts
+        .iter()
+        .any(|mount| mount.container.starts_with(CODER_HOME))
+}
+
+/// True when this mount targets Claude Code's `.claude.json` config file — the
+/// single hot-rewritten file that must not be shared live with the host.
+/// Matched by the container-side basename so it holds regardless of the home
+/// directory the template mounts into.
+fn is_claude_config_mount(mount: &crate::config::ContainerMount) -> bool {
+    mount.container.file_name() == Some(std::ffi::OsStr::new(".claude.json"))
+}
+
+/// Whether this mount should be seeded as a private per-session copy rather than
+/// bind-mounted live. Driven by the TOML `seed` flag; when unset it defaults to
+/// the smart heuristic of privatizing only `.claude.json` (see [`ContainerMount`]).
+fn should_seed_mount(mount: &crate::config::ContainerMount) -> bool {
+    mount.seed.unwrap_or_else(|| is_claude_config_mount(mount))
+}
+
+/// If `mount` is configured for seeding and the host path is a regular file,
+/// copy its current contents into a fresh tempfile and return it; the caller
+/// bind-mounts that copy instead of the host's live file and keeps the handle
+/// alive for the container's lifetime (cleaned up on session drop). For
+/// `.claude.json` this seeds the session through (OAuth account, onboarding)
+/// while the container's writes land on the private copy — the host file is
+/// never touched.
 ///
-/// Unlike `spawn`, this path does not inject harness-hat proxy/hostdo runtime
-/// environment variables. It is used by the `harness-hat -- ...` wrapper.
-#[instrument(skip(command_argv, workspace_path, mount_target, mounts, env_passthrough))]
-pub fn spawn_passthrough(
-    image: &str,
-    image_name: &str,
-    command_argv: &[String],
-    project_name: &str,
-    workspace_path: &Path,
-    mount_target: &Path,
-    grayscale_palette: bool,
-    mounts: &[crate::config::ContainerMount],
-    env_passthrough: &[String],
-    rows: u16,
-    cols: u16,
-) -> Result<ContainerSession> {
-    let mount_str = mount_target.display().to_string();
-    let cidfile =
-        std::env::temp_dir().join(format!("harness-hat-cid-{}.txt", uuid::Uuid::new_v4()));
-    let docker_run_name = format!(
-        "harness-hat-{}-{}",
-        sanitize_docker_name(image_name),
-        uuid::Uuid::new_v4().simple()
-    );
-
-    let mut docker_args: Vec<String> = vec![
-        "run".to_string(),
-        "--rm".to_string(),
-        "-it".to_string(),
-        "--name".to_string(),
-        docker_run_name.clone(),
-        "--cidfile".to_string(),
-        cidfile.display().to_string(),
-    ];
-
-    #[cfg(target_os = "linux")]
-    docker_args.push("--add-host=host.docker.internal:host-gateway".to_string());
-
-    #[cfg(target_os = "linux")]
-    docker_args.extend_from_slice(&["--user".to_string(), "1000:1000".to_string()]);
-
-    docker_args.extend_from_slice(&[
-        "-v".to_string(),
-        format!("{}:{}:rw", workspace_path.display(), mount_str),
-        "-w".to_string(),
-        mount_str.clone(),
-    ]);
-
-    for mount in mounts {
-        docker_args.push("-v".to_string());
-        docker_args.push(format!(
-            "{}:{}:{}",
-            mount.host.display(),
-            mount.container.display(),
-            mount_mode_arg(&mount.mode),
-        ));
+/// Returns `None` (mount the host path as-is) when the mount isn't flagged for
+/// seeding or the host path is not a regular file — bind-mounting a missing
+/// path would make Docker materialize a directory, and a directory can't be
+/// copied into a single tempfile, so we leave that pre-existing behavior alone.
+fn seed_private_mount(mount: &crate::config::ContainerMount) -> Result<Option<NamedTempFile>> {
+    if !should_seed_mount(mount) || !mount.host.is_file() {
+        return Ok(None);
     }
-
-    for name in env_passthrough {
-        docker_args.push("-e".to_string());
-        docker_args.push(name.to_string());
-    }
-
-    docker_args.push(image.to_string());
-    docker_args.extend(command_argv.iter().cloned());
-
-    info!(
-        "launching passthrough container: docker {}",
-        docker_args
-            .iter()
-            .map(|a| if a.contains(' ') || a.contains('=') {
-                format!("'{a}'")
-            } else {
-                a.clone()
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-
-    let (fg, bg) = detect_default_colors();
-    let default_fg = alacritty_terminal::vte::ansi::Rgb {
-        r: fg.0,
-        g: fg.1,
-        b: fg.2,
-    };
-    let default_bg = alacritty_terminal::vte::ansi::Rgb {
-        r: bg.0,
-        g: bg.1,
-        b: bg.2,
-    };
-
-    let window_size = WindowSize {
-        num_lines: rows,
-        num_cols: cols,
-        cell_width: 0,
-        cell_height: 0,
-    };
-    let window_size_arc = Arc::new(Mutex::new(window_size));
-
-    let exited = Arc::new(AtomicBool::new(false));
-    let has_bell = Arc::new(AtomicBool::new(false));
-
-    let proxy = SessionEventProxy {
-        sender: Arc::new(Mutex::new(None)),
-        window_size: Arc::clone(&window_size_arc),
-        exited: Arc::clone(&exited),
-        has_bell: Arc::clone(&has_bell),
-        default_fg,
-        default_bg,
-        grayscale_palette,
-    };
-
-    let mut term_cfg = TermConfig::default();
-    term_cfg.scrolling_history = 100_000;
-    let term_size = TermSize {
-        cols: cols as usize,
-        lines: rows as usize,
-    };
-    let term = Arc::new(FairMutex::new(Term::new(
-        term_cfg,
-        &term_size,
-        proxy.clone(),
-    )));
-
-    let mut options = tty::Options::default();
-    options.shell = Some(tty::Shell::new("docker".to_string(), docker_args));
-    options.working_directory = None;
-    options.drain_on_exit = false;
-    options.env = HashMap::new();
-
-    let pty = tty::new(&options, window_size, 0).context("open PTY")?;
-    let event_loop = EventLoop::new(Arc::clone(&term), proxy.clone(), pty, false, false)
-        .context("event loop")?;
-    let sender = event_loop.channel();
-    let notifier = Notifier(sender.clone());
-    if let Ok(mut s) = proxy.sender.lock() {
-        *s = Some(sender);
-    }
-    let _handle = event_loop.spawn();
-
-    let container_id =
-        read_container_id(&cidfile, &docker_run_name).context("reading docker container id")?;
-    let _ = std::fs::remove_file(&cidfile);
-
-    Ok(ContainerSession {
-        container_name: format!("passthrough-{image_name}"),
-        agent_kind: crate::config::infer_agent_kind_from_argv(Some(command_argv)),
-        mouse_scroll: crate::config::MouseScrollMode::Auto,
-        container_id,
-        docker_name: docker_run_name,
-        project: project_name.to_owned(),
-        session_token: uuid::Uuid::new_v4().simple().to_string(),
-        parent_session_token: None,
-        subagent_name: None,
-        mount_target: mount_str,
-        launched_at: Instant::now(),
-        terminal_snapshot_hash: 0,
-        terminal_changed_at: Instant::now(),
-        last_input_at: Arc::new(Mutex::new(None)),
-        term,
-        notifier,
-        window_size: window_size_arc,
-        exited,
-        has_bell,
-        exit_reported: false,
-        _scoped_proxy: None,
-        _cred_tempfile: None,
-        _env_tempfile: None,
-        _hostdo_tempfile: None,
-        _agent_config_tempdir: None,
-    })
+    let contents = std::fs::read(&mount.host)
+        .with_context(|| format!("reading {} to seed container copy", mount.host.display()))?;
+    let mut tempfile = tempfile::Builder::new()
+        .prefix("harness-hat-seed-")
+        .tempfile()
+        .with_context(|| format!("creating private copy of {}", mount.host.display()))?;
+    tempfile
+        .write_all(&contents)
+        .with_context(|| format!("writing private copy of {}", mount.host.display()))?;
+    tempfile
+        .flush()
+        .with_context(|| format!("flushing private copy of {}", mount.host.display()))?;
+    Ok(Some(tempfile))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         HARNESS_HAT_CA_BUNDLE_PATH, HARNESS_HAT_CA_CERT_PATH, format_localhost_forwards,
-        prepare_subagent_mount_snapshot, proxy_addr_without_auth, write_ca_env_entries,
+        proxy_addr_without_auth, seed_private_mount, should_inject_coder_home, should_seed_mount,
+        write_ca_env_entries,
     };
     use crate::config::{ContainerMount, LocalhostForward, MountMode};
+    use std::io::Write as _;
     use std::path::PathBuf;
+
+    fn mount(host: &str, container: &str, seed: Option<bool>) -> ContainerMount {
+        ContainerMount {
+            host: PathBuf::from(host),
+            container: PathBuf::from(container),
+            mode: MountMode::Rw,
+            seed,
+        }
+    }
+
+    #[test]
+    fn seed_defaults_to_claude_config_and_honors_explicit_flag() {
+        // Unset: `.claude.json` seeds by default, everything else does not.
+        assert!(should_seed_mount(&mount(
+            "/Users/me/.claude.json",
+            "/home/coder/.claude.json",
+            None
+        )));
+        assert!(!should_seed_mount(&mount(
+            "/Users/me/.claude",
+            "/home/coder/.claude",
+            None
+        )));
+
+        // Explicit flag overrides the heuristic in both directions.
+        assert!(!should_seed_mount(&mount(
+            "/Users/me/.claude.json",
+            "/home/coder/.claude.json",
+            Some(false)
+        )));
+        assert!(should_seed_mount(&mount(
+            "/Users/me/.config/x",
+            "/home/coder/.config/x",
+            Some(true)
+        )));
+    }
+
+    #[test]
+    fn seed_private_mount_copies_existing_file_only() {
+        // An unflagged non-config mount is left alone even if it's a real file.
+        let other = tempfile::Builder::new()
+            .tempfile()
+            .expect("create temp source");
+        let not_seeded = mount(
+            other.path().to_str().unwrap(),
+            "/home/coder/.codex/config.toml",
+            None,
+        );
+        assert!(
+            seed_private_mount(&not_seeded)
+                .expect("seed non-config")
+                .is_none()
+        );
+
+        // A seeded file mount is copied into a private tempfile with identical bytes.
+        let mut source = tempfile::Builder::new()
+            .suffix(".claude.json")
+            .tempfile()
+            .expect("create temp source");
+        let payload = br#"{"oauthAccount":{"emailAddress":"a@b.c"}}"#;
+        source.write_all(payload).expect("write source");
+        source.flush().expect("flush source");
+        let config = mount(
+            source.path().to_str().unwrap(),
+            "/home/coder/.claude.json",
+            None,
+        );
+        let seeded = seed_private_mount(&config)
+            .expect("seed config")
+            .expect("config file should be privatized");
+        assert_ne!(seeded.path(), source.path());
+        assert_eq!(std::fs::read(seeded.path()).expect("read copy"), payload);
+
+        // `seed = false` forces the shared live bind mount even for `.claude.json`.
+        let shared = mount(
+            source.path().to_str().unwrap(),
+            "/home/coder/.claude.json",
+            Some(false),
+        );
+        assert!(
+            seed_private_mount(&shared)
+                .expect("seed disabled")
+                .is_none()
+        );
+
+        // A missing host file is left as-is (don't let Docker create a dir).
+        let missing = mount("/no/such/.claude.json", "/home/coder/.claude.json", None);
+        assert!(
+            seed_private_mount(&missing)
+                .expect("seed missing")
+                .is_none()
+        );
+    }
 
     #[test]
     fn proxy_addr_without_auth_strips_userinfo() {
@@ -850,128 +718,26 @@ mod tests {
     }
 
     #[test]
-    fn subagent_config_snapshot_skips_live_codex_sqlite_state() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let codex_home = root.path().join(".codex");
-        std::fs::create_dir_all(&codex_home).expect("codex home");
-        std::fs::write(codex_home.join("auth.json"), "{}").expect("auth");
-        std::fs::write(codex_home.join("config.toml"), "model = \"gpt\"").expect("config");
-        std::fs::write(codex_home.join("models_cache.json"), "{}").expect("models cache");
-        std::fs::write(codex_home.join("state_5.sqlite"), "codex session state").expect("state db");
-        std::fs::write(codex_home.join("state_5.sqlite-wal"), "codex state wal")
-            .expect("state wal");
-        std::fs::write(codex_home.join("logs_2.sqlite"), "large runtime logs").expect("logs");
-        std::fs::write(
-            codex_home.join("logs_2.sqlite-wal"),
-            "large runtime logs wal",
-        )
-        .expect("logs wal");
-        std::fs::create_dir_all(codex_home.join("log")).expect("log dir");
-        std::fs::write(codex_home.join("log/codex-tui.log"), "live log").expect("log file");
-        std::fs::create_dir_all(codex_home.join("sessions/2026/05/08")).expect("sessions");
-        std::fs::write(
-            codex_home.join("sessions/2026/05/08/session.jsonl"),
-            "live session",
-        )
-        .expect("session file");
-        std::fs::create_dir_all(codex_home.join(".tmp/plugins/.git")).expect("tmp plugins");
-        std::fs::write(codex_home.join(".tmp/plugins/.git/index"), "tmp index").expect("tmp index");
-        std::fs::create_dir_all(codex_home.join("tmp/arg0/current")).expect("arg0");
-        std::fs::write(codex_home.join("tmp/arg0/current/.lock"), "").expect("arg0 lock");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(
-            "/definitely/not/a/host/path/codex",
-            codex_home.join("tmp/arg0/current/codex"),
-        )
-        .expect("dangling codex symlink");
-        std::fs::create_dir_all(codex_home.join("shell_snapshots")).expect("snapshots");
-        std::fs::write(codex_home.join("shell_snapshots/old.sh"), "echo old").expect("snapshot");
-        std::fs::create_dir_all(codex_home.join("cache/codex_apps_tools")).expect("cache");
-        std::fs::write(codex_home.join("cache/codex_apps_tools/tools.json"), "{}")
-            .expect("tools cache");
-        std::fs::create_dir_all(codex_home.join("plugins/cache")).expect("plugin cache");
-        std::fs::write(codex_home.join("plugins/cache/plugin.json"), "{}").expect("plugin");
-
-        let other = root.path().join("other");
-        std::fs::create_dir_all(&other).expect("other");
-        let mounts = vec![
-            ContainerMount {
-                host: codex_home.clone(),
-                container: PathBuf::from("/home/ubuntu/.codex"),
-                mode: MountMode::Rw,
-            },
-            ContainerMount {
-                host: other.clone(),
-                container: PathBuf::from("/workspace/other"),
-                mode: MountMode::Rw,
-            },
-        ];
-
-        let (effective, snapshot) = prepare_subagent_mount_snapshot(&mounts).expect("snapshot");
-        assert!(effective.is_empty());
-
-        let snapshot = snapshot.expect("snapshot exists");
-        let staged = snapshot.tempdir.path().join("item-0");
-        assert!(staged.join("auth.json").is_file());
-        assert!(staged.join("config.toml").is_file());
-        assert!(staged.join("models_cache.json").is_file());
-        assert!(staged.join("cache/codex_apps_tools/tools.json").is_file());
-        assert!(staged.join("plugins/cache/plugin.json").is_file());
-        assert!(staged.join("shell_snapshots/old.sh").is_file());
-        assert!(!staged.join("state_5.sqlite").exists());
-        assert!(!staged.join("state_5.sqlite-wal").exists());
-        assert!(!staged.join("logs_2.sqlite").exists());
-        assert!(!staged.join("logs_2.sqlite-wal").exists());
-        assert!(!staged.join("log").exists());
-        assert!(!staged.join("sessions").exists());
-        assert!(!staged.join(".tmp").exists());
-        assert!(!staged.join("tmp").exists());
-
-        let manifest =
-            std::fs::read_to_string(snapshot.tempdir.path().join("manifest.tsv")).unwrap();
-        assert!(manifest.contains("item-0\t/home/ubuntu/.codex"));
-        assert!(manifest.contains("item-1\t/workspace/other"));
-    }
-
-    #[test]
-    fn subagent_snapshot_preserves_exact_mount_targets() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let gemini_home = root.path().join(".gemini");
-        std::fs::create_dir_all(&gemini_home).expect("gemini home");
-        std::fs::write(gemini_home.join("oauth_creds.json"), "{}").expect("creds");
-        let mounts = vec![ContainerMount {
-            host: gemini_home,
-            container: PathBuf::from("/home/ubuntu/.gemini"),
-            mode: MountMode::Rw,
-        }];
-
-        let (_effective, snapshot) = prepare_subagent_mount_snapshot(&mounts).expect("snapshot");
-        let snapshot = snapshot.expect("snapshot exists");
-        let manifest =
-            std::fs::read_to_string(snapshot.tempdir.path().join("manifest.tsv")).unwrap();
-        assert!(manifest.contains("item-0\t/home/ubuntu/.gemini"));
-    }
-
-    #[test]
-    fn subagent_snapshot_keeps_sqlite_files_for_non_codex_mounts() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let other = root.path().join("other");
-        std::fs::create_dir_all(&other).expect("other");
-        std::fs::write(other.join("state.sqlite"), "other sqlite").expect("sqlite");
-        let mounts = vec![ContainerMount {
-            host: other,
-            container: PathBuf::from("/workspace/other"),
-            mode: MountMode::Rw,
-        }];
-
-        let (_effective, snapshot) = prepare_subagent_mount_snapshot(&mounts).expect("snapshot");
-        let snapshot = snapshot.expect("snapshot exists");
-        assert!(
-            snapshot
-                .tempdir
-                .path()
-                .join("item-0/state.sqlite")
-                .is_file()
-        );
+    fn coder_home_is_injected_for_tool_home_mounts() {
+        assert!(should_inject_coder_home(&[mount(
+            "/host/.cache/tool",
+            "/home/coder/.cache/tool",
+            None
+        )]));
+        assert!(should_inject_coder_home(&[mount(
+            "/host/.config/tool",
+            "/home/coder/.config/tool",
+            None
+        )]));
+        assert!(should_inject_coder_home(&[mount(
+            "/host/.tool",
+            "/home/coder/.tool",
+            None
+        )]));
+        assert!(!should_inject_coder_home(&[mount(
+            "/host/cache",
+            "/workspace/cache",
+            None
+        )]));
     }
 }

@@ -9,12 +9,20 @@ const SAMPLE_CONFIG: &str = include_str!("../harness-hat.example.toml");
 const DOCKER_DIR_PLACEHOLDER: &str = "__HARNESS_HAT_DOCKER_DIR__";
 const BASE_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/harness-hat-base.dockerfile");
 const DEFAULT_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/default.dockerfile");
+const TYPESCRIPT_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/typescript.dockerfile");
+const GO_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/go.dockerfile");
+const RUST_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/rust.dockerfile");
+const PHP_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/php.dockerfile");
 const GITHUB_DOCKER_BASE_URL: &str =
     "https://raw.githubusercontent.com/only-cliches/harness-hat/refs/heads/main/docker";
-const BUILTIN_DOCKERFILES: &[&str] = &["harness-hat-base.dockerfile"];
+const BUILTIN_DOCKERFILES: &[&str] = &[
+    "harness-hat-base.dockerfile",
+    "typescript.dockerfile",
+    "go.dockerfile",
+    "rust.dockerfile",
+    "php.dockerfile",
+];
 
-const HOSTDO_SCRIPT: &str = include_str!("../docker/scripts/hostdo.py");
-const AGENTCTL_SCRIPT: &str = include_str!("../docker/scripts/agentctl.py");
 const KILLME_SCRIPT: &str = include_str!("../docker/scripts/killme.py");
 
 #[instrument(skip(output))]
@@ -36,8 +44,7 @@ pub fn write_sample_config(output: &Path) -> Result<()> {
         .join(".config/harness-hat");
     let docker_dir = resolve_init_docker_dir(&cwd, &home_config_root);
     fs::create_dir_all(&docker_dir)?;
-    ensure_base_dockerfile(&docker_dir)?;
-    ensure_default_dockerfile(&docker_dir)?;
+    ensure_builtin_dockerfiles(&docker_dir)?;
     let docker_dir_literal = toml::Value::String(docker_dir.display().to_string()).to_string();
     let sample = SAMPLE_CONFIG.replace(DOCKER_DIR_PLACEHOLDER, &docker_dir_literal);
     std::fs::write(output, sample)?;
@@ -57,6 +64,7 @@ fn resolve_init_docker_dir(cwd: &Path, home_config_root: &Path) -> PathBuf {
 pub fn ensure_docker_assets(docker_dir: &Path) -> Result<()> {
     ensure_base_dockerfile(docker_dir)?;
     ensure_default_dockerfile(docker_dir)?;
+    ensure_language_dockerfiles(docker_dir)?;
     ensure_helper_scripts(docker_dir)?;
 
     let missing_dockerfiles = missing_builtin_dockerfiles(docker_dir);
@@ -92,6 +100,7 @@ pub fn ensure_docker_assets(docker_dir: &Path) -> Result<()> {
     fs::create_dir_all(docker_dir)?;
     ensure_base_dockerfile(docker_dir)?;
     ensure_default_dockerfile(docker_dir)?;
+    ensure_language_dockerfiles(docker_dir)?;
     ensure_helper_scripts(docker_dir)?;
     download_missing_dockerfiles(docker_dir, &missing_dockerfiles)?;
     Ok(())
@@ -115,6 +124,33 @@ pub fn ensure_base_dockerfile(docker_dir: &Path) -> Result<()> {
     write_text_file(&path, BASE_DOCKERFILE_TEMPLATE)
 }
 
+#[instrument(skip(docker_dir))]
+pub fn ensure_language_dockerfiles(docker_dir: &Path) -> Result<()> {
+    ensure_template_dockerfile(
+        docker_dir,
+        "typescript.dockerfile",
+        TYPESCRIPT_DOCKERFILE_TEMPLATE,
+    )?;
+    ensure_template_dockerfile(docker_dir, "go.dockerfile", GO_DOCKERFILE_TEMPLATE)?;
+    ensure_template_dockerfile(docker_dir, "rust.dockerfile", RUST_DOCKERFILE_TEMPLATE)?;
+    ensure_template_dockerfile(docker_dir, "php.dockerfile", PHP_DOCKERFILE_TEMPLATE)?;
+    Ok(())
+}
+
+fn ensure_builtin_dockerfiles(docker_dir: &Path) -> Result<()> {
+    ensure_base_dockerfile(docker_dir)?;
+    ensure_default_dockerfile(docker_dir)?;
+    ensure_language_dockerfiles(docker_dir)
+}
+
+fn ensure_template_dockerfile(docker_dir: &Path, name: &str, contents: &str) -> Result<()> {
+    let path = docker_dir.join(name);
+    if path.exists() {
+        return Ok(());
+    }
+    write_text_file(&path, contents)
+}
+
 #[cfg(test)]
 pub fn builtin_dockerfile_paths() -> &'static [&'static str] {
     BUILTIN_DOCKERFILES
@@ -136,11 +172,7 @@ fn missing_helper_scripts(docker_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn helper_script_paths(docker_dir: &Path) -> Vec<PathBuf> {
-    vec![
-        docker_dir.join("scripts/hostdo.py"),
-        docker_dir.join("scripts/agentctl.py"),
-        docker_dir.join("scripts/killme.py"),
-    ]
+    vec![docker_dir.join("scripts/killme.py")]
 }
 
 fn prompt_yes_no(prompt: &str) -> Result<bool> {
@@ -155,8 +187,6 @@ fn prompt_yes_no(prompt: &str) -> Result<bool> {
 pub fn ensure_helper_scripts(docker_dir: &Path) -> Result<()> {
     let scripts_dir = docker_dir.join("scripts");
     fs::create_dir_all(&scripts_dir)?;
-    write_text_file(&scripts_dir.join("hostdo.py"), HOSTDO_SCRIPT)?;
-    write_text_file(&scripts_dir.join("agentctl.py"), AGENTCTL_SCRIPT)?;
     write_text_file(&scripts_dir.join("killme.py"), KILLME_SCRIPT)?;
     Ok(())
 }
@@ -203,7 +233,8 @@ fn write_text_file(path: &Path, contents: &str) -> Result<()> {
 mod tests {
     use super::{
         builtin_dockerfile_paths, ensure_base_dockerfile, ensure_default_dockerfile,
-        ensure_docker_assets, resolve_init_docker_dir, write_sample_config,
+        ensure_docker_assets, ensure_language_dockerfiles, resolve_init_docker_dir,
+        write_sample_config,
     };
     use crate::config::Config;
 
@@ -220,27 +251,68 @@ mod tests {
         let parsed: Config = toml::from_str(&contents).expect("parse sample config");
         assert_eq!(parsed.docker_dir, cwd.join("docker"));
 
-        for (profile, host, container) in [
-            ("claude", "~/.claude.json", "/home/ubuntu/.claude.json"),
-            ("claude", "~/.claude", "/home/ubuntu/.claude"),
-            ("codex", "~/.codex", "/home/ubuntu/.codex"),
-            ("codex", "~/.config/codex", "/home/ubuntu/.config/codex"),
-            ("gemini", "~/.gemini", "/home/ubuntu/.gemini"),
-            ("pi", "~/.pi", "/home/ubuntu/.pi"),
+        assert_eq!(parsed.defaults.control.server_port, 7878);
+        assert_eq!(parsed.defaults.control.server_host, "0.0.0.0");
+        for host in [
+            "api.anthropic.com",
+            "claude.ai",
+            "platform.claude.com",
+            "downloads.claude.ai",
+            "storage.googleapis.com",
+            "chatgpt.com",
+            "*.chatgpt.com",
+            "*.openai.com",
+            "api.openai.com",
+            "chat.openai.com",
+            "auth.openai.com",
+            "*.googleapis.com",
+            "generativelanguage.googleapis.com",
+            "aistudio.google.com",
+            "accounts.google.com",
+            "oauth2.googleapis.com",
+            "www.googleapis.com",
+            "openrouter.ai",
+            "api.openrouter.ai",
         ] {
-            let mounts = &parsed
-                .container_profiles
-                .get(profile)
-                .unwrap_or_else(|| panic!("{profile} profile"))
-                .mounts;
             assert!(
-                mounts
+                parsed
+                    .defaults
+                    .containers
+                    .bypass_proxy
                     .iter()
-                    .any(|mount| mount.host == std::path::PathBuf::from(host)
-                        && mount.container == std::path::PathBuf::from(container)),
-                "{profile} profile missing session mount {host} -> {container}"
+                    .any(|entry| entry == host),
+                "missing shared default bypass host {host}"
             );
         }
+        for (host, container) in [
+            ("~/.claude.json", "/home/coder/.claude.json"),
+            ("~/.claude", "/home/coder/.claude"),
+            ("~/.codex", "/home/coder/.codex"),
+            ("~/.config/codex", "/home/coder/.config/codex"),
+            ("~/.gemini", "/home/coder/.gemini"),
+            ("~/.pi", "/home/coder/.pi"),
+        ] {
+            assert!(
+                parsed.defaults.containers.mounts.iter().any(|mount| {
+                    mount.host == std::path::PathBuf::from(host)
+                        && mount.container == std::path::PathBuf::from(container)
+                }),
+                "missing shared defaults mount {host} -> {container}"
+            );
+        }
+
+        let base = parsed.container_profiles.get("base").expect("base profile");
+        assert_eq!(base.image.as_deref(), Some("default"));
+        assert!(base.command.is_none());
+
+        let large = parsed
+            .container_profiles
+            .get("large")
+            .expect("large profile");
+        assert_eq!(large.image.as_deref(), Some("default"));
+        assert_eq!(large.memory.as_deref(), Some("8g"));
+        assert_eq!(large.cpus.as_deref(), Some("4"));
+        assert_eq!(large.shm_size.as_deref(), Some("2g"));
     }
 
     #[test]
@@ -269,6 +341,10 @@ mod tests {
     fn builtin_dockerfile_paths_include_expected_templates() {
         let paths = builtin_dockerfile_paths();
         assert!(paths.contains(&"harness-hat-base.dockerfile"));
+        assert!(paths.contains(&"typescript.dockerfile"));
+        assert!(paths.contains(&"go.dockerfile"));
+        assert!(paths.contains(&"rust.dockerfile"));
+        assert!(paths.contains(&"php.dockerfile"));
     }
 
     #[test]
@@ -283,7 +359,6 @@ mod tests {
             }
             std::fs::write(&file, "FROM scratch").expect("write template");
         }
-        std::fs::write(root.join("scripts/hostdo.py"), "hostdo").expect("write hostdo");
         std::fs::write(root.join("scripts/killme.py"), "killme").expect("write killme");
 
         ensure_docker_assets(&root).expect("ensure assets");
@@ -303,14 +378,11 @@ mod tests {
             }
             std::fs::write(&file, "FROM scratch").expect("write template");
         }
-        std::fs::write(root.join("scripts/hostdo.py"), "old hostdo").expect("write old hostdo");
         std::fs::write(root.join("scripts/killme.py"), "old killme").expect("write old killme");
 
         ensure_docker_assets(&root).expect("ensure assets");
 
-        let hostdo = std::fs::read_to_string(root.join("scripts/hostdo.py")).expect("read hostdo");
         let killme = std::fs::read_to_string(root.join("scripts/killme.py")).expect("read killme");
-        assert!(hostdo.contains("X-Hostdo-Protocol"));
         assert!(killme.contains("killme"));
         assert_ne!(killme, "old killme");
     }
@@ -347,5 +419,26 @@ mod tests {
 
         let content = std::fs::read_to_string(path).expect("read base dockerfile");
         assert!(content.contains("harness-hat base"));
+    }
+
+    #[test]
+    fn ensure_language_dockerfiles_creates_templates_when_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "harness-hat-language-dockerfiles-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create root");
+
+        ensure_language_dockerfiles(&root).expect("write language dockerfiles");
+
+        for (path, marker) in [
+            ("typescript.dockerfile", "TypeScript / Node / Bun"),
+            ("go.dockerfile", "Go image"),
+            ("rust.dockerfile", "Rust image"),
+            ("php.dockerfile", "PHP image"),
+        ] {
+            let content = std::fs::read_to_string(root.join(path)).expect("read dockerfile");
+            assert!(content.contains(marker), "{path} missing marker {marker}");
+        }
     }
 }

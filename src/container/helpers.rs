@@ -2,6 +2,12 @@ use anyhow::{Context, Result};
 use std::env;
 use std::path::Path;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerUsageStats {
+    pub cpu_percent: String,
+    pub memory_usage: String,
+}
+
 pub(crate) fn read_container_id(cidfile: &Path, docker_name: &str) -> Result<String> {
     for _ in 0..400 {
         if let Ok(contents) = std::fs::read_to_string(cidfile) {
@@ -64,6 +70,43 @@ pub fn inspect_container_exit(docker_name: &str) -> Result<Option<(Option<i32>, 
     let exit_code = parts.next().and_then(|s| s.trim().parse::<i32>().ok());
     let error = parts.next().unwrap_or("").trim().to_string();
     Ok(Some((exit_code, error)))
+}
+
+pub fn inspect_container_usage(docker_name: &str) -> Result<Option<ContainerUsageStats>> {
+    let output = std::process::Command::new("docker")
+        .args([
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.CPUPerc}}\t{{.MemUsage}}",
+            docker_name,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .context("running docker stats")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let line = raw.trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+
+    let mut parts = line.splitn(2, '\t');
+    let cpu_percent = parts.next().unwrap_or("").trim().to_string();
+    let memory_usage = parts.next().unwrap_or("").trim().to_string();
+    if cpu_percent.is_empty() && memory_usage.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(ContainerUsageStats {
+            cpu_percent,
+            memory_usage,
+        }))
+    }
 }
 
 pub(crate) fn docker_image_exists(image: &str) -> std::io::Result<bool> {

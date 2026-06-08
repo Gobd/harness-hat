@@ -2,50 +2,13 @@ use super::*;
 
 impl App {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
             return;
         }
 
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if self.focus == Focus::Activity
-                && let Some(id) = self.active_activity.clone()
-            {
-                self.cancel_activity(&id);
-                return;
-            }
-            if self.focus == Focus::Network
-                && let Some(si) = self.active_network_session
-                && let Some(id) = self.selected_network_activity_id(si)
-            {
-                self.cancel_activity(&id);
-                return;
-            }
-
-            if self.build_is_running() {
-                self.cancel_build();
-                return;
-            }
-
-            if self.focus == Focus::Terminal {
-                if let Some(si) = self.active_session {
-                    if self.session_is_loading(si) {
-                        let label = self.sessions[si].tab_label();
-                        self.push_log(format!("Cancelled container startup: {}", label), false);
-                        self.close_session(si);
-                        return;
-                    }
-                }
-            }
-
-            if self.focus == Focus::Terminal {
-                if let Some(si) = self.active_session {
-                    if let Some(session) = self.sessions.get(si) {
-                        session.send_input(vec![0x03]);
-                    }
-                }
-            }
-
+        if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.should_quit = true;
             return;
         }
 
@@ -79,16 +42,6 @@ impl App {
             }
         }
 
-        if let Some(idx) = self.active_exec_modal_idx() {
-            match control_hotkey_char(key) {
-                Some('y') => self.approve_exec(idx, false),
-                Some('r') => self.approve_exec(idx, true),
-                Some('n') => self.deny_exec(idx),
-                Some('d') => self.deny_exec_forever(idx),
-                _ => {}
-            }
-            return;
-        }
         if !self.pending_net.is_empty() {
             match control_hotkey_char(key) {
                 Some('y') => self.approve_net(0),
@@ -166,6 +119,7 @@ impl App {
                 } else {
                     self.build_container_idx = None;
                     self.build_project_idx = None;
+                    self.build_session_group = None;
                     self.focus = Focus::Sidebar;
                 }
             }
@@ -183,12 +137,14 @@ impl App {
         self.log_fullscreen = true;
     }
 
+    #[allow(dead_code)]
     pub(crate) fn open_terminal_fullscreen(&mut self) {
         self.log_fullscreen = false;
         self.terminal_fullscreen = true;
         self.last_terminal_esc = None;
     }
 
+    #[allow(dead_code)]
     pub(crate) fn close_terminal_fullscreen(&mut self) {
         self.terminal_fullscreen = false;
         self.last_terminal_esc = None;
@@ -282,7 +238,10 @@ impl App {
 
     pub(crate) fn update_sidebar_preview(&mut self, items: &[SidebarItem]) {
         self.preview_session = match items.get(self.sidebar_idx) {
-            Some(SidebarItem::Session(si)) => Some(*si),
+            Some(SidebarItem::Session(si)) => self.first_terminal_for_session_group(*si),
+            Some(SidebarItem::SessionTerminal(group_idx, session_pos)) => {
+                self.session_group_terminal(*group_idx, *session_pos)
+            }
             Some(SidebarItem::NetworkGroup(si)) => Some(*si),
             Some(SidebarItem::Activity(id)) => self.session_for_activity(id),
             _ => None,
@@ -291,9 +250,7 @@ impl App {
 
     pub(crate) fn handle_sidebar_enter(&mut self, items: &[SidebarItem]) {
         match items.get(self.sidebar_idx).cloned() {
-            Some(SidebarItem::Workspace(_)) => {
-                // do nothing
-            }
+            Some(SidebarItem::NewSession) => self.open_picker(),
             Some(SidebarItem::Settings(pi)) => {
                 self.active_settings_project = Some(pi);
                 self.active_activity = None;
@@ -314,11 +271,30 @@ impl App {
                 self.active_settings_project = None;
             }
             Some(SidebarItem::Session(si)) => {
-                if let Some(session) = self.sessions.get(si) {
+                if let Some(session_idx) = self.first_terminal_for_session_group(si) {
+                    if let Some(session) = self.sessions.get(session_idx) {
+                        session.clear_bell();
+                    }
+                    self.active_session = Some(session_idx);
+                    self.preview_session = Some(session_idx);
+                    self.scroll_mode = false;
+                    self.scroll_mouse_passthrough = false;
+                    self.terminal_scroll = 0;
+                    self.focus = Focus::Terminal;
+                    self.active_activity = None;
+                    self.active_network_session = None;
+                    self.active_settings_project = None;
+                }
+            }
+            Some(SidebarItem::SessionTerminal(group_idx, session_pos)) => {
+                let Some(session_idx) = self.session_group_terminal(group_idx, session_pos) else {
+                    return;
+                };
+                if let Some(session) = self.sessions.get(session_idx) {
                     session.clear_bell();
                 }
-                self.active_session = Some(si);
-                self.preview_session = Some(si);
+                self.active_session = Some(session_idx);
+                self.preview_session = Some(session_idx);
                 self.scroll_mode = false;
                 self.scroll_mouse_passthrough = false;
                 self.terminal_scroll = 0;
@@ -348,6 +324,8 @@ impl App {
                 self.active_settings_project = None;
             }
             Some(SidebarItem::NewWorkspace) => self.open_new_project(),
+            // Non-selectable; navigation never lands here.
+            Some(SidebarItem::WorkspacesHeader) => {}
             None => {}
         }
     }

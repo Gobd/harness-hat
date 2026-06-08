@@ -3,9 +3,10 @@ mod tests {
     use crate::ca::CaStore;
     use crate::proxy::core::{NetworkDecision, ProxyState, SourceIdentityStatus, SourcePriority};
     use crate::proxy::helpers::{
-        bypass_host_matches, decode_source_from_proxy_authorization,
-        ensure_host_header_matches_target, format_byte_count, proxy_authorization_matches_token,
-        resolve_public_addrs, split_host_port,
+        bypass_host_matches, container_tls_passthrough_match,
+        decode_source_from_proxy_authorization, ensure_host_header_matches_target,
+        format_byte_count, proxy_authorization_matches_token, resolve_public_addrs,
+        split_host_port,
     };
     use crate::proxy::http::{prompt_network, read_body_any};
     use crate::shared_config::SharedConfig;
@@ -46,6 +47,40 @@ mod tests {
         let headers = vec![("Proxy-Authorization".to_string(), header_value)];
         assert!(proxy_authorization_matches_token(&headers, "testtoken"));
         assert!(!proxy_authorization_matches_token(&headers, "wrong-token"));
+    }
+
+    #[test]
+    fn tls_passthrough_matches_shared_bypass_hosts() {
+        let raw = r#"
+version = 1
+docker_dir = "/tmp"
+
+[manager]
+global_rules_file = "/tmp/global.toml"
+
+[defaults.containers]
+bypass_proxy = ["api.openai.com", "*.googleapis.com"]
+
+[container_profiles.dev]
+image = "default"
+"#;
+        let root = unique_temp_dir("proxy-test-config");
+        let config_path = root.join("harness-hat.toml");
+        std::fs::write(&config_path, raw).expect("write config");
+        let cfg = crate::config::load(&config_path).expect("load config");
+
+        assert_eq!(
+            container_tls_passthrough_match(&cfg, Some("dev"), "api.openai.com"),
+            Some("api.openai.com")
+        );
+        assert_eq!(
+            container_tls_passthrough_match(&cfg, Some("dev"), "docs.googleapis.com"),
+            Some("*.googleapis.com")
+        );
+        assert_eq!(
+            container_tls_passthrough_match(&cfg, Some("dev"), "example.com"),
+            None
+        );
     }
 
     #[test]
@@ -114,24 +149,24 @@ global_rules_file = "/tmp/global.toml""#;
             activity_tx,
         )
         .unwrap();
-        let first = state.with_fixed_source("p", "gemini", "session-a", SourcePriority::Subagent);
-        let second = state.with_fixed_source("p", "gemini", "session-b", SourcePriority::Subagent);
+        let first = state.with_fixed_source("p", "tool", "session-a", SourcePriority::Limited);
+        let second = state.with_fixed_source("p", "tool", "session-b", SourcePriority::Limited);
 
         let permits = (0..32)
             .map(|_| {
                 first
-                    .try_acquire_source_connection(Some("p"), Some("gemini"))
+                    .try_acquire_source_connection(Some("p"), Some("tool"))
                     .expect("permit should be available")
             })
             .collect::<Vec<_>>();
         assert!(
             first
-                .try_acquire_source_connection(Some("p"), Some("gemini"))
+                .try_acquire_source_connection(Some("p"), Some("tool"))
                 .is_none()
         );
         assert!(
             second
-                .try_acquire_source_connection(Some("p"), Some("gemini"))
+                .try_acquire_source_connection(Some("p"), Some("tool"))
                 .is_some(),
             "same profile name in another scoped listener must have its own source bucket"
         );
@@ -178,7 +213,7 @@ global_rules_file = "/tmp/global.toml""#;
     }
 
     #[test]
-    fn subagent_source_connection_limit_is_strict() {
+    fn limited_source_connection_limit_is_strict() {
         let ca =
             Arc::new(CaStore::load_or_create(&std::env::temp_dir().join("proxy-test-ca")).unwrap());
         let raw = r#"
@@ -197,26 +232,26 @@ global_rules_file = "/tmp/global.toml""#;
             activity_tx,
         )
         .unwrap();
-        let subagent =
-            state.with_fixed_source("p", "gemini", "subagent-session", SourcePriority::Subagent);
+        let limited =
+            state.with_fixed_source("p", "tool", "limited-session", SourcePriority::Limited);
 
-        let subagent_permits = (0..32)
+        let limited_permits = (0..32)
             .map(|_| {
-                subagent
-                    .try_acquire_source_connection(Some("p"), Some("gemini"))
-                    .expect("subagent permit should be available")
+                limited
+                    .try_acquire_source_connection(Some("p"), Some("tool"))
+                    .expect("limited permit should be available")
             })
             .collect::<Vec<_>>();
         assert!(
-            subagent
-                .try_acquire_source_connection(Some("p"), Some("gemini"))
+            limited
+                .try_acquire_source_connection(Some("p"), Some("tool"))
                 .is_none()
         );
-        drop(subagent_permits);
+        drop(limited_permits);
     }
 
     #[test]
-    fn subagents_cannot_exhaust_primary_scoped_proxy_capacity() {
+    fn limiteds_cannot_exhaust_primary_scoped_proxy_capacity() {
         let ca =
             Arc::new(CaStore::load_or_create(&std::env::temp_dir().join("proxy-test-ca")).unwrap());
         let raw = r#"
@@ -237,20 +272,20 @@ global_rules_file = "/tmp/global.toml""#;
         .unwrap();
         let primary =
             state.with_fixed_source("p", "primary", "primary-session", SourcePriority::Primary);
-        let subagent =
-            state.with_fixed_source("p", "gemini", "subagent-session", SourcePriority::Subagent);
+        let limited =
+            state.with_fixed_source("p", "tool", "limited-session", SourcePriority::Limited);
 
-        let mut subagent_permits = Vec::new();
-        while let Some(permit) = subagent.try_acquire_connection() {
-            subagent_permits.push(permit);
+        let mut limited_permits = Vec::new();
+        while let Some(permit) = limited.try_acquire_connection() {
+            limited_permits.push(permit);
             assert!(
-                subagent_permits.len() < 1000,
-                "subagent limiter should saturate well before this point"
+                limited_permits.len() < 1000,
+                "limited limiter should saturate well before this point"
             );
         }
         assert!(
             primary.try_acquire_connection().is_some(),
-            "primary agents should retain reserved scoped proxy capacity when subagents are saturated"
+            "primary containers should retain reserved scoped proxy capacity when limiteds are saturated"
         );
         for _ in 0..1000 {
             assert!(
@@ -258,7 +293,7 @@ global_rules_file = "/tmp/global.toml""#;
                 "primary proxy listener connections should not be rejected by harness-hat admission limits"
             );
         }
-        drop(subagent_permits);
+        drop(limited_permits);
     }
 
     #[test]

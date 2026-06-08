@@ -1,6 +1,19 @@
 # Changelog
 
-This changelog is derived from git history and the current working tree.
+## 0.8.0 Unreleased
+
+- Breaking: Harness Hat now uses a workspace + Docker template session model.
+- Breaking: sessions are shell-first Docker containers; command-specific startup
+  and host command control have been removed.
+- Breaking: manager config now uses `[defaults.control]` for the authenticated
+  lifecycle server used by `killme`.
+- Added per-template Docker resource controls: `memory`, `cpus`, and
+  `shm_size`.
+- Added built-in Docker templates for TypeScript/Bun/Node/pnpm, Go, Rust, and
+  PHP development environments.
+- Preserved proxy-based network policy and container self-termination through
+  `killme`.
+
 
 ## 0.7.0 Jun 1, 2026
 

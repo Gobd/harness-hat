@@ -49,7 +49,7 @@ impl App {
     }
 
     pub(crate) fn sidebar_item_is_selectable(item: &SidebarItem) -> bool {
-        !matches!(item, SidebarItem::Workspace(_))
+        !matches!(item, SidebarItem::WorkspacesHeader)
     }
 
     pub(crate) fn first_selectable_sidebar_idx(items: &[SidebarItem]) -> usize {
@@ -95,9 +95,7 @@ impl App {
         loaded_config_path: PathBuf,
         token: String,
         session_registry: SessionRegistry,
-        exec_pending_rx: mpsc::Receiver<PendingItem>,
         stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
-        agent_control_rx: mpsc::Receiver<AgentControlRequest>,
         net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
         activity_rx: mpsc::UnboundedReceiver<ActivityEvent>,
         audit_rx: mpsc::Receiver<AuditEntry>,
@@ -141,21 +139,17 @@ impl App {
         });
 
         let (build_event_tx, build_event_rx) = mpsc::unbounded_channel();
+        let (container_usage_tx, container_usage_rx) = mpsc::unbounded_channel();
+        let (rules_scan_tx, rules_scan_rx) = mpsc::unbounded_channel();
 
         let rules_path = &cfg.manager.global_rules_file;
-        let (hostdo_rule_count, network_rule_count) = crate::rules::load(rules_path)
-            .map(|r| {
-                (
-                    r.hostdo.commands.len(),
-                    r.network.allowlist.len() + r.network.denylist.len(),
-                )
-            })
-            .unwrap_or((0, 0));
+        let network_rule_count = crate::rules::load(rules_path)
+            .map(|r| r.network.allowlist.len() + r.network.denylist.len())
+            .unwrap_or(0);
         log.push_front(LogEntry::Msg {
             text: format!(
-                "Loaded rules from {} (hostdo: {}, network: {})",
+                "Loaded rules from {} (network: {})",
                 rules_path.display(),
-                hostdo_rule_count,
                 network_rule_count
             ),
             is_error: false,
@@ -170,7 +164,6 @@ impl App {
             ca_cert_path,
             proxy_state,
             workspaces,
-            pending_exec: vec![],
             pending_stop: vec![],
             pending_net: vec![],
             activities: vec![],
@@ -178,20 +171,10 @@ impl App {
             log_scroll: 0,
             focus: Focus::Sidebar,
             sidebar_idx: Self::first_selectable_sidebar_idx(
-                &cfg.workspaces
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(pi, _)| {
-                        [
-                            SidebarItem::Workspace(pi),
-                            SidebarItem::Launch(pi),
-                            SidebarItem::Settings(pi),
-                        ]
-                    })
-                    .chain(std::iter::once(SidebarItem::NewWorkspace))
-                    .collect::<Vec<_>>(),
+                &[SidebarItem::NewSession, SidebarItem::NewWorkspace].to_vec(),
             ),
             sidebar_offset: 0,
+            session_groups: Vec::new(),
             active_session: None,
             active_activity: None,
             active_network_session: None,
@@ -202,6 +185,7 @@ impl App {
             container_picker: None,
             build_container_idx: None,
             build_project_idx: None,
+            build_session_group: None,
             build_cursor: 0,
             build_output: VecDeque::new(),
             build_scroll: 0,
@@ -209,19 +193,18 @@ impl App {
             new_project: None,
             remove_workspace_confirm: None,
             base_rules_changed: None,
-            exec_pending_rx,
             stop_pending_rx,
-            agent_control_rx,
-            pending_agent_sends: VecDeque::new(),
-            subagent_first_output_at: HashMap::new(),
-            ready_subagent_tokens: HashSet::new(),
-            last_agent_spawn_at: HashMap::new(),
             net_pending_rx,
             activity_rx,
             audit_rx,
             build_event_rx,
             build_event_tx,
             build_task: None,
+            container_usage_rx,
+            container_usage_tx,
+            rules_scan_rx,
+            rules_scan_tx,
+            rules_scan_in_flight: false,
             should_quit: false,
             passthrough_mode: false,
             passthrough_exit_code_slot: None,
@@ -231,15 +214,11 @@ impl App {
             scroll_mode: false,
             scroll_mouse_passthrough: false,
             terminal_scroll: 0,
+            container_usage: HashMap::new(),
             last_base_rules_poll: std::time::Instant::now(),
             watched_rules_stamps,
             pending_base_rules_internal_write: std::collections::HashMap::new(),
         })
-    }
-
-    pub fn enable_passthrough_mode(&mut self, exit_code_slot: Arc<std::sync::atomic::AtomicI32>) {
-        self.passthrough_mode = true;
-        self.passthrough_exit_code_slot = Some(exit_code_slot);
     }
 
     pub(crate) fn tick_base_rules_file_watch(&mut self) {
@@ -251,22 +230,44 @@ impl App {
 
         let cfg = self.config.get();
         let watched_paths = Self::watched_rules_paths(&cfg);
-        let now = std::time::Instant::now();
 
+        // Cheap, no-I/O bookkeeping: drop state for paths we no longer watch.
         self.watched_rules_stamps
             .retain(|path, _| watched_paths.iter().any(|watched| watched == path));
         self.pending_base_rules_internal_write
             .retain(|path, pending| {
                 watched_paths.iter().any(|watched| watched == path) && now <= pending.expires_at
             });
-        for path in &watched_paths {
-            self.watched_rules_stamps
-                .entry(path.clone())
-                .or_insert_with(|| Self::watched_file_stamp(path));
-        }
 
-        for path in watched_paths {
-            let current_stamp = Self::watched_file_stamp(&path);
+        // Stamping each file means `fs::metadata` + a full `fs::read`/hash per
+        // file, which can stall for the size of the file. Run it off the UI
+        // thread and apply the result in drain_channels(); skip if a scan is
+        // already running so ticks never pile up.
+        if self.rules_scan_in_flight {
+            return;
+        }
+        self.rules_scan_in_flight = true;
+        let tx = self.rules_scan_tx.clone();
+        std::thread::spawn(move || {
+            let stamps: Vec<(PathBuf, WatchedFileStamp)> = watched_paths
+                .into_iter()
+                .map(|path| {
+                    let stamp = Self::watched_file_stamp(&path);
+                    (path, stamp)
+                })
+                .collect();
+            let _ = tx.send(stamps);
+        });
+    }
+
+    /// Apply a background rules-file scan: compare each freshly computed stamp
+    /// against the last known one and raise a security alert on any change that
+    /// wasn't one of our own pending writes. Runs on the UI thread.
+    pub(crate) fn apply_rules_scan(&mut self, stamps: Vec<(PathBuf, WatchedFileStamp)>) {
+        self.rules_scan_in_flight = false;
+        let now = std::time::Instant::now();
+
+        for (path, current_stamp) in stamps {
             let prev = self
                 .watched_rules_stamps
                 .entry(path.clone())
@@ -310,6 +311,7 @@ impl App {
         );
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_completed_rules_internal_write(
         &mut self,
         path: PathBuf,
@@ -326,6 +328,7 @@ impl App {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn note_base_rules_internal_write(&mut self, expected_content: String) {
         let path = self.config.get().manager.global_rules_file.clone();
         self.note_rules_internal_write(path, expected_content);
@@ -334,95 +337,197 @@ impl App {
     pub fn sidebar_items(&self) -> Vec<SidebarItem> {
         let cfg = self.config.get();
         let mut items = Vec::new();
-        for (pi, proj) in cfg.workspaces.iter().enumerate() {
-            items.push(SidebarItem::Workspace(pi));
-            let mut seen_sessions = std::collections::HashSet::new();
-            for (si, session) in self.sessions.iter().enumerate() {
-                if session.project != proj.name || session.is_subagent() {
-                    continue;
-                }
-                self.append_session_tree_items(si, &mut items, &mut seen_sessions);
+        items.push(SidebarItem::NewSession);
+
+        for (gi, group) in self.session_groups.iter().enumerate() {
+            items.push(SidebarItem::Session(gi));
+            if let Some(session_idx) = group.terminal_indices.first().copied()
+                && session_idx < self.sessions.len()
+            {
+                items.extend(Self::sidebar_activity_items_for_session(
+                    session_idx,
+                    self.activities_for_session(session_idx),
+                ));
             }
-            for (si, session) in self.sessions.iter().enumerate() {
-                if session.project == proj.name
-                    && session.is_subagent()
-                    && !seen_sessions.contains(&si)
-                    && !self.sessions.iter().any(|parent| {
-                        session.parent_session_token.as_deref() == Some(&parent.session_token)
-                    })
-                {
-                    self.append_session_tree_items(si, &mut items, &mut seen_sessions);
-                }
+            if let Some(pi) = group.workspace_idx {
+                items.push(SidebarItem::Settings(pi));
             }
-            if self.build_project_idx == Some(pi) && self.build_is_running() {
+        }
+
+        if let Some(pi) = self.build_project_idx {
+            if pi < cfg.workspaces.len() {
                 items.push(SidebarItem::Build(pi));
             }
-            items.push(SidebarItem::Launch(pi));
-            items.push(SidebarItem::Settings(pi));
         }
+
+        // Every configured workspace gets a launch entry, so a new session can
+        // be started in any workspace directly from the sidebar, preceded by a
+        // non-selectable section header.
+        if !cfg.workspaces.is_empty() {
+            items.push(SidebarItem::WorkspacesHeader);
+            for pi in 0..cfg.workspaces.len() {
+                items.push(SidebarItem::Launch(pi));
+            }
+        }
+
         items.push(SidebarItem::NewWorkspace);
         items
     }
 
-    fn append_session_tree_items(
+    pub(crate) fn session_group_terminal(
         &self,
+        group_idx: usize,
+        terminal_pos: usize,
+    ) -> Option<usize> {
+        self.session_groups
+            .get(group_idx)
+            .and_then(|group| group.terminal_indices.get(terminal_pos).copied())
+    }
+
+    pub(crate) fn first_terminal_for_session_group(&self, group_idx: usize) -> Option<usize> {
+        self.session_groups
+            .get(group_idx)
+            .and_then(|group| group.terminal_indices.first().copied())
+    }
+
+    pub(crate) fn resolve_or_create_session_group(
+        &mut self,
+        session_group: Option<usize>,
+        workspace_idx: usize,
+        ctr_idx: usize,
+    ) -> usize {
+        if let Some(group_idx) = session_group
+            && group_idx < self.session_groups.len()
+        {
+            return group_idx;
+        }
+
+        let cfg = self.config.get();
+        let workspace_name = cfg
+            .workspaces
+            .get(workspace_idx)
+            .map(|ws| ws.name.clone())
+            .unwrap_or_else(|| format!("workspace-{workspace_idx}"));
+        let template_name = cfg
+            .containers
+            .get(ctr_idx)
+            .map(|ctr| ctr.name.clone())
+            .unwrap_or_else(|| format!("template-{ctr_idx}"));
+
+        self.session_groups.push(TuiSessionGroup {
+            workspace_name,
+            workspace_idx: Some(workspace_idx),
+            template_name,
+            template_idx: Some(ctr_idx),
+            terminal_indices: Vec::new(),
+        });
+
+        self.session_groups.len().saturating_sub(1)
+    }
+
+    pub(crate) fn add_session_terminal(&mut self, session_group: usize, session_idx: usize) {
+        if let Some(group) = self.session_groups.get_mut(session_group) {
+            group.terminal_indices.clear();
+            group.terminal_indices.push(session_idx);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn session_terminal_pos(
+        &self,
+        session_group: usize,
         session_idx: usize,
-        items: &mut Vec<SidebarItem>,
-        seen_sessions: &mut std::collections::HashSet<usize>,
+    ) -> Option<usize> {
+        self.session_groups.get(session_group).and_then(|group| {
+            group
+                .terminal_indices
+                .iter()
+                .position(|existing| *existing == session_idx)
+        })
+    }
+
+    pub(crate) fn remove_session_terminal(
+        &mut self,
+        session_idx: usize,
+        removed_from: Option<usize>,
     ) {
-        if !seen_sessions.insert(session_idx) {
+        if let Some(group_idx) = removed_from {
+            self.remove_terminal_from_group(group_idx, session_idx);
+            self.remove_empty_session_groups();
             return;
         }
-        items.push(SidebarItem::Session(session_idx));
-        items.extend(Self::sidebar_activity_items_for_session(
-            session_idx,
-            self.activities_for_session(session_idx),
-        ));
-        let Some(session) = self.sessions.get(session_idx) else {
-            return;
-        };
-        for child_idx in self.direct_children(&session.session_token) {
-            self.append_session_tree_items(child_idx, items, seen_sessions);
+
+        for group_idx in 0..self.session_groups.len() {
+            self.remove_terminal_from_group(group_idx, session_idx);
         }
+        self.remove_empty_session_groups();
+    }
+
+    fn remove_terminal_from_group(&mut self, group_idx: usize, session_idx: usize) {
+        if let Some(group) = self.session_groups.get_mut(group_idx) {
+            group.terminal_indices.retain(|si| *si != session_idx);
+            for idx in &mut group.terminal_indices {
+                if *idx > session_idx {
+                    *idx -= 1;
+                }
+            }
+        }
+    }
+
+    fn remove_empty_session_groups(&mut self) {
+        self.session_groups
+            .retain(|group| !group.terminal_indices.is_empty());
     }
 
     pub fn selected_project_idx(&self) -> Option<usize> {
         match self.sidebar_items().get(self.sidebar_idx) {
-            Some(SidebarItem::Workspace(pi)) => Some(*pi),
-            Some(SidebarItem::Session(si)) => {
-                let cfg = self.config.get();
-                let name = self.sessions.get(*si)?.project.as_str();
-                cfg.workspaces.iter().position(|p| p.name == name)
-            }
-            Some(SidebarItem::NetworkGroup(si)) => {
-                let cfg = self.config.get();
-                let name = self.sessions.get(*si)?.project.as_str();
-                cfg.workspaces.iter().position(|p| p.name == name)
-            }
+            Some(SidebarItem::Session(si)) | Some(SidebarItem::SessionTerminal(si, _)) => self
+                .session_groups
+                .get(*si)
+                .and_then(|group| group.workspace_idx),
+            Some(SidebarItem::NewSession) => None,
+            Some(SidebarItem::NetworkGroup(si)) => self.sessions.get(*si).and_then(|session| {
+                self.config
+                    .get()
+                    .workspaces
+                    .iter()
+                    .position(|p| p.name == session.project)
+            }),
             Some(SidebarItem::Activity(id)) => {
                 let cfg = self.config.get();
                 let project = self.activity_by_id(id)?.project.as_str();
                 cfg.workspaces.iter().position(|p| p.name == project)
             }
-            Some(SidebarItem::Settings(pi)) => Some(*pi),
+            Some(SidebarItem::Settings(si)) => self
+                .session_groups
+                .get(*si)
+                .and_then(|group| group.workspace_idx),
+            // A workspace launch entry already carries the workspace index.
             Some(SidebarItem::Launch(pi)) => Some(*pi),
             Some(SidebarItem::Build(pi)) => Some(*pi),
-            Some(SidebarItem::NewWorkspace) => None,
+            Some(SidebarItem::WorkspacesHeader) | Some(SidebarItem::NewWorkspace) => None,
             None => None,
         }
     }
 
-    pub fn pending_for_session(&self, session_idx: usize) -> Vec<usize> {
-        let project = match self.sessions.get(session_idx) {
-            Some(s) => s.project.as_str(),
-            None => return vec![],
+    pub(crate) fn session_depth(&self, session_idx: usize) -> usize {
+        let _ = session_idx;
+        0
+    }
+
+    pub(crate) fn session_is_waiting(&self, session_idx: usize) -> bool {
+        let Some(session) = self.sessions.get(session_idx) else {
+            return false;
         };
-        self.pending_exec
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| item.project == project)
-            .map(|(i, _)| i)
-            .collect()
+        if session.is_exited() || self.session_is_loading(session_idx) {
+            return false;
+        }
+        session.terminal_stable_for() >= std::time::Duration::from_secs(2)
+    }
+
+    pub fn pending_for_session(&self, session_idx: usize) -> Vec<usize> {
+        let _ = session_idx;
+        Vec::new()
     }
 
     pub(crate) fn activity_by_id(&self, id: &str) -> Option<&Activity> {
@@ -454,6 +559,7 @@ impl App {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn sidebar_activity_items_for_session(
         session_idx: usize,
         activities: Vec<&Activity>,
@@ -506,12 +612,6 @@ impl App {
     pub(crate) fn network_cursor_for_session(&self, session_idx: usize) -> usize {
         let len = self.network_activity_count_for_session(session_idx);
         self.network_cursor_for_len(session_idx, len)
-    }
-
-    pub(crate) fn selected_network_activity_id(&self, session_idx: usize) -> Option<ActivityId> {
-        let activities = self.network_activities_for_session(session_idx);
-        let cursor = self.network_cursor_for_len(session_idx, activities.len());
-        activities.get(cursor).map(|activity| activity.id.clone())
     }
 
     pub(crate) fn clamp_active_network_cursor(&mut self) {
@@ -589,18 +689,8 @@ impl App {
                     activity.state = state;
                     activity.status = status;
                     activity.updated_at = std::time::Instant::now();
-                    if activity.state == crate::activity::ActivityState::Running {
-                        activity.mark_command_started(activity.updated_at);
-                    } else if matches!(
-                        activity.state,
-                        crate::activity::ActivityState::PendingApproval
-                            | crate::activity::ActivityState::PullingImage
-                    ) {
-                        activity.clear_command_timing();
-                    }
                     if activity.state.is_terminal() {
                         activity.finished_at.get_or_insert(activity.updated_at);
-                        activity.mark_command_finished(activity.updated_at);
                     } else {
                         activity.finished_at = None;
                         activity.terminal_unselected_at = None;
@@ -618,38 +708,9 @@ impl App {
                     activity.status = status;
                     activity.updated_at = std::time::Instant::now();
                     activity.finished_at = Some(activity.updated_at);
-                    activity.mark_command_finished(activity.updated_at);
                     activity.terminal_unselected_at = None;
                 }
             }
-        }
-    }
-
-    pub(crate) fn cancel_activity(&mut self, id: &str) {
-        if let Some(activity) = self.activity_by_id(id) {
-            activity.request_cancel();
-        }
-        if let Some(idx) = self
-            .pending_exec
-            .iter()
-            .position(|item| item.activity_id == id)
-        {
-            self.deny_exec(idx);
-        }
-        if let Some(idx) = self
-            .pending_net
-            .iter()
-            .position(|item| item.activity_id == id)
-        {
-            self.deny_net(idx);
-        }
-        if let Some(activity) = self.activity_by_id_mut(id) {
-            activity.state = crate::activity::ActivityState::Cancelled;
-            activity.status = Some("cancel requested".to_string());
-            activity.updated_at = std::time::Instant::now();
-            activity.finished_at = Some(activity.updated_at);
-            activity.mark_command_finished(activity.updated_at);
-            activity.terminal_unselected_at = None;
         }
     }
 
@@ -724,35 +785,39 @@ impl App {
         self.clamp_active_network_cursor();
     }
 
-    pub(crate) fn active_exec_modal_idx(&self) -> Option<usize> {
-        (!self.pending_exec.is_empty()).then_some(0)
+    pub(crate) fn refresh_session_terminal_states(&mut self) {
+        for session in &mut self.sessions {
+            session.refresh_terminal_snapshot();
+        }
     }
 
     pub(crate) fn has_pending_approval_modal(&self) -> bool {
-        self.active_exec_modal_idx().is_some() || !self.pending_net.is_empty()
+        !self.pending_net.is_empty()
     }
 
     pub(crate) fn sidebar_workspace_hotkey_target(&self, hotkey: char) -> Option<usize> {
-        let items = self.sidebar_items();
-        let workspace_idx = items.iter().position(|item| match item {
-            SidebarItem::Workspace(pi) => {
-                self.workspaces
-                    .get(*pi)
-                    .and_then(|workspace| workspace.sidebar_hotkey)
-                    == Some(hotkey)
-            }
-            _ => false,
-        })?;
+        let workspace_idx = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.sidebar_hotkey == Some(hotkey))?;
 
+        let items = self.sidebar_items();
+        // Prefer jumping to an active session group for this workspace; if none
+        // exists, fall back to the workspace's launch entry.
         items
             .iter()
-            .enumerate()
-            .skip(workspace_idx + 1)
-            .take_while(|(_, item)| {
-                !matches!(item, SidebarItem::Workspace(_) | SidebarItem::NewWorkspace)
+            .position(|item| matches!(item, SidebarItem::Session(si) if self.selected_project_idx_for_group(*si) == Some(workspace_idx)))
+            .or_else(|| {
+                items
+                    .iter()
+                    .position(|item| matches!(item, SidebarItem::Launch(pi) if *pi == workspace_idx))
             })
-            .find(|(_, item)| Self::sidebar_item_is_selectable(item))
-            .map(|(idx, _)| idx)
+    }
+
+    pub(crate) fn selected_project_idx_for_group(&self, group_idx: usize) -> Option<usize> {
+        self.session_groups
+            .get(group_idx)
+            .and_then(|group| group.workspace_idx)
     }
 
     pub(crate) fn session_is_loading(&self, session_idx: usize) -> bool {
@@ -773,6 +838,8 @@ impl App {
         if idx >= self.sessions.len() {
             return;
         }
+
+        let selected_before = self.selected_sidebar_item_from(&self.sidebar_items());
 
         let mut indices = self.session_tree_indices(idx);
         indices.sort_unstable();
@@ -797,20 +864,19 @@ impl App {
             })
             .flatten()
             .collect::<std::collections::HashSet<_>>();
-        self.fail_pending_agent_sends_for_sessions(&tokens);
         self.deny_pending_network_for_sessions(&tokens, &container_identities);
 
         for remove_idx in indices.into_iter().rev() {
+            self.remove_session_terminal(remove_idx, None);
             if let Some(tok) = self
                 .sessions
                 .get(remove_idx)
                 .map(|s| s.session_token.clone())
             {
                 self.session_registry.remove(&tok);
-                self.subagent_first_output_at.remove(&tok);
-                self.ready_subagent_tokens.remove(&tok);
             }
             if let Some(session) = self.sessions.get(remove_idx) {
+                self.container_usage.remove(&session.docker_name);
                 if !session.is_exited() {
                     session.terminate();
                 }
@@ -820,43 +886,14 @@ impl App {
         }
 
         let items = self.sidebar_items();
-        if self.sidebar_idx >= items.len() {
-            self.sidebar_idx = items.len().saturating_sub(1);
-        }
+        self.restore_sidebar_selection(selected_before.as_ref(), &items);
     }
 
     fn session_tree_indices(&self, idx: usize) -> Vec<usize> {
-        let mut indices = Vec::new();
-        self.collect_session_tree_indices(idx, &mut indices);
-        indices
-    }
-
-    fn collect_session_tree_indices(&self, idx: usize, indices: &mut Vec<usize>) {
-        if idx >= self.sessions.len() || indices.contains(&idx) {
-            return;
-        }
-        indices.push(idx);
-        let token = self.sessions[idx].session_token.clone();
-        for child_idx in self.direct_children(&token) {
-            self.collect_session_tree_indices(child_idx, indices);
-        }
-    }
-
-    fn fail_pending_agent_sends_for_sessions(
-        &mut self,
-        tokens: &std::collections::HashSet<String>,
-    ) {
-        let mut i = 0;
-        while i < self.pending_agent_sends.len() {
-            if tokens.contains(&self.pending_agent_sends[i].session_token) {
-                if let Some(pending) = self.pending_agent_sends.remove(i) {
-                    let _ = pending
-                        .response_tx
-                        .send(Err("subagent is no longer running".to_string()));
-                }
-            } else {
-                i += 1;
-            }
+        if idx < self.sessions.len() {
+            vec![idx]
+        } else {
+            Vec::new()
         }
     }
 
@@ -887,10 +924,9 @@ impl App {
                 self.pending_net.remove(i);
                 if let Some(activity) = self.activity_by_id_mut(&activity_id) {
                     activity.state = crate::activity::ActivityState::Cancelled;
-                    activity.status = Some("subagent stopped".to_string());
+                    activity.status = Some("container stopped".to_string());
                     activity.updated_at = std::time::Instant::now();
                     activity.finished_at = Some(activity.updated_at);
-                    activity.mark_command_finished(activity.updated_at);
                     activity.terminal_unselected_at = None;
                 }
             } else {
@@ -1014,6 +1050,63 @@ impl App {
         ContainerStopDecision::Stopped
     }
 
+    pub(crate) fn stop_session_from_tui(&mut self, idx: usize) {
+        if idx >= self.sessions.len() {
+            return;
+        }
+        let label = self.sessions[idx].tab_label();
+        if self.sessions[idx].is_exited() {
+            self.push_log(format!("container '{}' is already stopped", label), false);
+            return;
+        }
+        self.push_log(format!("stopping container '{}'", label), false);
+        self.mark_session_stopped(idx);
+    }
+
+    pub(crate) fn container_usage_for_session(
+        &mut self,
+        session_idx: usize,
+    ) -> Option<crate::container::ContainerUsageStats> {
+        let docker_name = self.sessions.get(session_idx)?.docker_name.clone();
+        let stale_after = std::time::Duration::from_secs(2);
+
+        // `docker stats --no-stream` blocks for 1-2s while the daemon samples
+        // CPU, so it must never run on the UI thread (doing so froze the TUI
+        // under held-key navigation). Refresh in the background instead and
+        // keep showing the last known value until the result arrives.
+        let needs_refresh = match self.container_usage.get(&docker_name) {
+            Some(cached) => !cached.in_flight && cached.fetched_at.elapsed() >= stale_after,
+            None => true,
+        };
+
+        if needs_refresh {
+            self.container_usage
+                .entry(docker_name.clone())
+                .and_modify(|cached| cached.in_flight = true)
+                .or_insert_with(|| CachedContainerUsage {
+                    fetched_at: std::time::Instant::now(),
+                    stats: None,
+                    in_flight: true,
+                });
+
+            let tx = self.container_usage_tx.clone();
+            let name = docker_name.clone();
+            std::thread::spawn(move || {
+                let stats = crate::container::inspect_container_usage(&name)
+                    .ok()
+                    .flatten();
+                let _ = tx.send(ContainerUsageUpdate {
+                    docker_name: name,
+                    stats,
+                });
+            });
+        }
+
+        self.container_usage
+            .get(&docker_name)
+            .and_then(|cached| cached.stats.clone())
+    }
+
     pub(crate) fn push_log(&mut self, text: impl Into<String>, is_error: bool) {
         self.log.push_front(LogEntry::Msg {
             text: text.into(),
@@ -1041,9 +1134,8 @@ impl App {
         match crate::rules::load(&rules_path) {
             Ok(r) => self.push_log(
                 format!(
-                    "Loaded rules from {} (hostdo: {}, network: {})",
+                    "Loaded rules from {} (network: {})",
                     rules_path.display(),
-                    r.hostdo.commands.len(),
                     r.network.allowlist.len() + r.network.denylist.len()
                 ),
                 false,

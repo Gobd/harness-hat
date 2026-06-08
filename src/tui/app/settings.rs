@@ -156,8 +156,6 @@ impl App {
                 };
                 self.config.set(std::sync::Arc::new(new_config));
                 self.refresh_projects_cache();
-                self.pending_exec
-                    .retain(|item| item.project != state.workspace_name);
                 self.pending_stop
                     .retain(|item| item.project != state.workspace_name);
                 self.pending_net
@@ -191,48 +189,21 @@ impl App {
             return;
         }
 
-        if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if self.passthrough_mode {
-                return;
-            }
-            if self.terminal_fullscreen {
-                self.close_terminal_fullscreen();
-            } else {
-                self.open_terminal_fullscreen();
-            }
-            return;
-        }
-
-        if self.scroll_mode {
-            self.handle_scroll_mode_key(key);
-            return;
-        }
-
         self.last_terminal_esc = None;
-
-        if let Some(si) = self.active_session {
-            if self.session_is_loading(si) {
-                return;
-            }
-        }
 
         if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::ALT) {
             self.open_log_fullscreen();
             return;
         }
 
-        if is_scroll_mode_toggle_key(key) {
-            self.scroll_mode = true;
-            self.scroll_mouse_passthrough = false;
-            return;
-        }
-
-        if let Some(si) = self.active_session {
-            if let Some(bytes) = key_to_bytes(key) {
-                if let Some(session) = self.sessions.get(si) {
-                    session.send_input(bytes);
+        match key.code {
+            KeyCode::Esc => self.focus_sidebar_shortcut(),
+            KeyCode::Char('k') => {
+                if let Some(si) = self.active_session {
+                    self.stop_session_from_tui(si);
                 }
             }
+            _ => {}
         }
     }
 
@@ -303,35 +274,116 @@ impl App {
             self.push_log("no container_profiles defined in config", true);
             return;
         }
-        self.container_picker = Some(0);
+
+        let items = self.sidebar_items();
+        let Some(current) = items.get(self.sidebar_idx).cloned() else {
+            return;
+        };
+        match current {
+            SidebarItem::NewSession => {
+                if self.workspaces.is_empty() {
+                    self.push_log("no workspaces defined in config", true);
+                    return;
+                }
+                self.container_picker =
+                    Some(ContainerPickerState::NewSessionWorkspace { cursor: 0 });
+            }
+            SidebarItem::Launch(pi) => {
+                if pi >= cfg.workspaces.len() {
+                    return;
+                }
+                // Skip the workspace step: the workspace is already chosen.
+                self.container_picker = Some(ContainerPickerState::NewSessionTemplate {
+                    workspace_idx: pi,
+                    cursor: 0,
+                });
+            }
+            _ => return,
+        }
+
         self.focus = Focus::ContainerPicker;
     }
 
     pub(crate) fn handle_picker_key(&mut self, key: KeyEvent) {
         let cfg = self.config.get();
         let n = cfg.containers.len();
-        let idx = self.container_picker.as_mut().unwrap();
+        let launch_session_group: Option<usize> = None;
+        let mut launch_workspace_idx: Option<usize> = None;
+        let mut launch_container_idx: Option<usize> = None;
+
+        match self.container_picker.as_mut() {
+            Some(ContainerPickerState::NewSessionWorkspace { cursor }) => match key.code {
+                KeyCode::Esc | KeyCode::Char('h') => {
+                    self.container_picker = None;
+                    self.focus = Focus::Sidebar;
+                    return;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if *cursor > 0 {
+                        *cursor -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let max = self.workspaces.len();
+                    if *cursor + 1 < max {
+                        *cursor += 1;
+                    }
+                }
+                KeyCode::Enter | KeyCode::Char('l') => {
+                    let workspace_idx = *cursor;
+                    self.container_picker = Some(ContainerPickerState::NewSessionTemplate {
+                        workspace_idx,
+                        cursor: 0,
+                    });
+                    return;
+                }
+                _ => {}
+            },
+            Some(ContainerPickerState::NewSessionTemplate {
+                workspace_idx,
+                cursor,
+            }) => match key.code {
+                KeyCode::Esc | KeyCode::Char('h') => {
+                    self.container_picker = None;
+                    self.focus = Focus::Sidebar;
+                    return;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if *cursor > 0 {
+                        *cursor -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if *cursor + 1 < n {
+                        *cursor += 1;
+                    }
+                }
+                KeyCode::Enter | KeyCode::Char('l') => {
+                    launch_workspace_idx = Some(*workspace_idx);
+                    launch_container_idx = Some(*cursor);
+                }
+                _ => {}
+            },
+            None => return,
+        };
+
+        if let (Some(workspace_idx), Some(ctr_idx)) = (launch_workspace_idx, launch_container_idx) {
+            self.container_picker = None;
+            self.focus = Focus::Sidebar;
+            self.do_launch_container_on_project_with_priority_and_env(
+                workspace_idx,
+                ctr_idx,
+                crate::proxy::SourcePriority::Primary,
+                &[],
+                launch_session_group,
+            );
+            return;
+        }
 
         match key.code {
             KeyCode::Esc | KeyCode::Char('h') => {
                 self.container_picker = None;
                 self.focus = Focus::Sidebar;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if *idx > 0 {
-                    *idx -= 1;
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if *idx + 1 < n {
-                    *idx += 1;
-                }
-            }
-            KeyCode::Enter | KeyCode::Char('l') => {
-                let ctr_idx = *idx;
-                self.container_picker = None;
-                self.focus = Focus::Sidebar;
-                self.do_launch_container(ctr_idx);
             }
             _ => {}
         }
@@ -376,6 +428,7 @@ impl App {
             KeyCode::Esc | KeyCode::Char('h') => {
                 self.build_container_idx = None;
                 self.build_project_idx = None;
+                self.build_session_group = None;
                 self.focus = Focus::Sidebar;
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -482,8 +535,10 @@ impl App {
         shell_commands.push(build_shell_command);
         let shell_command = shell_commands.join(" && ");
 
-        self.build_project_idx = self.selected_project_idx();
-        let Some(launch_project_idx) = self.build_project_idx else {
+        let launch_project_idx = self
+            .build_project_idx
+            .or_else(|| self.selected_project_idx());
+        let Some(launch_project_idx) = launch_project_idx else {
             self.push_log("cannot start build: no workspace selected", true);
             return;
         };

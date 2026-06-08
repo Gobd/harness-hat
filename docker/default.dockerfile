@@ -9,17 +9,19 @@
 FROM harness-hat-base:local
 
 USER root
+
+ENV BUN_INSTALL=/usr/local/bun
+ENV PATH="${BUN_INSTALL}/bin:${PATH}"
+
 RUN npm install -g \
-    @openai/codex \
-    @google/gemini-cli \
-    @earendil-works/pi-coding-agent \
-    @anthropic-ai/claude-code \
     pnpm \
     typescript \
     tsx
-RUN curl -fsSL https://bun.sh/install | bash
-USER ubuntu
+RUN curl -fsSL https://bun.sh/install | bash \
+    && chmod -R a+rX "${BUN_INSTALL}"
+USER coder
 
-ENV PATH="/home/ubuntu/.local/bin:${PATH}"
+ENV BUN_INSTALL=/usr/local/bun
+ENV PATH="${BUN_INSTALL}/bin:/home/coder/.local/bin:${PATH}"
 
 CMD ["bash"]

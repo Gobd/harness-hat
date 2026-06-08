@@ -1,154 +1,5 @@
 use super::*;
 
-pub(crate) fn render_exec_approval_overlay(
-    frame: &mut Frame,
-    app: &App,
-    area: Rect,
-    item_idx: usize,
-) {
-    let Some(item) = app.pending_exec.get(item_idx) else {
-        return;
-    };
-
-    let popup_area = centered_rect(72, 56, 12, area);
-    frame.render_widget(Clear, popup_area);
-
-    let match_str = match &item.matched_command {
-        Some(name) => format!("rule: {name}"),
-        None => "unlisted command".to_string(),
-    };
-
-    let action_line = Line::from(vec![
-        Span::styled(
-            "[^Y] ",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Approve  ", Style::default().fg(Color::White)),
-        Span::styled(
-            "[^R] ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Always allow  ", Style::default().fg(Color::White)),
-        Span::styled(
-            "[^N] ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Deny  ", Style::default().fg(Color::White)),
-        Span::styled(
-            "[^D] ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Always deny", Style::default().fg(Color::White)),
-    ]);
-
-    let queue_total = app
-        .pending_exec
-        .iter()
-        .filter(|i| i.project == item.project)
-        .count();
-    let queue_pos = app
-        .pending_exec
-        .iter()
-        .filter(|i| i.project == item.project)
-        .position(|i| i.id == item.id)
-        .map(|i| i + 1)
-        .unwrap_or(1);
-    let source_container = item
-        .container_id
-        .clone()
-        .unwrap_or_else(|| "unknown-container".to_string());
-    let command_label = match &item.image {
-        Some(image) => format!("--image {image} {}", item.argv.join(" ")),
-        None => item.argv.join(" "),
-    };
-    let command_label = if item.timeout_secs == crate::rules::DEFAULT_TIMEOUT_SECS {
-        command_label
-    } else {
-        format!("--timeout {} {}", item.timeout_secs, command_label)
-    };
-
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "  APPROVAL REQUIRED",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  Command : ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                command_label,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Workspace: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(item.project.clone(), Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Source  : ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("workspace={}  container={}", item.project, source_container),
-                Style::default().fg(Color::White),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Queue   : ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!(
-                    "{}/{} for workspace '{}' (exec total: {}, net total: {})",
-                    queue_pos,
-                    queue_total.max(1),
-                    item.project,
-                    app.pending_exec.len(),
-                    app.pending_net.len()
-                ),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Host cwd: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                item.cwd.display().to_string(),
-                Style::default().fg(Color::White),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Match   : ", Style::default().fg(Color::DarkGray)),
-            Span::styled(match_str, Style::default().fg(Color::DarkGray)),
-        ]),
-        Line::from(""),
-        action_line,
-        Line::from(""),
-    ];
-
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .title(" Exec Approval Required ")
-                .title_alignment(Alignment::Center)
-                .title_style(
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow)),
-        ),
-        popup_area,
-    );
-}
-
-// ── Network approval overlay ──────────────────────────────────────────────────
-
 pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let Some(item) = app.pending_net.first() else {
         return;
@@ -231,7 +82,7 @@ pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Re
             Span::styled("  Source  : ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!(
-                    "workspace={}  agent={}  docker_container={}",
+                    "workspace={}  container={}  docker_container={}",
                     source_workspace,
                     source_container,
                     pending_network_docker_container_id(app, item)
@@ -243,10 +94,9 @@ pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Re
             Span::styled("  Queue   : ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!(
-                    "1/{} (merged requests: {}, exec total: {}, net modals: {})",
+                    "1/{} (merged requests: {}, net modals: {})",
                     queue_total.max(1),
                     merged_total,
-                    app.pending_exec.len(),
                     app.pending_net.len()
                 ),
                 Style::default().fg(Color::DarkGray),
@@ -294,10 +144,10 @@ pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Re
 
 fn pending_network_source_header(app: &App, item: &crate::proxy::PendingNetworkItem) -> String {
     let session = pending_network_source_session(app, item);
-    let agent = session
+    let container = session
         .map(|session| session.container_name.clone())
         .or_else(|| item.source_container.clone())
-        .unwrap_or_else(|| "unknown-agent".to_string());
+        .unwrap_or_else(|| "unknown-container".to_string());
     let workspace = session
         .map(|session| session.project.clone())
         .or_else(|| item.source_project.clone())
@@ -306,7 +156,7 @@ fn pending_network_source_header(app: &App, item: &crate::proxy::PendingNetworkI
         .map(|session| short_container_id(&session.container_id))
         .unwrap_or_else(|| "unknown".to_string());
 
-    format!("agent={agent}  workspace={workspace}  docker={docker_container}")
+    format!("container={container}  workspace={workspace}  docker={docker_container}")
 }
 
 fn pending_network_docker_container_id(
@@ -441,7 +291,7 @@ pub(crate) fn render_base_rules_changed_overlay(frame: &mut Frame, app: &App, ar
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "  If you just updated this file or asked an agent to update it, you can ignore this alert.",
+            "  If you just updated this file or asked a tool to update it, you can ignore this alert.",
             Style::default().fg(Color::White),
         )),
         Line::from(""),

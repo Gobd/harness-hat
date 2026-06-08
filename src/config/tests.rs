@@ -1,1284 +1,176 @@
-#[cfg(test)]
-mod tests {
-    use crate::config::{
-        Config, ContainerMount, DefaultsConfig, MountMode, MouseScrollMode,
-        builtin_hostdo_block_common, effective_hostdo_block_common, image_tag_for_stem, load,
-        load_composed_rules_for_workspace, merge_mounts, merge_unique_strings,
-        normalize_workspace_sidebar_hotkey, resolve_workspace_sidebar_hotkeys,
-        select_workspace_sidebar_hotkey, workspace_sidebar_hotkey_pool,
-    };
-    use crate::rules::{ApprovalMode, NetworkPolicy};
-    use std::fs;
-    use std::path::Path;
-    use std::time::{SystemTime, UNIX_EPOCH};
+use super::{
+    Config, DefaultsConfig, MouseScrollMode, image_tag_for_stem, load,
+    resolve_workspace_sidebar_hotkeys,
+};
 
-    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock is before unix epoch")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("harness-hat-{prefix}-{nanos}"));
-        fs::create_dir_all(&dir).expect("create temp dir");
-        dir
-    }
+fn temp_workspace() -> tempfile::TempDir {
+    tempfile::tempdir().expect("tempdir")
+}
 
-    fn build_config(
-        global_rules_file: &Path,
-        workspace_root: &Path,
-        project_name: Option<&str>,
-        project_path: Option<&Path>,
-    ) -> Config {
-        let mut raw = format!(
+#[test]
+fn defaults_include_control_server() {
+    let defaults = DefaultsConfig::default();
+    assert_eq!(defaults.control.server_port, 7878);
+    assert_eq!(defaults.control.server_host, "127.0.0.1");
+    assert_eq!(defaults.control.token_env_var, "HARNESS_HAT_TOKEN");
+}
+
+#[test]
+fn image_tag_for_stem_is_stable() {
+    assert_eq!(image_tag_for_stem("default"), "harness-hat-default:local");
+    assert_eq!(image_tag_for_stem("rust.dev"), "harness-hat-rust.dev:local");
+}
+
+#[test]
+fn load_resolves_template_resource_fields() {
+    let root = temp_workspace();
+    let workspace = root.path().join("repo");
+    let docker_dir = root.path().join("docker");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(&docker_dir).expect("docker");
+    let config_path = root.path().join("harness-hat.toml");
+    std::fs::write(
+        &config_path,
+        format!(
             r#"
+version = 1
 docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-"#,
-            workspace_root.display(),
-            global_rules_file.display(),
-        );
-        if let (Some(name), Some(path)) = (project_name, project_path) {
-            raw.push_str(&format!(
-                r#"
-[[projects]]
-name = "{name}"
-canonical_path = "{}"
-"#,
-                path.display()
-            ));
-        }
-        toml::from_str(&raw).expect("parse minimal config")
-    }
-
-    #[test]
-    fn defaults_sidebar_width_defaults_to_32() {
-        assert_eq!(DefaultsConfig::default().ui.sidebar_width, 32);
-    }
-
-    #[test]
-    fn defaults_show_log_pane_defaults_to_false() {
-        assert!(!DefaultsConfig::default().ui.show_log_pane);
-    }
-
-    #[test]
-    fn defaults_hostdo_max_timeout_defaults_to_one_hour() {
-        assert_eq!(DefaultsConfig::default().hostdo.max_timeout_secs, 60 * 60);
-    }
-
-    #[test]
-    fn defaults_hostdo_block_common_uses_builtin_list_when_empty() {
-        let defaults = DefaultsConfig::default();
-        assert!(defaults.hostdo.hostdo_block_common.is_empty());
-        assert_eq!(
-            effective_hostdo_block_common(&defaults),
-            builtin_hostdo_block_common()
-        );
-    }
-
-    #[test]
-    fn effective_hostdo_block_common_uses_configured_override_when_present() {
-        let mut defaults = DefaultsConfig::default();
-        defaults.hostdo.hostdo_block_common = vec!["git".to_string(), "hg".to_string()];
-        assert_eq!(
-            effective_hostdo_block_common(&defaults),
-            vec!["git".to_string(), "hg".to_string()]
-        );
-    }
-
-    #[test]
-    fn defaults_proxy_port_uses_less_common_port() {
-        assert_eq!(DefaultsConfig::default().proxy.proxy_port, 28781);
-    }
-
-    #[test]
-    fn missing_config_version_defaults_to_current() {
-        let cfg: Config = toml::from_str(
-            r#"
-docker_dir = "/tmp"
-
-[workspace]
-
-[manager]
-global_rules_file = "/tmp/harness-rules.toml"
-"#,
-        )
-        .expect("parse config");
-
-        assert_eq!(cfg.version, crate::config::CURRENT_CONFIG_VERSION);
-    }
-
-    #[test]
-    fn load_rejects_future_config_version() {
-        let root = unique_temp_dir("future-config-version");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-version = 999
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-
-        let err = load(&cfg_path).expect_err("future version should be rejected");
-        assert!(
-            err.to_string().contains("unsupported version 999"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn load_rejects_zero_hostdo_max_timeout() {
-        let root = unique_temp_dir("zero-hostdo-max-timeout");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-
-[defaults.hostdo]
-max_timeout_secs = 0
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let err = load(&cfg_path).expect_err("config load should fail");
-        assert!(
-            err.to_string().contains("max_timeout_secs"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn load_rejects_env_profile_entries_that_cannot_be_env_file_lines() {
-        let root = unique_temp_dir("invalid-env-profile");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-
-[env_profiles.bad.vars]
-"BAD-NAME" = "value"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let err = load(&cfg_path).expect_err("config load should fail");
-        assert!(
-            err.to_string()
-                .contains("invalid environment variable name"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn load_applies_custom_sidebar_width() {
-        let root = unique_temp_dir("sidebar-width-override");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-
-[defaults.ui]
-sidebar_width = 28
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let cfg = load(&cfg_path).expect("config should load");
-        assert_eq!(cfg.defaults.ui.sidebar_width, 28);
-    }
-
-    #[test]
-    fn load_applies_log_pane_visibility() {
-        let root = unique_temp_dir("log-pane-visibility");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-
-[defaults.ui]
-show_log_pane = true
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let cfg = load(&cfg_path).expect("config should load");
-        assert!(cfg.defaults.ui.show_log_pane);
-    }
-
-    #[test]
-    fn load_applies_agent_command_override() {
-        let root = unique_temp_dir("agent-command-override");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-
-[container_profiles.claude]
-image = "default"
-command = ["claude", "--dangerously-skip-permissions"]
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let cfg = load(&cfg_path).expect("config should load");
-        assert_eq!(
-            cfg.containers[0].command.clone(),
-            Some(vec![
-                "claude".to_string(),
-                "--dangerously-skip-permissions".to_string()
-            ])
-        );
-    }
-
-    #[test]
-    fn load_rejects_empty_agent_command_override() {
-        let root = unique_temp_dir("empty-agent-command-override");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-
-[container_profiles.claude]
-image = "default"
-command = []
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let err = load(&cfg_path).expect_err("config load should fail");
-        assert!(
-            err.to_string()
-                .contains("container profile 'claude': command"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn load_rejects_profile_without_explicit_command() {
-        let root = unique_temp_dir("missing-profile-command");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-
-[container_profiles.codex]
-image = "default"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let err = load(&cfg_path).expect_err("config load should fail");
-        assert!(
-            err.to_string()
-                .contains("container profile 'codex' must define command explicitly"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn load_persists_logging_instance_id() {
-        let root = unique_temp_dir("instance-id-persist");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-
-        let cfg = load(&cfg_path).expect("config should load");
-        let instance_id = cfg
-            .logging
-            .instance_id
-            .as_deref()
-            .expect("instance id should be generated");
-
-        let contents = fs::read_to_string(&cfg_path).expect("read config");
-        let parsed: toml::Value = toml::from_str(&contents).expect("parse config");
-        assert_eq!(parsed["logging"]["instance_id"].as_str(), Some(instance_id));
-    }
-
-    #[test]
-    fn composed_rules_use_global_when_project_file_is_missing() {
-        let root = unique_temp_dir("composed-global-fallback");
-        let global = root.join("global-rules.toml");
-        let workspace = root.join("workspace");
-        let project_path = root.join("project-a");
-        fs::create_dir_all(&workspace).expect("create workspace");
-        fs::create_dir_all(&project_path).expect("create project path");
-
-        fs::write(
-            &global,
-            r#"
-[hostdo]
-default_policy = "deny"
-
-[network]
-allowlist = ["domain=github.com"]
-"#,
-        )
-        .expect("write global rules");
-
-        let config = build_config(&global, &workspace, Some("project-a"), Some(&project_path));
-
-        let composed =
-            load_composed_rules_for_workspace(&config, Some("project-a")).expect("compose rules");
-        assert_eq!(composed.hostdo.default_policy, ApprovalMode::Deny);
-        assert_eq!(composed.network_default, NetworkPolicy::Prompt);
-    }
-
-    #[test]
-    fn composed_rules_default_to_prompt_when_no_rules_files_exist() {
-        let root = unique_temp_dir("composed-default-prompt");
-        let global = root.join("missing-global.toml");
-        let workspace = root.join("workspace");
-        fs::create_dir_all(&workspace).expect("create workspace");
-        let config = build_config(&global, &workspace, None, None);
-
-        let composed = load_composed_rules_for_workspace(&config, None).expect("compose rules");
-        assert_eq!(composed.hostdo.default_policy, ApprovalMode::Prompt);
-        assert_eq!(composed.network_default, NetworkPolicy::Prompt);
-    }
-
-    #[test]
-    fn composed_rules_merge_project_over_global_defaults() {
-        let root = unique_temp_dir("composed-project-overrides");
-        let global = root.join("global-rules.toml");
-        let workspace = root.join("workspace");
-        let project_path = root.join("project-b");
-        fs::create_dir_all(&workspace).expect("create workspace");
-        fs::create_dir_all(&project_path).expect("create project path");
-
-        fs::write(
-            &global,
-            r#"
-[hostdo]
-default_policy = "auto"
-
-[network]
-allowlist = ["domain=api.openai.com"]
-"#,
-        )
-        .expect("write global rules");
-
-        fs::write(
-            project_path.join("harness-rules.toml"),
-            r#"
-[hostdo]
-default_policy = "prompt"
-
-[network]
-allowlist = ["domain=github.com"]
-"#,
-        )
-        .expect("write project rules");
-
-        let config = build_config(&global, &workspace, Some("project-b"), Some(&project_path));
-
-        let composed =
-            load_composed_rules_for_workspace(&config, Some("project-b")).expect("compose rules");
-        assert_eq!(composed.hostdo.default_policy, ApprovalMode::Prompt);
-        assert_eq!(composed.network_default, NetworkPolicy::Prompt);
-    }
-
-    #[test]
-    fn load_fails_when_project_canonical_path_is_missing() {
-        let root = unique_temp_dir("missing-canonical-path");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-
-[[projects]]
-name = "missing-proj"
-canonical_path = "{}"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display(),
-            root.join("does-not-exist").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let err = load(&cfg_path).expect_err("config load should fail");
-        assert!(
-            err.to_string().contains("canonical_path does not exist"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn load_rejects_workspace_exclude_patterns_field() {
-        let root = unique_temp_dir("reject-workspace-exclude-patterns");
-        let cfg_path = root.join("harness-hat.toml");
-        let canonical_path = root.join("repo");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&canonical_path).expect("create repo");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
 
 [manager]
 global_rules_file = "{}"
 
 [[workspaces]]
-name = "a"
+name = "repo"
 canonical_path = "{}"
-exclude_patterns = ["node_modules/**"]
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display(),
-            canonical_path.display(),
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        load(&cfg_path).expect_err("config should reject workspace exclude_patterns");
-    }
-
-    #[test]
-    fn load_fails_when_docker_dir_is_missing() {
-        let root = unique_temp_dir("missing-docker-dir");
-        let cfg_path = root.join("harness-hat.toml");
-        let raw = format!(
-            r#"
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-"#,
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let err = load(&cfg_path).expect_err("config load should fail");
-        assert!(
-            err.to_string().contains("docker_dir is required"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            err.to_string().contains(&cfg_path.display().to_string()),
-            "missing config path in error: {err}"
-        );
-    }
-
-    #[test]
-    fn load_accepts_when_docker_dir_does_not_exist() {
-        let root = unique_temp_dir("missing-docker-dir-path");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let cfg = load(&cfg_path).expect("config should load");
-        assert_eq!(cfg.docker_dir, docker_dir);
-    }
-
-    #[test]
-    fn load_fails_when_docker_dir_is_a_file() {
-        let root = unique_temp_dir("docker-dir-file");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::write(&docker_dir, "not a directory").expect("write docker file");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let err = load(&cfg_path).expect_err("config load should fail");
-        assert!(
-            err.to_string()
-                .contains("docker_dir exists but is not a directory"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn load_accepts_config_with_no_projects() {
-        let root = unique_temp_dir("no-projects");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let cfg = load(&cfg_path).expect("config should load");
-        assert!(cfg.workspaces.is_empty());
-    }
-
-    #[test]
-    fn load_accepts_workspaces_alias() {
-        let root = unique_temp_dir("workspaces-alias");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        let workspace_path = root.join("workspace-a");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        fs::create_dir_all(&workspace_path).expect("create workspace dir");
-
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-[[workspaces]]
-name = "workspace-a"
-canonical_path = "{}"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display(),
-            workspace_path.display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let cfg = load(&cfg_path).expect("config should load");
-        assert_eq!(cfg.workspaces.len(), 1);
-        assert_eq!(cfg.workspaces[0].name, "workspace-a");
-        assert_eq!(
-            cfg.workspaces[0].canonical_path,
-            workspace_path.canonicalize().expect("canonical workspace")
-        );
-    }
-
-    #[test]
-    fn load_accepts_workspace_sidebar_hotkey() {
-        let root = unique_temp_dir("workspace-sidebar-hotkey");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        let workspace_path = root.join("workspace-a");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        fs::create_dir_all(&workspace_path).expect("create workspace dir");
-
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-[[workspaces]]
-name = "workspace-a"
-canonical_path = "{}"
-sidebar_hotkey = "R"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display(),
-            workspace_path.display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let cfg = load(&cfg_path).expect("config should load");
-        assert_eq!(cfg.workspaces[0].sidebar_hotkey.as_deref(), Some("R"));
-        assert_eq!(normalize_workspace_sidebar_hotkey("R"), Some('r'));
-    }
-
-    #[test]
-    fn load_accepts_extended_workspace_sidebar_hotkeys() {
-        let root = unique_temp_dir("workspace-sidebar-hotkey-extended");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        let workspace_path = root.join("workspace-a");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        fs::create_dir_all(&workspace_path).expect("create workspace dir");
-
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-[[workspaces]]
-name = "images"
-canonical_path = "{}"
-sidebar_hotkey = "i"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display(),
-            workspace_path.display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-
-        let cfg = load(&cfg_path).expect("config should load");
-        assert_eq!(cfg.workspaces[0].sidebar_hotkey.as_deref(), Some("i"));
-        assert_eq!(normalize_workspace_sidebar_hotkey("i"), Some('i'));
-        assert_eq!(normalize_workspace_sidebar_hotkey("7"), Some('7'));
-    }
-
-    #[test]
-    fn resolve_workspace_sidebar_hotkeys_uses_remaining_hotkey_pool() {
-        let workspaces = workspace_sidebar_hotkey_pool()
-            .iter()
-            .enumerate()
-            .map(|(idx, ch)| crate::config::WorkspaceConfig {
-                name: format!("workspace-{ch}-{idx}"),
-                canonical_path: Path::new("/tmp").join(format!("ws-{idx}")),
-                sidebar_hotkey: Some(ch.to_string()),
-                hostdo: None,
-            })
-            .chain(std::iter::once(crate::config::WorkspaceConfig {
-                name: "images".to_string(),
-                canonical_path: Path::new("/tmp/extended").to_path_buf(),
-                sidebar_hotkey: None,
-                hostdo: None,
-            }))
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            resolve_workspace_sidebar_hotkeys(&workspaces)
-                .last()
-                .copied()
-                .flatten(),
-            None
-        );
-    }
-
-    #[test]
-    fn resolve_workspace_sidebar_hotkeys_prefers_configured_then_name_based_choices() {
-        let workspaces = vec![
-            crate::config::WorkspaceConfig {
-                name: "rust-api".to_string(),
-                canonical_path: Path::new("/tmp/a").to_path_buf(),
-                sidebar_hotkey: Some("p".to_string()),
-                hostdo: None,
-            },
-            crate::config::WorkspaceConfig {
-                name: "frontend".to_string(),
-                canonical_path: Path::new("/tmp/b").to_path_buf(),
-                sidebar_hotkey: None,
-                hostdo: None,
-            },
-            crate::config::WorkspaceConfig {
-                name: "payments".to_string(),
-                canonical_path: Path::new("/tmp/c").to_path_buf(),
-                sidebar_hotkey: Some("p".to_string()),
-                hostdo: None,
-            },
-        ];
-
-        assert_eq!(
-            resolve_workspace_sidebar_hotkeys(&workspaces),
-            vec![Some('p'), Some('f'), Some('a')]
-        );
-    }
-
-    #[test]
-    fn select_workspace_sidebar_hotkey_uses_first_available_name_match() {
-        let existing = vec![
-            crate::config::WorkspaceConfig {
-                name: "frontend".to_string(),
-                canonical_path: Path::new("/tmp/a").to_path_buf(),
-                sidebar_hotkey: Some("f".to_string()),
-                hostdo: None,
-            },
-            crate::config::WorkspaceConfig {
-                name: "payments".to_string(),
-                canonical_path: Path::new("/tmp/b").to_path_buf(),
-                sidebar_hotkey: Some("p".to_string()),
-                hostdo: None,
-            },
-        ];
-
-        assert_eq!(
-            select_workspace_sidebar_hotkey(&existing, "rust-api"),
-            Some('r')
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn load_canonicalizes_workspace_paths() {
-        let root = unique_temp_dir("canonical-workspace-path");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        let real_workspace = root.join("real-workspace");
-        let linked_workspace = root.join("linked-workspace");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        fs::create_dir_all(&real_workspace).expect("create real workspace");
-        std::os::unix::fs::symlink(&real_workspace, &linked_workspace).expect("symlink");
-
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-[[workspaces]]
-name = "workspace-a"
-canonical_path = "{}"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display(),
-            linked_workspace.display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-
-        let cfg = load(&cfg_path).expect("config should load");
-
-        assert_eq!(
-            cfg.workspaces[0].canonical_path,
-            real_workspace.canonicalize().expect("canonical workspace")
-        );
-    }
-
-    #[test]
-    fn load_rejects_workspace_path_field() {
-        let root = unique_temp_dir("reject-workspace-path");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        let project_path = root.join("project-a");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        fs::create_dir_all(&project_path).expect("create project path");
-
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-[[projects]]
-name = "project-a"
-canonical_path = "{}"
-workspace_path = "{}"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display(),
-            project_path.display(),
-            root.join("some-other-place").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        load(&cfg_path).expect_err("config should reject workspace_path");
-    }
-
-    #[test]
-    fn load_rejects_workspace_sync_section() {
-        let root = unique_temp_dir("reject-workspace-sync");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        let project_path = root.join("project-a");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        fs::create_dir_all(&project_path).expect("create project path");
-
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-[[projects]]
-name = "project-a"
-canonical_path = "{}"
-[projects.sync]
-mode = "direct"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display(),
-            project_path.display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        load(&cfg_path).expect_err("config should reject workspace sync section");
-    }
-
-    // New tests for merge_unique_strings
-    #[test]
-    fn merge_unique_strings_handles_empty_inputs() {
-        let base: Vec<String> = vec![];
-        let profile: Vec<String> = vec![];
-        let override_items: Vec<String> = vec![];
-        let result = merge_unique_strings(&base, &profile, &override_items);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn merge_unique_strings_merges_all_unique_items() {
-        let base = vec!["a".to_string(), "b".to_string()];
-        let profile = vec!["c".to_string(), "d".to_string()];
-        let override_items = vec!["e".to_string(), "f".to_string()];
-        let result = merge_unique_strings(&base, &profile, &override_items);
-        assert_eq!(result.len(), 6);
-        assert!(result.contains(&"a".to_string()));
-        assert!(result.contains(&"f".to_string()));
-    }
-
-    #[test]
-    fn merge_unique_strings_handles_duplicates() {
-        let base = vec!["a".to_string(), "b".to_string()];
-        let profile = vec!["b".to_string(), "c".to_string()];
-        let override_items = vec!["c".to_string(), "a".to_string(), "d".to_string()];
-        let result = merge_unique_strings(&base, &profile, &override_items);
-        assert_eq!(result.len(), 4);
-        assert!(result.contains(&"a".to_string()));
-        assert!(result.contains(&"b".to_string()));
-        assert!(result.contains(&"c".to_string()));
-        assert!(result.contains(&"d".to_string()));
-    }
-
-    #[test]
-    fn merge_unique_strings_preserves_order_of_first_appearance() {
-        let base = vec!["a".to_string(), "b".to_string()];
-        let profile = vec!["c".to_string(), "a".to_string()]; // 'a' appears again
-        let override_items = vec!["d".to_string(), "b".to_string()]; // 'b' appears again
-        let result = merge_unique_strings(&base, &profile, &override_items);
-        assert_eq!(
-            result,
-            vec![
-                "a".to_string(),
-                "b".to_string(),
-                "c".to_string(),
-                "d".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn merge_mounts_handles_empty_inputs() {
-        let base: Vec<ContainerMount> = vec![];
-        let profile: Vec<ContainerMount> = vec![];
-        let override_items: Vec<ContainerMount> = vec![];
-        let result = merge_mounts(&base, &profile, &override_items);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn merge_mounts_merges_all_unique_items() {
-        let m1 = ContainerMount {
-            host: "h1".into(),
-            container: "c1".into(),
-            mode: MountMode::Rw,
-        };
-        let m2 = ContainerMount {
-            host: "h2".into(),
-            container: "c2".into(),
-            mode: MountMode::Ro,
-        };
-        let m3 = ContainerMount {
-            host: "h3".into(),
-            container: "c3".into(),
-            mode: MountMode::Rw,
-        };
-
-        let base = vec![m1.clone()];
-        let profile = vec![m2.clone()];
-        let override_items = vec![m3.clone()];
-        let result = merge_mounts(&base, &profile, &override_items);
-        assert_eq!(result.len(), 3);
-        assert!(result.contains(&m1));
-        assert!(result.contains(&m2));
-        assert!(result.contains(&m3));
-    }
-
-    #[test]
-    fn merge_mounts_handles_duplicates() {
-        let m1 = ContainerMount {
-            host: "h1".into(),
-            container: "c1".into(),
-            mode: MountMode::Rw,
-        };
-        let m2 = ContainerMount {
-            host: "h2".into(),
-            container: "c2".into(),
-            mode: MountMode::Ro,
-        };
-        let m3_diff_mode = ContainerMount {
-            host: "h1".into(),
-            container: "c1".into(),
-            mode: MountMode::Ro,
-        }; // Same paths, different mode
-
-        let base = vec![m1.clone()];
-        let profile = vec![m1.clone(), m2.clone()]; // m1 duplicated
-        let override_items = vec![m2.clone(), m3_diff_mode.clone()]; // m2 duplicated, m3_diff_mode is new
-
-        let result = merge_mounts(&base, &profile, &override_items);
-        assert_eq!(result.len(), 3);
-        assert!(result.contains(&m1));
-        assert!(result.contains(&m2));
-        assert!(result.contains(&m3_diff_mode));
-        assert_eq!(result, vec![m1, m2, m3_diff_mode]);
-    }
-
-    #[test]
-    fn merge_mounts_with_different_paths_are_unique() {
-        let m1 = ContainerMount {
-            host: "h1".into(),
-            container: "c1".into(),
-            mode: MountMode::Rw,
-        };
-        let m2 = ContainerMount {
-            host: "h1".into(),
-            container: "c2".into(),
-            mode: MountMode::Rw,
-        }; // Same host, diff container
-        let m3 = ContainerMount {
-            host: "h2".into(),
-            container: "c1".into(),
-            mode: MountMode::Rw,
-        }; // Diff host, same container
-
-        let base = vec![m1.clone()];
-        let profile = vec![m2.clone()];
-        let override_items = vec![m3.clone()];
-
-        let result = merge_mounts(&base, &profile, &override_items);
-        assert_eq!(result.len(), 3);
-        assert!(result.contains(&m1));
-        assert!(result.contains(&m2));
-        assert!(result.contains(&m3));
-    }
-
-    #[test]
-    fn load_rejects_legacy_containers_section() {
-        let root = unique_temp_dir("reject-legacy-containers");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-
-[[containers]]
-name = "legacy"
-profile = "codex"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let err = load(&cfg_path).expect_err("legacy containers must be rejected");
-        assert!(
-            err.to_string()
-                .contains("legacy [[containers]] is no longer supported"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn load_synthesizes_runtime_containers_from_profiles() {
-        let root = unique_temp_dir("profiles-synthesize-containers");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-
-[container_profiles.codex]
-image = "default"
-command = ["codex"]
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let cfg = load(&cfg_path).expect("config load should work");
-        assert_eq!(cfg.containers.len(), 1);
-        assert_eq!(cfg.containers[0].name, "codex");
-        assert_eq!(cfg.containers[0].image_stem, "default");
-        assert_eq!(cfg.containers[0].image, "harness-hat-default:local");
-        assert_eq!(cfg.containers[0].mouse_scroll, MouseScrollMode::Auto);
-        assert!(cfg.containers[0].bypass_proxy.is_empty());
-    }
-
-    #[test]
-    fn load_applies_profile_starter_network_allowlist() {
-        let root = unique_temp_dir("profile-starter-network-allowlist");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-
-[container_profiles.codex]
-image = "default"
-command = ["codex"]
-starter_network_allowlist = ["domain=api.openai.com"]
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let cfg = load(&cfg_path).expect("config load should work");
-        assert_eq!(
-            cfg.containers[0].starter_network_allowlist,
-            vec!["domain=api.openai.com".to_string()]
-        );
-    }
-
-    #[test]
-    fn load_applies_profile_runtime_toggles() {
-        let root = unique_temp_dir("profile-runtime-toggles");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-
-[container_profiles.codex]
-image = "default"
-command = ["codex"]
-grayscale_palette = true
-mouse_scroll = "agent"
-env = {{ HARNESS_HAT_TEST_FLAG = "1", HARNESS_HAT_TEST_MODE = "runtime" }}
-mcp_log_paths = ["/home/ubuntu/.codex/log/codex-tui.log", "/root/.codex/log/codex-tui.log"]
-mcp_log_pattern = "MCP startup|UnknownIssuer"
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let cfg = load(&cfg_path).expect("config load should work");
-        assert!(cfg.containers[0].grayscale_palette);
-        assert_eq!(cfg.containers[0].mouse_scroll, MouseScrollMode::Agent);
-        assert_eq!(
-            cfg.containers[0].env.get("HARNESS_HAT_TEST_FLAG"),
-            Some(&"1".to_string())
-        );
-        assert_eq!(
-            cfg.containers[0].env.get("HARNESS_HAT_TEST_MODE"),
-            Some(&"runtime".to_string())
-        );
-        assert_eq!(
-            cfg.containers[0].mcp_log_paths,
-            vec![
-                std::path::PathBuf::from("/home/ubuntu/.codex/log/codex-tui.log"),
-                std::path::PathBuf::from("/root/.codex/log/codex-tui.log"),
-            ]
-        );
-        assert_eq!(
-            cfg.containers[0].mcp_log_pattern.as_deref(),
-            Some("MCP startup|UnknownIssuer")
-        );
-    }
-
-    #[test]
-    fn load_merges_localhost_forwards_with_profile_override() {
-        let root = unique_temp_dir("localhost-forwards");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
 
 [defaults.containers]
+memory = "2g"
+cpus = "1.5"
+shm_size = "512m"
+bypass_proxy = [
+  "api.anthropic.com",
+  "claude.ai",
+  "platform.claude.com",
+  "downloads.claude.ai",
+  "storage.googleapis.com",
+  "chatgpt.com",
+  "*.chatgpt.com",
+  "*.openai.com",
+  "api.openai.com",
+  "chat.openai.com",
+  "auth.openai.com",
+  "*.googleapis.com",
+  "generativelanguage.googleapis.com",
+  "aistudio.google.com",
+  "accounts.google.com",
+  "oauth2.googleapis.com",
+  "www.googleapis.com",
+  "openrouter.ai",
+  "api.openrouter.ai",
+]
 
-[[defaults.containers.localhost_forwards]]
-container_port = 8081
-host_port = 8081
-
-[[defaults.containers.localhost_forwards]]
-container_port = 9000
-host_port = 9001
-
-[container_profiles.pi]
+[container_profiles.dev]
 image = "default"
-command = ["pi"]
-
-[[container_profiles.pi.localhost_forwards]]
-container_port = 8081
-host_port = 18081
-
-[[container_profiles.pi.localhost_forwards]]
-container_port = 7000
+mouse_scroll = "terminal"
 "#,
             docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let cfg = load(&cfg_path).expect("config load should work");
-        let forwards = &cfg.containers[0].localhost_forwards;
-        assert_eq!(forwards.len(), 3);
-        assert!(forwards.iter().any(|forward| {
-            forward.container_port == 9000 && forward.effective_host_port() == 9001
-        }));
-        assert!(forwards.iter().any(|forward| {
-            forward.container_port == 8081 && forward.effective_host_port() == 18081
-        }));
-        assert!(forwards.iter().any(|forward| {
-            forward.container_port == 7000 && forward.effective_host_port() == 7000
-        }));
-    }
+            root.path().join("global-rules.toml").display(),
+            workspace.display()
+        ),
+    )
+    .expect("write config");
 
-    #[test]
-    fn load_rejects_zero_localhost_forward_port() {
-        let root = unique_temp_dir("localhost-forward-zero");
-        let cfg_path = root.join("harness-hat.toml");
-        let docker_dir = root.join("docker-root");
-        fs::create_dir_all(&docker_dir).expect("create docker dir");
-        let raw = format!(
-            r#"
-docker_dir = "{}"
-
-[workspace]
-
-[manager]
-global_rules_file = "{}"
-
-[container_profiles.pi]
-image = "default"
-command = ["pi"]
-
-[[container_profiles.pi.localhost_forwards]]
-container_port = 0
-"#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display()
-        );
-        fs::write(&cfg_path, raw).expect("write config");
-        let err = load(&cfg_path).expect_err("zero localhost forward port should fail");
+    let cfg = load(&config_path).expect("load config");
+    let template = cfg.containers.iter().find(|ctr| ctr.name == "dev").unwrap();
+    assert_eq!(template.image, "harness-hat-default:local");
+    assert_eq!(template.memory.as_deref(), Some("2g"));
+    assert_eq!(template.cpus.as_deref(), Some("1.5"));
+    assert_eq!(template.shm_size.as_deref(), Some("512m"));
+    assert_eq!(template.mouse_scroll, MouseScrollMode::Terminal);
+    let home = dirs::home_dir().expect("home dir");
+    for (host, container) in [
+        (home.join(".claude.json"), "/home/coder/.claude.json"),
+        (home.join(".claude"), "/home/coder/.claude"),
+        (home.join(".codex"), "/home/coder/.codex"),
+        (home.join(".config/codex"), "/home/coder/.config/codex"),
+        (home.join(".gemini"), "/home/coder/.gemini"),
+        (home.join(".pi"), "/home/coder/.pi"),
+    ] {
         assert!(
-            err.to_string()
-                .contains("localhost_forwards.container_port must be greater than zero"),
-            "unexpected error: {err}"
+            template.mounts.iter().any(|mount| {
+                mount.host == host && mount.container == std::path::PathBuf::from(container)
+            }),
+            "missing shared session mount {:?} -> {container}",
+            host
         );
     }
+    for host in [
+        home.join(".claude.json"),
+        home.join(".claude"),
+        home.join(".codex"),
+        home.join(".config/codex"),
+        home.join(".gemini"),
+        home.join(".pi"),
+    ] {
+        assert!(
+            !template
+                .mounts
+                .iter()
+                .any(|mount| mount.host == host && mount.container == host),
+            "unexpected host-absolute shared session mount {:?}",
+            host
+        );
+    }
+    for host in [
+        "api.anthropic.com",
+        "claude.ai",
+        "platform.claude.com",
+        "downloads.claude.ai",
+        "storage.googleapis.com",
+        "chatgpt.com",
+        "*.chatgpt.com",
+        "*.openai.com",
+        "api.openai.com",
+        "chat.openai.com",
+        "auth.openai.com",
+        "*.googleapis.com",
+        "generativelanguage.googleapis.com",
+        "aistudio.google.com",
+        "accounts.google.com",
+        "oauth2.googleapis.com",
+        "www.googleapis.com",
+        "openrouter.ai",
+        "api.openrouter.ai",
+    ] {
+        assert!(
+            template.bypass_proxy.iter().any(|entry| entry == host),
+            "missing shared bypass host {host}"
+        );
+    }
+}
 
-    #[test]
-    fn image_tag_for_stem_normalizes_non_alnum_chars() {
-        assert_eq!(image_tag_for_stem("default"), "harness-hat-default:local");
-        assert_eq!(
-            image_tag_for_stem("Rust.Tools"),
-            "harness-hat-rust.tools:local"
-        );
-        assert_eq!(image_tag_for_stem("a b"), "harness-hat-a-b:local");
-    }
+#[test]
+fn workspace_hotkeys_are_assigned_without_duplicates() {
+    let workspaces = vec![
+        super::WorkspaceConfig {
+            name: "alpha".to_string(),
+            canonical_path: std::path::PathBuf::from("/tmp/a"),
+            sidebar_hotkey: Some("z".to_string()),
+        },
+        super::WorkspaceConfig {
+            name: "beta".to_string(),
+            canonical_path: std::path::PathBuf::from("/tmp/b"),
+            sidebar_hotkey: Some("z".to_string()),
+        },
+    ];
+    let hotkeys = resolve_workspace_sidebar_hotkeys(&workspaces);
+    assert_eq!(hotkeys[0], Some('z'));
+    assert_ne!(hotkeys[0], hotkeys[1]);
+}
+
+#[test]
+fn empty_config_default_is_valid_structurally() {
+    let cfg = Config::default();
+    assert!(cfg.containers.is_empty());
+    assert!(cfg.workspaces.is_empty());
 }

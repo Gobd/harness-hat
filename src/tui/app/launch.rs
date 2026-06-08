@@ -5,21 +5,20 @@ impl App {
         ctr.command.clone()
     }
 
-    pub(crate) fn do_launch_container_on_project(&mut self, pi: usize, ctr_idx: usize) {
-        self.do_launch_container_on_project_with_priority(
-            pi,
-            ctr_idx,
-            crate::proxy::SourcePriority::Primary,
-        );
-    }
-
     pub(crate) fn do_launch_container_on_project_with_priority(
         &mut self,
         pi: usize,
         ctr_idx: usize,
         proxy_priority: crate::proxy::SourcePriority,
+        session_group: Option<usize>,
     ) {
-        self.do_launch_container_on_project_with_priority_and_env(pi, ctr_idx, proxy_priority, &[]);
+        self.do_launch_container_on_project_with_priority_and_env(
+            pi,
+            ctr_idx,
+            proxy_priority,
+            &[],
+            session_group,
+        );
     }
 
     pub(crate) fn do_launch_container_on_project_with_priority_and_env(
@@ -28,16 +27,9 @@ impl App {
         ctr_idx: usize,
         proxy_priority: crate::proxy::SourcePriority,
         extra_env: &[(String, String)],
+        session_group: Option<usize>,
     ) {
         let cfg = self.config.get();
-        let exec_host = cfg.defaults.hostdo.server_host.trim();
-        if host_bind_is_loopback(exec_host) {
-            self.push_log(
-                format!("cannot launch container: defaults.hostdo.server_host='{}' is loopback; set it to '0.0.0.0'", exec_host),
-                true,
-            );
-            return;
-        }
         let ctr = match cfg.containers.get(ctr_idx) {
             Some(c) => c.clone(),
             None => return,
@@ -48,17 +40,22 @@ impl App {
             None => return,
         };
 
-        if !self.preflight_image_or_prompt_build(pi, ctr_idx, &ctr.image, docker_image_exists) {
+        if !self.preflight_image_or_prompt_build(
+            pi,
+            ctr_idx,
+            &ctr.image,
+            session_group,
+            docker_image_exists,
+        ) {
             return;
         }
 
         let mount_source_path = proj.canonical_path.clone();
         self.log_project_rules_status(&proj);
 
-        let exec_port = cfg.defaults.hostdo.server_port;
-        let exec_host = &cfg.defaults.hostdo.server_host;
-        let exec_url = format!("http://{exec_host}:{exec_port}");
-        let hostdo_script_host_path = cfg.docker_dir.join("scripts/hostdo.py");
+        let control_port = cfg.defaults.control.server_port;
+        let control_host = &cfg.defaults.control.server_host;
+        let control_url = format!("http://{control_host}:{control_port}");
         let proxy_host = &cfg.defaults.proxy.proxy_host;
         let session_token = uuid::Uuid::new_v4().simple().to_string();
         let scoped_proxy = match crate::proxy::spawn_scoped_listener(
@@ -79,38 +76,12 @@ impl App {
             }
         };
         let proxy_url = scoped_proxy.proxy_url();
+        let group_idx = self.resolve_or_create_session_group(session_group, pi, ctr_idx);
+
         self.push_log(
             format!("launching '{}' on '{}'", ctr.name, proj.name),
             false,
         );
-
-        match crate::agents::inject_agent_config(
-            &mount_source_path,
-            &proj.canonical_path,
-            &proj.name,
-            true,
-            &ctr.mount_target,
-            &exec_url,
-            &proxy_url,
-            &ctr.starter_network_allowlist,
-        ) {
-            Ok(result) => {
-                if let Some(created) = result.created_rules {
-                    self.record_completed_rules_internal_write(
-                        created.path.clone(),
-                        created.content,
-                    );
-                    self.push_log(
-                        format!(
-                            "created starter harness-rules.toml in '{}'",
-                            proj.canonical_path.display()
-                        ),
-                        false,
-                    );
-                }
-            }
-            Err(e) => self.push_log(format!("agent config injection warning: {e}"), true),
-        }
 
         let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((120, 40));
         let pty_cols = term_cols.saturating_sub(38).max(20);
@@ -141,10 +112,10 @@ impl App {
             &mount_source_path,
             &session_token,
             &self.token,
-            &exec_url,
+            &control_url,
             &proxy_url,
             &self.ca_cert_path,
-            Some(hostdo_script_host_path.as_path()),
+            None,
             Some(scoped_proxy),
             proxy_priority,
             cfg.defaults.proxy.strict_network,
@@ -170,16 +141,19 @@ impl App {
                 self.scroll_mouse_passthrough = false;
                 self.terminal_scroll = 0;
                 self.focus = Focus::Terminal;
+                self.add_session_terminal(group_idx, new_si);
                 for note in launch_notes {
                     self.push_log(note, false);
                 }
-                if let Some(pos) = self
+                let pos = self
                     .sidebar_items()
                     .iter()
-                    .position(|item| *item == SidebarItem::Session(new_si))
-                {
+                    .position(|item| *item == SidebarItem::Session(group_idx));
+                if let Some(pos) = pos {
                     self.sidebar_idx = pos;
                 }
+                self.active_session = Some(new_si);
+                self.preview_session = Some(new_si);
             }
             Err(e) => {
                 self.push_log(
@@ -197,16 +171,17 @@ mod tests {
     use crate::config::{ContainerDef, default_mount_target};
 
     #[test]
-    fn container_command_for_profile_uses_configured_override() {
+    fn container_command_for_template_uses_configured_override() {
         let profile = ContainerDef {
-            name: "claude".to_string(),
+            name: "dev".to_string(),
             image: String::new(),
             image_stem: String::new(),
             profile: None,
             mount_target: default_mount_target(),
             command: Some(vec![
-                "claude".to_string(),
-                "--dangerously-skip-permissions".to_string(),
+                "/bin/bash".to_string(),
+                "-lc".to_string(),
+                "htop".to_string(),
             ]),
             grayscale_palette: false,
             mouse_scroll: crate::config::MouseScrollMode::Auto,
@@ -218,21 +193,25 @@ mod tests {
             env_passthrough: Vec::new(),
             bypass_proxy: Vec::new(),
             localhost_forwards: Vec::new(),
+            memory: None,
+            cpus: None,
+            shm_size: None,
         };
 
         assert_eq!(
             App::container_command_for_profile(&profile),
             Some(vec![
-                "claude".to_string(),
-                "--dangerously-skip-permissions".to_string(),
+                "/bin/bash".to_string(),
+                "-lc".to_string(),
+                "htop".to_string()
             ])
         );
     }
 
     #[test]
-    fn container_command_for_profile_requires_explicit_command() {
+    fn container_command_for_template_requires_explicit_command() {
         let profile = ContainerDef {
-            name: "codex".to_string(),
+            name: "dev".to_string(),
             image: String::new(),
             image_stem: String::new(),
             profile: None,
@@ -248,6 +227,9 @@ mod tests {
             env_passthrough: Vec::new(),
             bypass_proxy: Vec::new(),
             localhost_forwards: Vec::new(),
+            memory: None,
+            cpus: None,
+            shm_size: None,
         };
         assert_eq!(App::container_command_for_profile(&profile), None);
     }

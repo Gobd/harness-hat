@@ -39,9 +39,9 @@ const FIRST_BYTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5
 const ROOT_PROXY_CONNECTION_LIMIT: usize = 256;
 const SCOPED_PROXY_CONNECTION_LIMIT: usize = 128;
 const SCOPED_PROXY_TOTAL_CONNECTION_LIMIT: usize = 192;
-const SCOPED_PROXY_SUBAGENT_CONNECTION_LIMIT: usize = 64;
+const SCOPED_PROXY_LIMITED_CONNECTION_LIMIT: usize = 64;
 const ROOT_SOURCE_PROXY_CONNECTION_LIMIT: usize = 32;
-const SUBAGENT_SOURCE_PROXY_CONNECTION_LIMIT: usize = 32;
+const LIMITED_SOURCE_PROXY_CONNECTION_LIMIT: usize = 32;
 
 /// A network request waiting on the TUI for an allow/deny decision.
 pub struct PendingNetworkItem {
@@ -78,7 +78,7 @@ pub(crate) struct FixedSourceIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourcePriority {
     Primary,
-    Subagent,
+    Limited,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,14 +129,14 @@ pub struct ProxyState {
     connection_limiter: Arc<Semaphore>,
     connection_limit: usize,
     scoped_connection_limiter: Arc<Semaphore>,
-    scoped_subagent_connection_limiter: Arc<Semaphore>,
+    scoped_limited_connection_limiter: Arc<Semaphore>,
     source_connection_limiters: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
 pub(crate) struct ProxyConnectionPermit {
     _listener: Option<tokio::sync::OwnedSemaphorePermit>,
     _scoped_total: Option<tokio::sync::OwnedSemaphorePermit>,
-    _scoped_subagent: Option<tokio::sync::OwnedSemaphorePermit>,
+    _scoped_limited: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 pub(crate) struct SourceConnectionPermit {
@@ -161,8 +161,8 @@ impl ProxyState {
             scoped_connection_limiter: Arc::new(Semaphore::new(
                 SCOPED_PROXY_TOTAL_CONNECTION_LIMIT,
             )),
-            scoped_subagent_connection_limiter: Arc::new(Semaphore::new(
-                SCOPED_PROXY_SUBAGENT_CONNECTION_LIMIT,
+            scoped_limited_connection_limiter: Arc::new(Semaphore::new(
+                SCOPED_PROXY_LIMITED_CONNECTION_LIMIT,
             )),
             source_connection_limiters: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -194,9 +194,9 @@ impl ProxyState {
         } else {
             Some(self.connection_limiter.clone().try_acquire_owned().ok()?)
         };
-        let scoped_subagent = if self.is_subagent_source() {
+        let scoped_limited = if self.is_limited_source() {
             Some(
-                self.scoped_subagent_connection_limiter
+                self.scoped_limited_connection_limiter
                     .clone()
                     .try_acquire_owned()
                     .ok()?,
@@ -204,7 +204,7 @@ impl ProxyState {
         } else {
             None
         };
-        let scoped_total = if self.is_subagent_source() {
+        let scoped_total = if self.is_limited_source() {
             Some(
                 self.scoped_connection_limiter
                     .clone()
@@ -217,7 +217,7 @@ impl ProxyState {
         Some(ProxyConnectionPermit {
             _listener: listener,
             _scoped_total: scoped_total,
-            _scoped_subagent: scoped_subagent,
+            _scoped_limited: scoped_limited,
         })
     }
 
@@ -249,7 +249,7 @@ impl ProxyState {
 
     fn source_connection_limit(&self) -> usize {
         match self.fixed_source.as_ref().map(|fixed| fixed.priority) {
-            Some(SourcePriority::Subagent) => SUBAGENT_SOURCE_PROXY_CONNECTION_LIMIT,
+            Some(SourcePriority::Limited) => LIMITED_SOURCE_PROXY_CONNECTION_LIMIT,
             Some(SourcePriority::Primary) => usize::MAX,
             None => ROOT_SOURCE_PROXY_CONNECTION_LIMIT,
         }
@@ -261,10 +261,10 @@ impl ProxyState {
             .is_some_and(|fixed| fixed.priority == SourcePriority::Primary)
     }
 
-    fn is_subagent_source(&self) -> bool {
+    fn is_limited_source(&self) -> bool {
         self.fixed_source
             .as_ref()
-            .is_some_and(|fixed| fixed.priority == SourcePriority::Subagent)
+            .is_some_and(|fixed| fixed.priority == SourcePriority::Limited)
     }
 
     pub(crate) async fn resolve_public_addrs(

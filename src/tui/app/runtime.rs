@@ -9,18 +9,11 @@ impl App {
             self.selected_sidebar_item_from(&items)
         };
         for _ in 0..32 {
-            match self.exec_pending_rx.try_recv() {
-                Ok(item) => self.pending_exec.push(item),
-                Err(_) => break,
-            }
-        }
-        for _ in 0..32 {
             match self.stop_pending_rx.try_recv() {
                 Ok(item) => self.pending_stop.push(item),
                 Err(_) => break,
             }
         }
-        self.drain_agent_control_requests();
         for _ in 0..32 {
             match self.net_pending_rx.try_recv() {
                 Ok(item) => self.enqueue_pending_network(item),
@@ -28,7 +21,27 @@ impl App {
             }
         }
         self.refresh_session_terminal_states();
-        self.flush_pending_agent_sends();
+        for _ in 0..64 {
+            match self.container_usage_rx.try_recv() {
+                Ok(update) => {
+                    self.container_usage.insert(
+                        update.docker_name,
+                        CachedContainerUsage {
+                            fetched_at: std::time::Instant::now(),
+                            stats: update.stats,
+                            in_flight: false,
+                        },
+                    );
+                }
+                Err(_) => break,
+            }
+        }
+        for _ in 0..8 {
+            match self.rules_scan_rx.try_recv() {
+                Ok(stamps) => self.apply_rules_scan(stamps),
+                Err(_) => break,
+            }
+        }
         for _ in 0..128 {
             match self.activity_rx.try_recv() {
                 Ok(event) => self.apply_activity_event(event),
@@ -57,6 +70,7 @@ impl App {
                     label,
                     launch_project_idx,
                     launch_container_idx,
+                    launch_session_group,
                     success,
                     cancelled,
                     exit_code,
@@ -66,6 +80,7 @@ impl App {
                     self.build_task = None;
                     if let Some(error) = error {
                         self.build_project_idx = None;
+                        self.build_session_group = None;
                         self.push_log(format!("{label} failed: {error}"), true);
                         if let Some(diagnostic) = diagnostic {
                             self.push_log(format!("  build detail: {diagnostic}"), true);
@@ -75,20 +90,25 @@ impl App {
                     }
                     if cancelled {
                         self.build_project_idx = None;
+                        self.build_session_group = None;
                         self.push_log(format!("{label} cancelled"), true);
                         self.focus = Focus::ImageBuild;
                         continue;
                     }
                     if success {
                         self.build_project_idx = None;
+                        self.build_session_group = None;
                         self.push_log(format!("{label} finished successfully"), false);
                         self.build_container_idx = None;
-                        self.do_launch_container_on_project(
+                        self.do_launch_container_on_project_with_priority(
                             launch_project_idx,
                             launch_container_idx,
+                            crate::proxy::SourcePriority::Primary,
+                            launch_session_group,
                         );
                     } else {
                         self.build_project_idx = None;
+                        self.build_session_group = None;
                         let suffix = exit_code
                             .map(|code| format!(" (exit code {code})"))
                             .unwrap_or_default();
@@ -105,19 +125,6 @@ impl App {
 
         for i in (0..self.sessions.len()).rev() {
             if !self.sessions[i].is_exited() {
-                continue;
-            }
-            if self.passthrough_mode {
-                let exit_code =
-                    match crate::container::inspect_container_exit(&self.sessions[i].docker_name) {
-                        Ok(Some((code, _))) => code.unwrap_or(0),
-                        Ok(None) => 0,
-                        Err(_) => 1,
-                    };
-                if let Some(slot) = &self.passthrough_exit_code_slot {
-                    slot.store(exit_code, std::sync::atomic::Ordering::SeqCst);
-                }
-                self.should_quit = true;
                 continue;
             }
             let exited_for = self.sessions[i].launched_at.elapsed();
@@ -221,94 +228,12 @@ impl App {
             activity.status = Some("too many pending network approvals".to_string());
             activity.updated_at = std::time::Instant::now();
             activity.finished_at = Some(activity.updated_at);
-            activity.mark_command_finished(activity.updated_at);
             activity.terminal_unselected_at = None;
         }
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.focus != Focus::Terminal {
-            return;
-        }
-        if self.active_exec_modal_idx().is_some() || !self.pending_net.is_empty() {
-            return;
-        }
-        let Some(si) = self.active_session else {
-            return;
-        };
-        let Some(session) = self.sessions.get(si) else {
-            return;
-        };
-
-        match mouse.kind {
-            MouseEventKind::ScrollUp
-            | MouseEventKind::ScrollDown
-            | MouseEventKind::ScrollLeft
-            | MouseEventKind::ScrollRight => {
-                if !self.scroll_mode {
-                    match session.mouse_scroll {
-                        crate::config::MouseScrollMode::Agent => {
-                            if let Some(bytes) = encode_sgr_mouse(mouse) {
-                                session.send_input(bytes);
-                                return;
-                            }
-                        }
-                        crate::config::MouseScrollMode::Auto => {
-                            // If the inner terminal app requested SGR mouse reporting, prefer
-                            // forwarding scroll events so internal scrollbars work.
-                            if let Some(bytes) = maybe_encode_sgr_mouse_for_session(session, mouse)
-                            {
-                                session.send_input(bytes);
-                                return;
-                            }
-                        }
-                        crate::config::MouseScrollMode::Harness => {}
-                    }
-                }
-
-                // Otherwise, treat the scroll wheel as a viewport scroll gesture, without
-                // requiring explicit scroll-mode activation.
-                let max_scrollback = session.term.lock().history_size();
-                let lines_per_tick = 6usize;
-                match mouse.kind {
-                    MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft => {
-                        self.terminal_scroll = self.terminal_scroll.saturating_add(lines_per_tick);
-                    }
-                    MouseEventKind::ScrollDown | MouseEventKind::ScrollRight => {
-                        self.terminal_scroll = self.terminal_scroll.saturating_sub(lines_per_tick);
-                    }
-                    _ => {}
-                }
-                self.terminal_scroll = self.terminal_scroll.min(max_scrollback);
-                self.scroll_mode = self.terminal_scroll > 0;
-            }
-            _ => {
-                // In scroll mode, only wheel gestures are reserved for outer viewport scrolling.
-                // Forward other mouse events when the inner app explicitly requested reporting.
-                if self.scroll_mode {
-                    match mouse.kind {
-                        MouseEventKind::Down(_) => {
-                            self.scroll_mouse_passthrough = true;
-                        }
-                        MouseEventKind::Up(_) => {
-                            if !self.scroll_mouse_passthrough {
-                                return;
-                            }
-                            self.scroll_mouse_passthrough = false;
-                        }
-                        MouseEventKind::Drag(_) | MouseEventKind::Moved => {
-                            if !self.scroll_mouse_passthrough {
-                                return;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                if let Some(bytes) = maybe_encode_sgr_mouse_for_session(session, mouse) {
-                    session.send_input(bytes);
-                }
-            }
-        }
+        let _ = mouse;
     }
 }
 

@@ -5,6 +5,25 @@ use anyhow::Result;
 // held in App across await points in the TUI event loop.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let exit_code = harness_hat::passthrough::run_and_get_exit_code().await?;
-    std::process::exit(exit_code);
+    use harness_hat::cli::Command;
+
+    let cli = harness_hat::cli::parse()?;
+    match cli.command {
+        Some(Command::Init { path }) => {
+            let path = path.unwrap_or_else(|| std::path::PathBuf::from("harness-hat.toml"));
+            harness_hat::init::write_sample_config(&path)?;
+            println!("config written to: {}", path.display());
+            println!(
+                "edit it, then run: harness-hat --config {}",
+                path.display()
+            );
+        }
+        Some(Command::Shell { id }) => {
+            // Pure-Docker passthrough; intentionally bypasses manager init.
+            let code = harness_hat::shell::run(id)?;
+            std::process::exit(code);
+        }
+        None => harness_hat::manager::run(cli).await?,
+    }
+    Ok(())
 }

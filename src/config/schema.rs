@@ -2,8 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::config::AliasValue;
-
 // ── Workspaces ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -13,7 +11,6 @@ pub struct WorkspaceConfig {
     pub canonical_path: PathBuf,
     #[serde(default)]
     pub sidebar_hotkey: Option<String>,
-    pub hostdo: Option<WorkspaceHostdo>,
 }
 
 impl Default for WorkspaceConfig {
@@ -22,32 +19,13 @@ impl Default for WorkspaceConfig {
             name: String::new(),
             canonical_path: PathBuf::new(),
             sidebar_hotkey: None,
-            hostdo: None,
         }
     }
 }
 
 // ── Containers ───────────────────────────────────────────────────────────────
 
-/// Known agent CLIs inferred from launch argv for runtime-specific diagnostics
-/// and compatibility behavior.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentKind {
-    /// No recognized built-in runtime.
-    #[default]
-    None,
-    /// Claude Code CLI (`@anthropic-ai/claude-code`).
-    Claude,
-    /// OpenAI Codex CLI (`@openai/codex`).
-    Codex,
-    /// Google Gemini CLI (`@google/gemini-cli`).
-    Gemini,
-    /// Pi agentic TUI (`@earendil-works/pi-coding-agent`).
-    Pi,
-}
-
-/// How mouse wheel events in agent terminals are routed.
+/// How mouse wheel events in terminals are routed.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MouseScrollMode {
@@ -57,8 +35,8 @@ pub enum MouseScrollMode {
     Auto,
     /// Always use mouse wheel events for Harness Hat terminal scrollback.
     Harness,
-    /// Pass mouse wheel events through to the terminal agent as SGR mouse input.
-    Agent,
+    /// Pass mouse wheel events through to the container terminal as SGR mouse input.
+    Terminal,
 }
 
 /// Internal resolved container launch definition synthesized from
@@ -80,14 +58,14 @@ pub struct ContainerDef {
     /// Defaults to `/workspace`.
     #[serde(default = "default_mount_target")]
     pub mount_target: PathBuf,
-    /// Optional argv override used to start the agent inside the container.
+    /// Optional argv override used instead of the image default command.
     #[serde(default)]
     pub command: Option<Vec<String>>,
     /// Render ANSI palette requests in grayscale for this profile.
     #[serde(default)]
     pub grayscale_palette: bool,
     /// Controls whether mouse wheel events scroll Harness Hat history or are
-    /// passed through to the inner agent TUI.
+    /// passed through to the container terminal.
     #[serde(default)]
     pub mouse_scroll: MouseScrollMode,
     /// Additional allowlist entries written into a starter `harness-rules.toml`.
@@ -115,6 +93,15 @@ pub struct ContainerDef {
     /// TCP ports on container localhost that forward to the host.
     #[serde(default)]
     pub localhost_forwards: Vec<LocalhostForward>,
+    /// Optional Docker memory limit, e.g. `4g`, `512m`.
+    #[serde(default)]
+    pub memory: Option<String>,
+    /// Optional Docker CPU quota, e.g. `2` or `1.5`.
+    #[serde(default)]
+    pub cpus: Option<String>,
+    /// Optional Docker shared memory size, e.g. `1g`.
+    #[serde(default)]
+    pub shm_size: Option<String>,
 }
 
 /// Named container profile used directly as a launch target.
@@ -148,6 +135,12 @@ pub struct ContainerProfile {
     pub bypass_proxy: Vec<String>,
     #[serde(default)]
     pub localhost_forwards: Vec<LocalhostForward>,
+    #[serde(default)]
+    pub memory: Option<String>,
+    #[serde(default)]
+    pub cpus: Option<String>,
+    #[serde(default)]
+    pub shm_size: Option<String>,
 }
 
 /// Shared defaults merged into every container definition.
@@ -173,24 +166,16 @@ pub struct ContainerDefaults {
     pub bypass_proxy: Vec<String>,
     #[serde(default)]
     pub localhost_forwards: Vec<LocalhostForward>,
+    #[serde(default)]
+    pub memory: Option<String>,
+    #[serde(default)]
+    pub cpus: Option<String>,
+    #[serde(default)]
+    pub shm_size: Option<String>,
 }
 
 pub(crate) fn default_mount_target() -> PathBuf {
     PathBuf::from("/workspace")
-}
-
-pub fn infer_agent_kind_from_argv(command: Option<&[String]>) -> AgentKind {
-    let executable = command
-        .and_then(|argv| argv.first())
-        .map(String::as_str)
-        .and_then(normalize_command_name);
-    match executable.as_deref() {
-        Some("claude") => AgentKind::Claude,
-        Some("codex") => AgentKind::Codex,
-        Some("gemini") => AgentKind::Gemini,
-        Some("pi") => AgentKind::Pi,
-        _ => AgentKind::None,
-    }
 }
 
 pub fn normalize_command_name(command: &str) -> Option<String> {
@@ -216,6 +201,17 @@ pub struct ContainerMount {
     /// Mount mode: `ro` or `rw` (default).
     #[serde(default)]
     pub mode: MountMode,
+    /// Seed a private per-session copy instead of bind-mounting the host file
+    /// live. The container reads the host's current contents at launch, then
+    /// writes to its own copy — the host file is never modified. This protects
+    /// files that the agent CLI rewrites in place (notably `.claude.json`) from
+    /// corruption when the host and one or more containers run concurrently.
+    ///
+    /// Unset (the default) seeds iff the container path is `.claude.json`; set
+    /// `seed = true` to privatize any other file mount, or `seed = false` to
+    /// force the shared live bind mount. Only applies to regular files.
+    #[serde(default)]
+    pub seed: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
@@ -239,13 +235,6 @@ impl LocalhostForward {
     pub fn effective_host_port(&self) -> u16 {
         self.host_port.unwrap_or(self.container_port)
     }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct WorkspaceHostdo {
-    pub denied_executables: Option<Vec<String>>,
-    pub denied_argument_fragments: Option<Vec<String>>,
-    pub command_aliases: Option<HashMap<String, AliasValue>>,
 }
 
 // ── Enums ────────────────────────────────────────────────────────────────────
@@ -302,7 +291,7 @@ pub enum OtlpProtocol {
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditExportLevel {
-    /// Every hostdo / HTTP event (including auto-approved).
+    /// Every control/proxy event (including auto-approved).
     All,
     /// Only events that required a manual developer approval prompt.
     #[default]

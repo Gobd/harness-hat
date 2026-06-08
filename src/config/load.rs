@@ -1,12 +1,10 @@
 use anyhow::{Context, Result};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, value};
 use tracing::instrument;
 
 use crate::config::{
-    AliasValue, Config, ContainerMount, DefaultsConfig, LocalhostForward, WorkspaceConfig,
-    default_mount_target,
+    Config, ContainerMount, LocalhostForward, WorkspaceConfig, default_mount_target,
 };
 
 const WORKSPACE_SIDEBAR_HOTKEY_POOL: &[char] = &[
@@ -139,7 +137,6 @@ pub fn select_workspace_sidebar_hotkey(
         name: workspace_name.to_string(),
         canonical_path: PathBuf::new(),
         sidebar_hotkey: None,
-        hostdo: None,
     });
     resolve_workspace_sidebar_hotkeys(&workspaces)
         .into_iter()
@@ -172,16 +169,6 @@ fn expand_config_paths(config: &mut Config) -> Result<()> {
     }
     for proj in &mut config.workspaces {
         proj.canonical_path = expand_path(&proj.canonical_path)?;
-        if let Some(he) = &mut proj.hostdo {
-            if let Some(aliases) = &mut he.command_aliases {
-                for alias in aliases.values_mut() {
-                    alias.expand_cwd()?;
-                }
-            }
-        }
-    }
-    for alias in config.defaults.hostdo.command_aliases.values_mut() {
-        alias.expand_cwd()?;
     }
     for ctr in &mut config.containers {
         for mount in &mut ctr.mounts {
@@ -212,6 +199,7 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
     );
 
     let defaults = config.defaults.containers.clone();
+    let session_state_mounts = shared_session_state_mounts()?;
     let mut profile_names = config
         .container_profiles
         .keys()
@@ -242,7 +230,7 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
         );
         let image_tag = image_tag_for_stem(&image_stem);
 
-        let mounts = merge_mounts(&defaults.mounts, &profile.mounts, &[]);
+        let mounts = merge_mounts(&defaults.mounts, &session_state_mounts, &profile.mounts);
 
         resolved.push(crate::config::ContainerDef {
             name: profile_name.clone(),
@@ -280,6 +268,12 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
                 &defaults.localhost_forwards,
                 &profile.localhost_forwards,
             ),
+            memory: profile.memory.clone().or_else(|| defaults.memory.clone()),
+            cpus: profile.cpus.clone().or_else(|| defaults.cpus.clone()),
+            shm_size: profile
+                .shm_size
+                .clone()
+                .or_else(|| defaults.shm_size.clone()),
             image_stem,
         });
     }
@@ -391,6 +385,33 @@ pub(crate) fn merge_mounts(
     out
 }
 
+fn shared_session_state_mounts() -> Result<Vec<ContainerMount>> {
+    let mut mounts = Vec::new();
+    for (host, container) in [
+        ("~/.claude.json", "/home/coder/.claude.json"),
+        ("~/.claude", "/home/coder/.claude"),
+        ("~/.codex", "/home/coder/.codex"),
+        ("~/.config/codex", "/home/coder/.config/codex"),
+        ("~/.gemini", "/home/coder/.gemini"),
+        ("~/.pi", "/home/coder/.pi"),
+    ] {
+        mounts.push(shared_session_mount(host, container)?);
+    }
+    Ok(mounts)
+}
+
+fn shared_session_mount(host: &str, container: &str) -> Result<ContainerMount> {
+    let host = expand_path(Path::new(host))?;
+    Ok(ContainerMount {
+        host: host.clone(),
+        container: PathBuf::from(container),
+        mode: Default::default(),
+        // Unset: the `.claude.json` mount picks up the seed-by-default heuristic
+        // in container::spawn; the directory mounts (.claude, .codex, …) don't.
+        seed: None,
+    })
+}
+
 pub fn image_tag_for_stem(stem: &str) -> String {
     let mut slug = String::new();
     for ch in stem.chars() {
@@ -407,23 +428,6 @@ pub fn image_tag_for_stem(stem: &str) -> String {
 }
 
 fn validate(config: &Config) -> Result<()> {
-    anyhow::ensure!(
-        config.defaults.hostdo.max_timeout_secs > 0,
-        "defaults.hostdo.max_timeout_secs must be greater than zero"
-    );
-
-    for (alias, target) in &config.defaults.hostdo.command_aliases {
-        anyhow::ensure!(
-            !alias.trim().is_empty(),
-            "defaults.hostdo.command_aliases contains an empty alias name"
-        );
-        anyhow::ensure!(
-            !target.cmd().trim().is_empty(),
-            "defaults.hostdo.command_aliases.{} has an empty command",
-            alias
-        );
-    }
-
     for (profile_name, profile) in &config.env_profiles {
         for (key, value) in &profile.vars {
             anyhow::ensure!(
@@ -465,34 +469,12 @@ fn validate(config: &Config) -> Result<()> {
             proj.name,
             proj.canonical_path.display()
         );
-        if let Some(he) = &proj.hostdo {
-            if let Some(aliases) = &he.command_aliases {
-                for (alias, target) in aliases {
-                    anyhow::ensure!(
-                        !alias.trim().is_empty(),
-                        "project '{}': hostdo.command_aliases contains an empty alias name",
-                        proj.name
-                    );
-                    anyhow::ensure!(
-                        !target.cmd().trim().is_empty(),
-                        "project '{}': hostdo.command_aliases.{} has an empty command",
-                        proj.name,
-                        alias
-                    );
-                }
-            }
-        }
     }
     let mut seen_containers = std::collections::HashSet::new();
     for ctr in &config.containers {
         anyhow::ensure!(
             seen_containers.insert(&ctr.name),
             "duplicate container name: {}",
-            ctr.name
-        );
-        anyhow::ensure!(
-            ctr.command.is_some(),
-            "container profile '{}' must define command explicitly",
             ctr.name
         );
         validate_command_argv(
@@ -588,6 +570,12 @@ fn validate(config: &Config) -> Result<()> {
                 ctr.name
             );
         }
+        validate_optional_docker_value(&format!("container '{}': memory", ctr.name), &ctr.memory)?;
+        validate_optional_docker_value(&format!("container '{}': cpus", ctr.name), &ctr.cpus)?;
+        validate_optional_docker_value(
+            &format!("container '{}': shm_size", ctr.name),
+            &ctr.shm_size,
+        )?;
     }
     Ok(())
 }
@@ -600,6 +588,18 @@ fn validate_command_argv(field: &str, command: Option<&[String]>) -> Result<()> 
     for (idx, arg) in command.iter().enumerate() {
         anyhow::ensure!(!arg.trim().is_empty(), "{field}[{idx}] must not be empty");
     }
+    Ok(())
+}
+
+fn validate_optional_docker_value(field: &str, value: &Option<String>) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    anyhow::ensure!(!value.trim().is_empty(), "{field} must not be empty");
+    anyhow::ensure!(
+        !value.contains('\n') && !value.contains('\r'),
+        "{field} must not contain newlines"
+    );
     Ok(())
 }
 
@@ -641,63 +641,4 @@ pub fn expand_path(path: &Path) -> Result<PathBuf> {
     } else {
         Ok(path.to_path_buf())
     }
-}
-
-/// Effective denied executables.
-#[instrument(skip(proj, defaults))]
-pub fn effective_denied_executables(
-    proj: &WorkspaceConfig,
-    defaults: &DefaultsConfig,
-) -> Vec<String> {
-    proj.hostdo
-        .as_ref()
-        .and_then(|he| he.denied_executables.clone())
-        .unwrap_or_else(|| defaults.hostdo.denied_executables.clone())
-}
-
-/// Effective denied argument fragments.
-#[instrument(skip(proj, defaults))]
-pub fn effective_denied_fragments(
-    proj: &WorkspaceConfig,
-    defaults: &DefaultsConfig,
-) -> Vec<String> {
-    proj.hostdo
-        .as_ref()
-        .and_then(|he| he.denied_argument_fragments.clone())
-        .unwrap_or_else(|| defaults.hostdo.denied_argument_fragments.clone())
-}
-
-/// Effective common utility blocklist for hostdo.
-#[instrument(skip(defaults))]
-pub fn effective_hostdo_block_common(defaults: &DefaultsConfig) -> Vec<String> {
-    if defaults.hostdo.hostdo_block_common.is_empty() {
-        crate::config::builtin_hostdo_block_common()
-    } else {
-        defaults.hostdo.hostdo_block_common.clone()
-    }
-}
-
-/// Effective hostdo command aliases for a project.
-/// Merge order (later wins): global defaults → per-project config → per-project rules.
-#[instrument(skip(proj, defaults))]
-pub fn effective_command_aliases(
-    proj: &WorkspaceConfig,
-    defaults: &DefaultsConfig,
-) -> HashMap<String, AliasValue> {
-    let mut out = defaults.hostdo.command_aliases.clone();
-    if let Some(project_aliases) = proj
-        .hostdo
-        .as_ref()
-        .and_then(|he| he.command_aliases.clone())
-    {
-        out.extend(project_aliases);
-    }
-    // Layer on aliases from the project's harness-rules.toml (highest priority).
-    let rules_path = proj.canonical_path.join("harness-rules.toml");
-    if let Ok(rules) = crate::rules::load(&rules_path) {
-        if !rules.hostdo.command_aliases.is_empty() {
-            out.extend(rules.hostdo.command_aliases);
-        }
-    }
-    out
 }

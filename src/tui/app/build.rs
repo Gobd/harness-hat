@@ -37,12 +37,11 @@ impl App {
 
         let cancel_flag = Arc::new(AtomicBool::new(false));
         self.build_task = Some(BuildTaskState {
-            label: label.to_string(),
             shell_command: shell_command.clone(),
-            cancel_flag: cancel_flag.clone(),
         });
 
         let tx = self.build_event_tx.clone();
+        let launch_session_group = self.build_session_group;
         let label = label.to_string();
         tokio::spawn(async move {
             run_build_shell_command(
@@ -50,19 +49,12 @@ impl App {
                 shell_command,
                 launch_project_idx,
                 launch_container_idx,
+                launch_session_group,
                 cancel_flag,
                 tx,
             )
             .await;
         });
-    }
-
-    pub(crate) fn cancel_build(&mut self) {
-        let Some(task) = self.build_task.as_ref() else {
-            return;
-        };
-        task.cancel_flag.store(true, Ordering::SeqCst);
-        self.push_log(format!("cancelling {}...", task.label), true);
     }
 
     pub(crate) fn push_build_output(&mut self, line: impl Into<String>, is_error: bool) {
@@ -126,20 +118,16 @@ impl App {
             .to_string()
     }
 
-    pub(crate) fn do_launch_container(&mut self, ctr_idx: usize) {
-        let pi = match self.selected_project_idx() {
-            Some(i) => i,
-            None => {
-                self.push_log("no workspace selected", true);
-                return;
-            }
-        };
-        self.do_launch_container_on_project(pi, ctr_idx);
-    }
-
-    pub(crate) fn open_image_build_prompt(&mut self, pi: usize, ctr_idx: usize, image: &str) {
+    pub(crate) fn open_image_build_prompt(
+        &mut self,
+        pi: usize,
+        ctr_idx: usize,
+        image: &str,
+        build_session_group: Option<usize>,
+    ) {
         self.build_project_idx = Some(pi);
         self.build_container_idx = Some(ctr_idx);
+        self.build_session_group = build_session_group;
         self.build_cursor = 0;
         self.build_output.clear();
         self.build_scroll = 0;
@@ -158,6 +146,7 @@ impl App {
         pi: usize,
         ctr_idx: usize,
         image: &str,
+        build_session_group: Option<usize>,
         image_exists: F,
     ) -> bool
     where
@@ -166,7 +155,7 @@ impl App {
         match image_exists(image) {
             Ok(true) => true,
             Ok(false) => {
-                self.open_image_build_prompt(pi, ctr_idx, image);
+                self.open_image_build_prompt(pi, ctr_idx, image, build_session_group);
                 false
             }
             Err(e) => {

@@ -7,12 +7,19 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.focus == Focus::Sidebar {
         let selected = app.sidebar_items().get(app.sidebar_idx).cloned();
         match selected {
-            Some(SidebarItem::Session(si)) if si < app.sessions.len() => {
-                let has_modal = app.has_pending_approval_modal();
-                // Sidebar-selected session is a preview, so keep it visually
-                // muted even when no modal is active.
-                let preview_dimmed = true;
-                render_terminal(frame, app, area, si, preview_dimmed || has_modal, false);
+            Some(SidebarItem::Session(si)) => {
+                if let Some(session_idx) = app.first_terminal_for_session_group(si) {
+                    render_session_detail(frame, app, area, session_idx, true);
+                } else {
+                    render_idle(frame, area);
+                }
+            }
+            Some(SidebarItem::SessionTerminal(group_idx, session_pos)) => {
+                if let Some(session_idx) = app.session_group_terminal(group_idx, session_pos) {
+                    render_session_detail(frame, app, area, session_idx, true);
+                } else {
+                    render_idle(frame, area);
+                }
             }
             Some(SidebarItem::Activity(id)) => {
                 render_activity_detail(frame, app, area, id.as_str(), true);
@@ -24,7 +31,7 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 render_project_settings(frame, app, area, pi, true);
             }
             Some(SidebarItem::Launch(_)) => {
-                render_container_picker(frame, app, area, true);
+                render_idle(frame, area);
             }
             Some(SidebarItem::Build(_))
                 if app.build_is_running() && build_output_is_selected(app) =>
@@ -98,18 +105,13 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
     match app.active_session {
         Some(si) if si < app.sessions.len() => {
-            render_terminal(frame, app, area, si, has_modal, false);
+            render_session_detail(frame, app, area, si, has_modal);
         }
         _ => render_idle(frame, area),
     }
 }
 
 pub(crate) fn render_terminal_overlays(frame: &mut Frame, app: &mut App, area: Rect) {
-    if let Some(idx) = app.active_exec_modal_idx() {
-        render_exec_approval_overlay(frame, app, area, idx);
-        return;
-    }
-
     if !app.pending_net.is_empty() {
         render_net_approval_overlay(frame, app, area);
     }
@@ -134,10 +136,7 @@ pub(crate) fn render_activity_detail(
         return;
     };
     let tone = |c| maybe_dim(c, dimmed);
-    let title = match &activity.kind {
-        crate::activity::ActivityKind::Hostdo { .. } => " Hostdo Activity ",
-        crate::activity::ActivityKind::Network { .. } => " Network Activity ",
-    };
+    let title = " Network Activity ";
     let block = Block::default()
         .title(title)
         .title_style(
@@ -148,67 +147,14 @@ pub(crate) fn render_activity_detail(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(tone(Color::Cyan)));
 
-    let status_color = activity_status_color(&activity.state);
+    let _status_color = activity_status_color(&activity.state);
     let activity_focused = !dimmed && app.focus == Focus::Activity;
     let in_scroll_mode = activity_focused && app.scroll_mode;
     let mut lines = Vec::new();
     lines.push(Line::from(""));
     append_activity_summary_lines(&mut lines, activity, &tone);
 
-    match &activity.kind {
-        crate::activity::ActivityKind::Hostdo {
-            argv,
-            image,
-            timeout_secs,
-            cwd,
-        } => {
-            lines.push(Line::from(vec![
-                Span::styled("  Command : ", Style::default().fg(tone(Color::DarkGray))),
-                Span::styled(activity.title(), Style::default().fg(tone(Color::White))),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("  CWD     : ", Style::default().fg(tone(Color::DarkGray))),
-                Span::styled(
-                    app.portable_cwd(cwd, &activity.project),
-                    Style::default().fg(tone(Color::White)),
-                ),
-            ]));
-            if let Some(image) = image {
-                lines.push(Line::from(vec![
-                    Span::styled("  Image   : ", Style::default().fg(tone(Color::DarkGray))),
-                    Span::styled(image.clone(), Style::default().fg(tone(Color::White))),
-                ]));
-            }
-            lines.push(Line::from(vec![
-                Span::styled("  Timeout : ", Style::default().fg(tone(Color::DarkGray))),
-                Span::styled(
-                    hostdo_timeout_label(activity, *timeout_secs),
-                    Style::default().fg(tone(Color::White)),
-                ),
-            ]));
-            if let Some(command_elapsed) = activity.command_elapsed_duration() {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "  Command elapsed: ",
-                        Style::default().fg(tone(Color::DarkGray)),
-                    ),
-                    Span::styled(
-                        format!("{}s / {}s", command_elapsed.as_secs(), timeout_secs),
-                        Style::default().fg(tone(status_color)),
-                    ),
-                ]));
-            }
-            if argv.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "  <empty command>",
-                    Style::default().fg(tone(Color::Red)),
-                )));
-            }
-        }
-        crate::activity::ActivityKind::Network { .. } => {
-            append_network_detail_lines(&mut lines, activity, &tone);
-        }
-    }
+    append_network_detail_lines(&mut lines, activity, &tone);
 
     append_activity_status_line(&mut lines, activity, &tone);
 
@@ -256,7 +202,7 @@ pub(crate) fn render_activity_detail(
         let footer = if in_scroll_mode {
             "  SCROLL: [↑↓/jk]line  [PgUp/PgDn]page  [g/G]top/bottom  [Esc/q]exit scroll"
         } else {
-            "  [^C] Cancel request   [^S] Scroll   [Esc/^B] Back to sidebar"
+            "  [^C/^Q] Quit   [^S] Scroll   [Esc/^B] Back to sidebar"
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -347,7 +293,6 @@ pub(crate) fn render_network_group_detail(
                 let target = truncate_middle(&format!("{host}{path}"), 58);
                 format!("{method:<7} {target}")
             }
-            crate::activity::ActivityKind::Hostdo { .. } => activity.title(),
         };
         lines.push(Line::from(vec![
             Span::styled(
@@ -399,7 +344,7 @@ pub(crate) fn render_network_group_detail(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         if focused {
-            "  [↑↓/jk] Select request   [^C] Cancel selected   [Esc/^B] Back to sidebar"
+            "  [↑↓/jk] Select request   [^C/^Q] Quit   [Esc/^B] Back to sidebar"
         } else {
             "  [↵/l] Open network list   [Esc/^B] Back to sidebar"
         },
@@ -415,7 +360,7 @@ fn network_group_title(app: &App, session_idx: usize, count: usize, width: u16) 
         .get(session_idx)
         .map(|session| {
             format!(
-                " Network: agent={} workspace={} docker={} ({count}) ",
+                " Network: container={} workspace={} docker={} ({count}) ",
                 session.container_name,
                 session.project,
                 short_container_id(&session.container_id)
@@ -470,10 +415,7 @@ fn append_network_detail_lines(
         payload_truncated,
         content_type,
         content_length,
-    } = &activity.kind
-    else {
-        return;
-    };
+    } = &activity.kind;
 
     lines.push(Line::from(vec![
         Span::styled("  Method  : ", Style::default().fg(tone(Color::DarkGray))),
@@ -584,29 +526,9 @@ fn append_recent_activity_history_lines(
     }
 }
 
-fn hostdo_timeout_label(activity: &crate::activity::Activity, timeout_secs: u64) -> String {
-    if activity.command_started_at.is_some() {
-        return format!("{timeout_secs}s command-only");
-    }
-
-    match &activity.state {
-        crate::activity::ActivityState::PullingImage => {
-            format!("{timeout_secs}s command-only, starts after image is ready")
-        }
-        crate::activity::ActivityState::PendingApproval => {
-            format!("{timeout_secs}s command-only, starts after approval")
-        }
-        state if state.is_terminal() => {
-            format!("{timeout_secs}s command-only, command did not run")
-        }
-        _ => format!("{timeout_secs}s command-only, starts when command runs"),
-    }
-}
-
 fn activity_status_color(state: &crate::activity::ActivityState) -> Color {
     match state {
         crate::activity::ActivityState::PendingApproval => Color::Yellow,
-        crate::activity::ActivityState::PullingImage => Color::Yellow,
         crate::activity::ActivityState::Running => Color::Cyan,
         crate::activity::ActivityState::Forwarding => Color::Yellow,
         crate::activity::ActivityState::Complete => Color::Green,
@@ -739,8 +661,7 @@ pub(crate) fn render_project_settings(
                 Span::styled("Loaded", Style::default().fg(tone(Color::Green))),
                 Span::styled(
                     format!(
-                        "  hostdo: {}, network: {}",
-                        r.hostdo.commands.len(),
+                        "  network: {}",
                         r.network.allowlist.len() + r.network.denylist.len()
                     ),
                     Style::default().fg(tone(Color::White)),
@@ -802,8 +723,7 @@ pub(crate) fn render_terminal_fullscreen_header(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::activity::{Activity, ActivityKind, ActivityState};
-    use std::sync::{Arc, atomic::AtomicBool};
+    use crate::activity::ActivityState;
 
     #[test]
     fn activity_status_color_uses_progress_success_failure_palette() {
@@ -811,14 +731,7 @@ mod tests {
             activity_status_color(&ActivityState::PendingApproval),
             Color::Yellow
         );
-        assert_eq!(
-            activity_status_color(&ActivityState::PullingImage),
-            Color::Yellow
-        );
-        assert_eq!(
-            activity_status_color(&ActivityState::Running),
-            Color::Cyan
-        );
+        assert_eq!(activity_status_color(&ActivityState::Running), Color::Cyan);
         assert_eq!(
             activity_status_color(&ActivityState::Forwarding),
             Color::Yellow
@@ -830,29 +743,5 @@ mod tests {
         assert_eq!(activity_status_color(&ActivityState::Failed), Color::Red);
         assert_eq!(activity_status_color(&ActivityState::Denied), Color::Red);
         assert_eq!(activity_status_color(&ActivityState::Cancelled), Color::Red);
-    }
-
-    #[test]
-    fn hostdo_timeout_label_explains_command_only_timer() {
-        let mut activity = Activity::new(
-            "project".to_string(),
-            Some("container".to_string()),
-            ActivityKind::Hostdo {
-                argv: vec!["cargo".to_string(), "test".to_string()],
-                image: Some("rust".to_string()),
-                timeout_secs: 120,
-                cwd: std::path::PathBuf::from("/workspace"),
-            },
-            ActivityState::PullingImage,
-            Arc::new(AtomicBool::new(false)),
-        );
-
-        assert_eq!(
-            hostdo_timeout_label(&activity, 120),
-            "120s command-only, starts after image is ready"
-        );
-
-        activity.mark_command_started(std::time::Instant::now());
-        assert_eq!(hostdo_timeout_label(&activity, 120), "120s command-only");
     }
 }

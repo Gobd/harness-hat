@@ -31,9 +31,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     if app.terminal_fullscreen {
         if let Some(si) = app.active_session.filter(|&si| si < app.sessions.len()) {
-            let has_modal = app.has_pending_approval_modal();
-
-            render_terminal(frame, app, area, si, has_modal, true);
+            if app.passthrough_mode {
+                render_terminal(frame, app, area, si, app.has_pending_approval_modal(), true);
+            } else {
+                render_session_detail(frame, app, area, si, app.has_pending_approval_modal());
+            }
             render_terminal_overlays(frame, app, area);
             if app.base_rules_changed.is_some() {
                 render_base_rules_changed_overlay(frame, app, area);
@@ -80,7 +82,22 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .split(outer[0]);
 
     render_sidebar(frame, app, main_row[0]);
-    render_right_pane(frame, app, main_row[2]);
+    if app.passthrough_mode {
+        if let Some(si) = app.active_session.filter(|&si| si < app.sessions.len()) {
+            render_terminal(
+                frame,
+                app,
+                main_row[2],
+                si,
+                app.has_pending_approval_modal(),
+                false,
+            );
+        } else {
+            render_idle(frame, main_row[2]);
+        }
+    } else {
+        render_right_pane(frame, app, main_row[2]);
+    }
     render_terminal_overlays(frame, app, main_row[2]);
     if show_log_pane {
         render_log(frame, app, outer[1]);
@@ -157,7 +174,7 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let block = Block::default()
-        .title(" Workspaces ")
+        .title(" Sessions ")
         .borders(Borders::ALL)
         .border_style(border_style);
     let inner = block.inner(area);
@@ -175,8 +192,7 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
             offset = selected.saturating_add(1).saturating_sub(visible);
         }
         if selected <= 1 {
-            // Keep the first workspace title visible when focusing the first
-            // selectable row(s) at the top of the sidebar.
+            // Keep the first row visible when focusing the top of the sidebar.
             offset = 0;
         }
         app.sidebar_offset = offset.min(max_offset);
@@ -192,45 +208,47 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         .skip(offset)
         .take(visible)
         .map(|item| match item {
-            SidebarItem::Workspace(pi) => {
-                let proj = &app.workspaces[*pi];
-                let mut spans = vec![
-                    Span::styled("● ", Style::default().fg(Color::Green)),
-                    Span::styled(
-                        proj.name.clone(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                ];
-                if focused && let Some(hotkey) = proj.sidebar_hotkey {
-                    let badge = format!("  [{}]", hotkey.to_ascii_uppercase());
-                    spans.push(Span::styled(badge, Style::default().fg(Color::DarkGray)));
-                }
-                ListItem::new(Line::from(spans))
-            }
             SidebarItem::Session(si) => {
-                let session = &app.sessions[*si];
-                let indent = if session.is_subagent() {
-                    "  ".repeat(app.session_depth(*si) + 1)
-                } else {
-                    "  ".to_string()
-                };
-                let (prefix, name_color) = if session.is_exited() {
-                    (format!("{indent}✗ "), Color::DarkGray)
-                } else if app.session_is_waiting(*si) {
-                    (format!("{indent}? "), Color::Yellow)
-                } else {
-                    (
-                        format!("{indent}{} ", loading_spinner_frame()),
-                        Color::Green,
+                let group = app.session_groups.get(*si);
+                let session_idx = app.first_terminal_for_session_group(*si);
+                let (prefix, name_color, short_id) = if let Some(session_idx) = session_idx {
+                    app.sessions.get(session_idx).map_or_else(
+                        || ("  ● ".to_string(), Color::DarkGray, String::new()),
+                        |session| {
+                            let (prefix, name_color) = if session.is_exited() {
+                                ("  ✗ ".to_string(), Color::DarkGray)
+                            } else if app.session_is_waiting(session_idx) {
+                                ("  ? ".to_string(), Color::Yellow)
+                            } else {
+                                (format!("  {} ", loading_spinner_frame()), Color::Green)
+                            };
+                            let short_id: String = session.docker_name.chars().take(12).collect();
+                            (prefix, name_color, short_id)
+                        },
                     )
+                } else {
+                    ("  ● ".to_string(), Color::DarkGray, String::new())
                 };
-                let bell = session.has_bell();
-                let short_id: String = session.docker_name.chars().take(12).collect();
+                let label = group
+                    .map(|g| g.workspace_name.as_str())
+                    .unwrap_or("<unknown session>");
+                let bell = if let Some(session_idx) = session_idx {
+                    app.sessions
+                        .get(session_idx)
+                        .map(|session| session.has_bell())
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                let template = group
+                    .map(|g| g.template_name.as_str())
+                    .unwrap_or("<unknown template>");
                 let mut spans = vec![
                     Span::styled(prefix, Style::default().fg(name_color)),
+                    Span::styled(label.to_string(), Style::default().fg(name_color)),
                     Span::styled(
-                        session.display_name().to_string(),
-                        Style::default().fg(name_color),
+                        format!("  {template}"),
+                        Style::default().fg(Color::DarkGray),
                     ),
                     Span::styled(format!(" {short_id}"), Style::default().fg(Color::DarkGray)),
                 ];
@@ -243,6 +261,45 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                     ));
                 }
                 ListItem::new(Line::from(spans))
+            }
+            SidebarItem::SessionTerminal(group_idx, session_pos) => {
+                let session_idx = app.session_group_terminal(*group_idx, *session_pos);
+                if let Some(session_idx) = session_idx {
+                    let session = &app.sessions[session_idx];
+                    let indent = sidebar_child_indent(app.session_depth(session_idx));
+                    let (prefix, name_color) = if session.is_exited() {
+                        (format!("{indent}✗"), Color::DarkGray)
+                    } else if app.session_is_waiting(session_idx) {
+                        (format!("{indent}?"), Color::Yellow)
+                    } else {
+                        (format!("{indent}{}", loading_spinner_frame()), Color::Green)
+                    };
+                    let short_id: String = session.docker_name.chars().take(12).collect();
+                    let mut spans = vec![
+                        Span::styled(prefix, Style::default().fg(name_color)),
+                        Span::styled(" ", Style::default().fg(name_color)),
+                        Span::styled(
+                            session.display_name().to_string(),
+                            Style::default().fg(name_color),
+                        ),
+                        Span::styled(format!(" {short_id}"), Style::default().fg(Color::DarkGray)),
+                    ];
+                    if session.has_bell() {
+                        spans.push(Span::styled(
+                            " [!]",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                    ListItem::new(Line::from(spans))
+                } else {
+                    let indent = sidebar_child_indent(0);
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!("{indent}? "), Style::default().fg(Color::Red)),
+                        Span::styled("Missing terminal", Style::default().fg(Color::DarkGray)),
+                    ]))
+                }
             }
             SidebarItem::NetworkGroup(si) => {
                 let activities = app.network_activities_for_session(*si);
@@ -260,7 +317,6 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                     let indent = sidebar_activity_indent_for_activity(app, id);
                     let (marker, color) = match &activity.state {
                         crate::activity::ActivityState::PendingApproval => ("? ", Color::Yellow),
-                        crate::activity::ActivityState::PullingImage => ("↓ ", Color::Yellow),
                         crate::activity::ActivityState::Running => ("$ ", Color::Cyan),
                         crate::activity::ActivityState::Forwarding => ("⇅ ", Color::Magenta),
                         crate::activity::ActivityState::Complete => ("✓ ", Color::Green),
@@ -286,10 +342,28 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled("  ⚙ ", Style::default().fg(Color::Yellow)),
                 Span::styled("Settings", Style::default().fg(Color::DarkGray)),
             ])),
-            SidebarItem::Launch(_) => ListItem::new(Line::from(vec![
-                Span::styled("  + ", Style::default().fg(Color::Green)),
-                Span::styled("Run Container...", Style::default().fg(Color::DarkGray)),
-            ])),
+            SidebarItem::WorkspacesHeader => ListItem::new(Line::from(Span::styled(
+                "─ Workspaces ─",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            SidebarItem::Launch(pi) => {
+                let name = cfg
+                    .workspaces
+                    .get(*pi)
+                    .map(|ws| ws.name.as_str())
+                    .unwrap_or("<workspace>");
+                let hotkey = app
+                    .workspaces
+                    .get(*pi)
+                    .and_then(|ws| ws.sidebar_hotkey)
+                    .map(|h| format!(" [{}]", h.to_ascii_uppercase()))
+                    .unwrap_or_default();
+                ListItem::new(Line::from(vec![
+                    Span::styled("  ▸ ", Style::default().fg(Color::Green)),
+                    Span::styled(name.to_string(), Style::default().fg(Color::Gray)),
+                    Span::styled(hotkey, Style::default().fg(Color::DarkGray)),
+                ]))
+            }
             SidebarItem::Build(_) => {
                 let image = app
                     .build_container_idx
@@ -314,20 +388,21 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
             ])),
+            SidebarItem::NewSession => ListItem::new(Line::from(vec![
+                Span::styled("+ ", Style::default().fg(Color::Green)),
+                Span::styled(
+                    "New Session...",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ])),
         })
         .collect();
 
     let mut list_state = ListState::default();
     if !items.is_empty() {
         let selected = app.sidebar_idx.min(items.len().saturating_sub(1));
-        // Workspace rows are non-selectable section headers. If the app state ever points at one
-        // (e.g. via older persisted state), render with no highlight.
-        if matches!(items.get(selected), Some(SidebarItem::Workspace(_))) {
-            list_state.select(None);
-        } else {
-            let rel_selected = selected.saturating_sub(offset);
-            list_state.select(Some(rel_selected.min(list_items.len().saturating_sub(1))));
-        }
+        let rel_selected = selected.saturating_sub(offset);
+        list_state.select(Some(rel_selected.min(list_items.len().saturating_sub(1))));
     }
 
     frame.render_stateful_widget(
@@ -370,8 +445,7 @@ fn network_sidebar_marker(activities: &[&crate::activity::Activity]) -> (&'stati
         match &activity.state {
             crate::activity::ActivityState::PendingApproval => has_pending = true,
             crate::activity::ActivityState::Forwarding
-            | crate::activity::ActivityState::Running
-            | crate::activity::ActivityState::PullingImage => has_active = true,
+            | crate::activity::ActivityState::Running => has_active = true,
             crate::activity::ActivityState::Failed | crate::activity::ActivityState::Denied => {
                 has_failed = true
             }

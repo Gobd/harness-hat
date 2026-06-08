@@ -1,6 +1,5 @@
 use super::*;
 
-mod agents;
 pub(crate) mod approvals;
 mod build;
 mod core;
@@ -14,7 +13,7 @@ mod settings;
 pub(crate) use crate::container::docker_image_exists;
 #[allow(unused_imports)]
 pub(crate) use helpers::{
-    control_hotkey_char, encode_sgr_mouse, host_bind_is_loopback, is_scroll_mode_toggle_key,
+    control_hotkey_char, encode_sgr_mouse, is_scroll_mode_toggle_key,
     maybe_encode_sgr_mouse_for_session, oneshot_dummy, run_build_shell_command,
     shell_command_for_docker_args,
 };

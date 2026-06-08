@@ -85,31 +85,28 @@ pub(crate) fn status_bar_keys(app: &App) -> &'static str {
     match app.focus {
         Focus::Sidebar => {
             if app.build_is_running() {
-                " [↑↓]navigate  [↵]select  [A-Z/0-9]workspace  [^C]cancel build  [Alt+o]log  [^Q]quit"
+                " [↑↓]navigate  [↵]select  [A-Z/0-9]workspace  [^C/^Q]quit  [Alt+o]log"
             } else {
-                " [↑↓]navigate  [↵]select  [A-Z/0-9]workspace  [Alt+o]log  [^Q]quit"
+                " [↑↓]navigate  [↵]select  [A-Z/0-9]workspace  [^C/^Q]quit  [Alt+o]log"
             }
         }
-        Focus::Terminal if app.scroll_mode => {
-            " SCROLL: [↑↓/jk]line  [PgUp/PgDn]page  [g/G]top/bottom  [Esc/q]exit scroll"
-        }
-        Focus::Terminal => " [^C]interrupt  [^B]sidebar  [^S]scroll  [Alt+o]log  [^Q]quit",
+        Focus::Terminal => " [k]stop container  [Esc/^B]sidebar  [^C/^Q]quit  [Alt+o]log",
         Focus::Activity if app.scroll_mode => {
             " SCROLL: [↑↓/jk]line  [PgUp/PgDn]page  [g/G]top/bottom  [Esc/q]exit scroll"
         }
-        Focus::Activity => " [^C]cancel request  [Esc/^B]sidebar  [^Q]quit",
-        Focus::Network => " [↑↓/jk]select request  [^C]cancel selected  [Esc/^B]sidebar  [^Q]quit",
-        Focus::Settings => " [↑↓/jk]navigate  [↵/l]select  [^B]back  [^Q]quit",
-        Focus::ContainerPicker => " [↑↓/jk]navigate  [↵/l]launch  [^B]back  [^Q]quit",
+        Focus::Activity => " [Esc/^B]sidebar  [^C/^Q]quit",
+        Focus::Network => " [↑↓/jk]select request  [Esc/^B]sidebar  [^C/^Q]quit",
+        Focus::Settings => " [↑↓/jk]navigate  [↵/l]select  [^B]back  [^C/^Q]quit",
+        Focus::ContainerPicker => " [↑↓/jk]navigate  [↵/l]launch  [^B]back  [^C/^Q]quit",
         Focus::ImageBuild => {
             if app.build_is_running() {
-                " [^C]cancel build  [Esc/^B]sidebar  [↑↓/jk]scroll  [^Q]quit"
+                " [Esc/^B]sidebar  [↑↓/jk]scroll  [^C/^Q]quit"
             } else {
-                " [↑↓/jk]navigate  [↵/l]select  [Esc/^B]back  [^Q]quit"
+                " [↑↓/jk]navigate  [↵/l]select  [Esc/^B]back  [^C/^Q]quit"
             }
         }
         Focus::NewWorkspace => {
-            " [↑↓/jk]navigate  [type]edit  [←→]cycle  [↵/l]select  [Esc/^B]back  [^Q]quit"
+            " [↑↓/jk]navigate  [type]edit  [←→]cycle  [↵/l]select  [Esc/^B]back  [^C/^Q]quit"
         }
     }
 }

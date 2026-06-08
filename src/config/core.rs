@@ -1,11 +1,7 @@
 use super::*;
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
-// Re-export rule enums so callers don't need to import both modules.
-pub use crate::rules::ApprovalMode;
+use std::path::PathBuf;
 
 // ── Top-level ────────────────────────────────────────────────────────────────
 
@@ -18,8 +14,7 @@ pub struct Config {
     pub version: u32,
     pub manager: ManagerConfig,
     /// Directory containing the repository root used for Docker builds.
-    /// This is required at startup and is auto-populated by
-    /// `harness-hat-manager --init`.
+    /// This is required at startup and is auto-populated by `harness-hat --init`.
     #[serde(default)]
     pub docker_dir: PathBuf,
     #[serde(default)]
@@ -43,8 +38,7 @@ impl Default for Config {
         Self {
             version: CURRENT_CONFIG_VERSION,
             manager: ManagerConfig::default(),
-            // `docker_dir` is expected to be populated during
-            // `harness-hat-manager --init`.
+            // `docker_dir` is expected to be populated during `harness-hat --init`.
             // An empty PathBuf here signifies an uninitialized state.
             docker_dir: PathBuf::new(),
             defaults: DefaultsConfig::default(),
@@ -76,7 +70,7 @@ pub struct DefaultsConfig {
     #[serde(default)]
     pub ui: UiDefaults,
     #[serde(default)]
-    pub hostdo: HostdoDefaults,
+    pub control: ControlDefaults,
     #[serde(default)]
     pub proxy: ProxyDefaults,
     #[serde(default)]
@@ -109,140 +103,35 @@ impl Default for UiDefaults {
     }
 }
 
-/// A command alias: either a plain command string or a table with `cmd` and optional `cwd`.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(untagged)]
-pub enum AliasValue {
-    Simple(String),
-    WithOptions {
-        cmd: String,
-        #[serde(default)]
-        cwd: Option<PathBuf>,
-    },
-}
-
-/// Magic cwd values resolved at request time with project context.
-const ALIAS_CWD_WORKSPACE: &str = "$WORKSPACE";
-
-impl AliasValue {
-    pub fn cmd(&self) -> &str {
-        match self {
-            Self::Simple(s) => s,
-            Self::WithOptions { cmd, .. } => cmd,
-        }
-    }
-
-    /// Resolve the alias cwd, substituting the `$WORKSPACE` placeholder.
-    pub fn resolve_cwd(&self, workspace_path: &Path) -> Option<PathBuf> {
-        match self {
-            Self::Simple(_) => None,
-            Self::WithOptions { cwd: None, .. } => None,
-            Self::WithOptions { cwd: Some(p), .. } => {
-                let raw = p.to_string_lossy();
-                if raw == ALIAS_CWD_WORKSPACE {
-                    Some(workspace_path.to_path_buf())
-                } else if let Some(rest) = raw
-                    .strip_prefix("$WORKSPACE/")
-                    .or_else(|| raw.strip_prefix("$WORKSPACE\\"))
-                {
-                    Some(workspace_path.join(rest))
-                } else {
-                    Some(p.clone())
-                }
-            }
-        }
-    }
-
-    /// Expand `~` in the cwd path, if present. Skips `$WORKSPACE`, which is
-    /// resolved later with project context.
-    pub(crate) fn expand_cwd(&mut self) -> Result<()> {
-        if let Self::WithOptions { cwd: Some(p), .. } = self {
-            if !p.as_os_str().to_string_lossy().starts_with('$') {
-                *p = expand_path(p)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct HostdoDefaults {
-    #[serde(default = "default_exec_port")]
+pub struct ControlDefaults {
+    #[serde(default = "default_control_port")]
     pub server_port: u16,
     #[serde(default = "default_host")]
     pub server_host: String,
     #[serde(default = "default_token_env")]
     pub token_env_var: String,
-    /// Maximum command timeout an agent may request through hostdo.
-    #[serde(default = "default_max_timeout_secs")]
-    pub max_timeout_secs: u64,
-    /// List of exact executable names that are always denied, regardless of other rules.
-    #[serde(default = "default_denied_executables")]
-    pub denied_executables: Vec<String>,
-    /// When empty, harness-hat uses its built-in list of common shell/file utilities
-    /// that should not be run through hostdo. When non-empty, this list overrides
-    /// the built-in defaults.
-    #[serde(default)]
-    pub hostdo_block_common: Vec<String>,
-    /// List of argument fragments (substrings) that, if present in any command's argv, will cause the command to be denied.
-    #[serde(default)]
-    pub denied_argument_fragments: Vec<String>,
-    /// Optional command aliases expanded server-side for hostdo.
-    /// Example: doMyHomeWork = "curl example.com"
-    /// Example: tests = { cmd = "cargo test", cwd = "/home/user/project" }
-    #[serde(default)]
-    pub command_aliases: HashMap<String, AliasValue>,
 }
 
-/// Provides the default value for `HostdoDefaults.server_port`.
-fn default_exec_port() -> u16 {
+/// Provides the default value for `ControlDefaults.server_port`.
+fn default_control_port() -> u16 {
     7878
 }
-/// Provides the default value for `HostdoDefaults.server_host`.
+/// Provides the default value for `ControlDefaults.server_host`.
 fn default_host() -> String {
     "127.0.0.1".to_string()
 }
-/// Provides the default value for `HostdoDefaults.token_env_var`.
+/// Provides the default value for `ControlDefaults.token_env_var`.
 fn default_token_env() -> String {
     "HARNESS_HAT_TOKEN".to_string()
 }
-/// Provides the default value for `HostdoDefaults.max_timeout_secs`.
-fn default_max_timeout_secs() -> u64 {
-    60 * 60
-}
-/// Provides the default value for `HostdoDefaults.denied_executables`.
-fn default_denied_executables() -> Vec<String> {
-    [
-        "sh", "bash", "zsh", "fish", "csh", "ksh", "sudo", "su", "doas",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
-}
 
-pub fn builtin_hostdo_block_common() -> Vec<String> {
-    [
-        "ls", "dir", "cat", "grep", "egrep", "fgrep", "rg", "find", "fd", "sed", "awk", "head",
-        "tail", "less", "more", "sort", "uniq", "cut", "xargs", "wc", "cp", "mv", "rm", "mkdir",
-        "rmdir", "touch", "chmod", "chown", "ln", "readlink", "realpath", "stat", "du", "df",
-        "tar", "zip", "unzip",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
-}
-
-impl Default for HostdoDefaults {
+impl Default for ControlDefaults {
     fn default() -> Self {
         Self {
-            server_port: default_exec_port(),
+            server_port: default_control_port(),
             server_host: default_host(),
             token_env_var: default_token_env(),
-            max_timeout_secs: default_max_timeout_secs(),
-            denied_executables: default_denied_executables(),
-            hostdo_block_common: Vec::new(),
-            denied_argument_fragments: vec![],
-            command_aliases: HashMap::new(),
         }
     }
 }
@@ -256,7 +145,7 @@ pub struct ProxyDefaults {
     /// When enabled, containers are launched with NET_ADMIN + root so they can:
     ///   1) transparently redirect outbound HTTP/HTTPS through the harness-hat proxy
     ///   2) install strict outbound egress rules (iptables) to block direct egress
-    ///      outside the proxy and exec bridge.
+    ///      outside the proxy and control server.
     ///
     /// This is the recommended "near-impossible to bypass" mode.
     ///

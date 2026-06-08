@@ -1,5 +1,7 @@
 use super::*;
+use alacritty_terminal::term::TermMode;
 
+#[allow(dead_code)]
 pub(crate) fn maybe_encode_sgr_mouse_for_session(
     session: &crate::container::ContainerSession,
     mouse: MouseEvent,
@@ -21,6 +23,7 @@ pub(crate) fn maybe_encode_sgr_mouse_for_session(
     encode_sgr_mouse(mouse)
 }
 
+#[allow(dead_code)]
 pub(crate) fn encode_sgr_mouse(mouse: MouseEvent) -> Option<Vec<u8>> {
     let mut cb: u16 = 0;
     if mouse.modifiers.contains(KeyModifiers::SHIFT) {
@@ -59,6 +62,7 @@ pub(crate) fn encode_sgr_mouse(mouse: MouseEvent) -> Option<Vec<u8>> {
     Some(out)
 }
 
+#[allow(dead_code)]
 pub(crate) fn button_to_code(button: MouseButton) -> Option<u16> {
     match button {
         MouseButton::Left => Some(0),
@@ -125,6 +129,7 @@ pub(crate) async fn run_build_shell_command(
     shell_command: String,
     launch_project_idx: usize,
     launch_container_idx: usize,
+    launch_session_group: Option<usize>,
     cancel_flag: Arc<AtomicBool>,
     tx: mpsc::UnboundedSender<BuildEvent>,
 ) {
@@ -153,6 +158,7 @@ pub(crate) async fn run_build_shell_command(
                 label,
                 launch_project_idx,
                 launch_container_idx,
+                launch_session_group,
                 success: false,
                 cancelled: false,
                 exit_code: None,
@@ -222,16 +228,13 @@ pub(crate) async fn run_build_shell_command(
         label,
         launch_project_idx,
         launch_container_idx,
+        launch_session_group,
         success,
         cancelled,
         exit_code,
         error: None,
         diagnostic,
     });
-}
-
-pub(crate) fn host_bind_is_loopback(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
 pub(crate) fn control_hotkey_char(key: KeyEvent) -> Option<char> {

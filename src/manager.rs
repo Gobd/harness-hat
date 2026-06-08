@@ -1,5 +1,4 @@
 use anyhow::Result;
-use clap::Parser;
 use crossterm::style::Stylize;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -7,21 +6,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-use crate::cli::Cli;
-
-/// Run the interactive workspace manager (current TUI behavior).
-pub async fn run() -> Result<()> {
-    let cli = Cli::parse();
-
-    if let Some(init_path) = cli.init {
-        crate::init::write_sample_config(&init_path)?;
-        info!("config written to: {}", init_path.display());
-        info!(
-            "edit it, then run: harness-hat-manager --config {}",
-            init_path.display()
-        );
-        return Ok(());
-    }
+/// Run the interactive workspace manager (the default `hh` action).
+pub async fn run(cli: crate::cli::Cli) -> Result<()> {
+    crate::container::ensure_docker_installed_and_running()?;
 
     let config_path = match resolve_or_prompt_config_path(cli.config)? {
         Some(path) => path,
@@ -32,12 +19,6 @@ pub async fn run() -> Result<()> {
     crate::init::ensure_base_dockerfile(&config.docker_dir)?;
     crate::init::ensure_default_dockerfile(&config.docker_dir)?;
     crate::init::ensure_docker_assets(&config.docker_dir)?;
-
-    if which::which("docker").is_err() {
-        anyhow::bail!(
-            "docker not found in PATH — harness-hat-manager requires Docker to run containers"
-        );
-    }
 
     let telemetry_handle = crate::telemetry::init(&config)?;
     info!("loaded config from {}", config_path.display());
@@ -52,43 +33,37 @@ pub async fn run() -> Result<()> {
 
     let ca_cert_path = ca_dir.join("ca.crt");
     info!(
-        "{}",
-        crate::agents::ca_setup_instructions(&ca.cert_pem, &ca_cert_path.display().to_string())
+        "Harness Hat CA certificate available at {}.\n{}",
+        ca_cert_path.display(),
+        ca.cert_pem
     );
 
-    let (exec_pending_tx, exec_pending_rx) = mpsc::channel::<crate::server::PendingItem>(64);
     let (stop_pending_tx, stop_pending_rx) = mpsc::channel::<crate::server::ContainerStopItem>(64);
-    let (agent_control_tx, agent_control_rx) = mpsc::channel::<crate::server::AgentControlRequest>(
-        crate::server::AGENT_CONTROL_CHANNEL_CAPACITY,
-    );
     let (net_pending_tx, net_pending_rx) = mpsc::channel::<crate::proxy::PendingNetworkItem>(64);
     let (activity_tx, activity_rx) = mpsc::unbounded_channel::<crate::activity::ActivityEvent>();
     let (audit_tx, audit_rx) = mpsc::channel(256);
 
     let session_registry = crate::server::SessionRegistry::default();
 
-    let exec_port = config.defaults.hostdo.server_port;
-    let exec_host = config.defaults.hostdo.server_host.clone();
-    let exec_addr = format!("{exec_host}:{exec_port}");
+    let control_port = config.defaults.control.server_port;
+    let control_host = config.defaults.control.server_host.clone();
+    let control_addr = format!("{control_host}:{control_port}");
     let server_state = crate::server::ServerState {
         config: shared_config.clone(),
         state: state.clone(),
-        pending_tx: exec_pending_tx,
         stop_tx: stop_pending_tx,
-        agent_tx: agent_control_tx,
         audit_tx,
         token: token.clone(),
         sessions: session_registry.clone(),
-        exec_jobs: crate::server::ExecJobRegistry::default(),
         activity_tx: activity_tx.clone(),
     };
-    let exec_listener = tokio::net::TcpListener::bind(&exec_addr)
+    let control_listener = tokio::net::TcpListener::bind(&control_addr)
         .await
-        .map_err(|e| anyhow::anyhow!("binding exec bridge to {exec_addr}: {e}"))?;
-    info!("exec bridge listening on {}", exec_addr);
+        .map_err(|e| anyhow::anyhow!("binding control server to {control_addr}: {e}"))?;
+    info!("control server listening on {}", control_addr);
     tokio::spawn(async move {
-        if let Err(e) = crate::server::run_with_listener(server_state, exec_listener).await {
-            error!("exec server error: {e}");
+        if let Err(e) = crate::server::run_with_listener(server_state, control_listener).await {
+            error!("control server error: {e}");
         }
     });
 
@@ -114,9 +89,7 @@ pub async fn run() -> Result<()> {
         config_path.clone(),
         token,
         session_registry,
-        exec_pending_rx,
         stop_pending_rx,
-        agent_control_rx,
         net_pending_rx,
         activity_rx,
         audit_rx,

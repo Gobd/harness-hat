@@ -122,6 +122,196 @@ pub(crate) fn render_terminal(
     );
 }
 
+pub(crate) fn render_session_detail(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    session_idx: usize,
+    dimmed: bool,
+) {
+    let Some(session) = app.sessions.get(session_idx) else {
+        render_idle(frame, area);
+        return;
+    };
+
+    let docker_name = session.docker_name.clone();
+    let container_id = session.container_id.clone();
+    let project = session.project.clone();
+    let container_name = session.container_name.clone();
+    let mount_target = session.mount_target.clone();
+    let shell_command = session.shell_in_hint();
+    let exited = session.is_exited();
+    let launched_secs = session.launched_at.elapsed().as_secs();
+    let usage = if exited {
+        None
+    } else {
+        app.container_usage_for_session(session_idx)
+    };
+
+    let cfg = app.config.get();
+    let workspace_path = cfg
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.name == project)
+        .map(|workspace| workspace.canonical_path.display().to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let template = cfg
+        .containers
+        .iter()
+        .find(|template| template.name == container_name);
+    let image = template
+        .map(|template| template.image.as_str())
+        .unwrap_or("<unknown>");
+    let extra_mounts = template
+        .map(|template| template.mounts.clone())
+        .unwrap_or_default();
+
+    let tone = |c| maybe_dim(c, dimmed);
+    let focused = app.focus == Focus::Terminal && !dimmed;
+    let border = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    let block = Block::default()
+        .title(" Session ")
+        .title_style(
+            Style::default()
+                .fg(tone(Color::Cyan))
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(tone(border)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let status = if exited { "stopped" } else { "running" };
+    let status_color = if exited {
+        Color::DarkGray
+    } else {
+        Color::Green
+    };
+    let short_id = short_container_id(&container_id);
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Workspace : ", Style::default().fg(tone(Color::DarkGray))),
+            Span::styled(project.clone(), Style::default().fg(tone(Color::White))),
+        ]),
+        Line::from(vec![
+            Span::styled("  Template  : ", Style::default().fg(tone(Color::DarkGray))),
+            Span::styled(
+                container_name.clone(),
+                Style::default().fg(tone(Color::White)),
+            ),
+            Span::styled("  image ", Style::default().fg(tone(Color::DarkGray))),
+            Span::styled(image.to_string(), Style::default().fg(tone(Color::White))),
+        ]),
+        Line::from(vec![
+            Span::styled("  Container : ", Style::default().fg(tone(Color::DarkGray))),
+            Span::styled(docker_name.clone(), Style::default().fg(tone(Color::White))),
+            Span::styled(
+                format!("  {short_id}"),
+                Style::default().fg(tone(Color::DarkGray)),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Status    : ", Style::default().fg(tone(Color::DarkGray))),
+            Span::styled(status, Style::default().fg(tone(status_color))),
+            Span::styled(
+                format!("  uptime {}s", launched_secs),
+                Style::default().fg(tone(Color::DarkGray)),
+            ),
+        ]),
+    ];
+
+    if let Some(usage) = usage {
+        lines.push(Line::from(vec![
+            Span::styled("  Usage     : ", Style::default().fg(tone(Color::DarkGray))),
+            Span::styled(
+                format!("CPU {}  Memory {}", usage.cpu_percent, usage.memory_usage),
+                Style::default().fg(tone(Color::White)),
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("  Usage     : ", Style::default().fg(tone(Color::DarkGray))),
+            Span::styled(
+                if exited {
+                    "container stopped"
+                } else {
+                    "pending"
+                },
+                Style::default().fg(tone(Color::DarkGray)),
+            ),
+        ]));
+    }
+
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Shell",
+            Style::default()
+                .fg(tone(Color::Cyan))
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(shell_command, Style::default().fg(tone(Color::White))),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Mounts",
+            Style::default()
+                .fg(tone(Color::Cyan))
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("  rw ", Style::default().fg(tone(Color::Green))),
+            Span::styled(workspace_path, Style::default().fg(tone(Color::White))),
+            Span::styled(" -> ", Style::default().fg(tone(Color::DarkGray))),
+            Span::styled(mount_target, Style::default().fg(tone(Color::White))),
+        ]),
+    ]);
+
+    for mount in extra_mounts {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {} ", crate::container::mount_mode_arg(&mount.mode)),
+                Style::default().fg(tone(Color::Green)),
+            ),
+            Span::styled(
+                mount.host.display().to_string(),
+                Style::default().fg(tone(Color::White)),
+            ),
+            Span::styled(" -> ", Style::default().fg(tone(Color::DarkGray))),
+            Span::styled(
+                mount.container.display().to_string(),
+                Style::default().fg(tone(Color::White)),
+            ),
+        ]));
+    }
+
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Actions",
+            Style::default()
+                .fg(tone(Color::Cyan))
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  [k] stop container  [Esc/^B] sidebar  [Alt+o] log",
+            Style::default().fg(tone(Color::DarkGray)),
+        )),
+    ]);
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 pub(crate) fn terminal_fullscreen_hint(fullscreen: bool) -> &'static str {
     if fullscreen {
         " Ctrl+G to exit fullscreen "

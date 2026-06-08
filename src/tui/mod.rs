@@ -2,7 +2,6 @@ mod app;
 pub mod render;
 
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::TermMode;
 use anyhow::{Context, Result};
 use crossterm::{
     cursor,
@@ -19,24 +18,57 @@ use crossterm::{
 };
 use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicI32, Ordering},
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::activity::{Activity, ActivityEvent, ActivityId};
 use crate::container::ContainerSession;
 use crate::proxy::{NetworkDecision, PendingNetworkItem, ProxyState};
 use crate::rules::NetworkPolicy;
 use crate::server::SessionRegistry;
-use crate::server::{
-    AgentControlRequest, ApprovalDecision, ContainerStopDecision, ContainerStopItem, PendingItem,
-};
+use crate::server::{ContainerStopDecision, ContainerStopItem};
 use crate::shared_config::SharedConfig;
 use crate::state::{AuditEntry, StateManager};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TuiSessionGroup {
+    workspace_name: String,
+    workspace_idx: Option<usize>,
+    template_name: String,
+    template_idx: Option<usize>,
+    terminal_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CachedContainerUsage {
+    fetched_at: std::time::Instant,
+    stats: Option<crate::container::ContainerUsageStats>,
+    /// A background refresh for this container is currently running, so the UI
+    /// thread should not spawn another or block on `docker stats`.
+    in_flight: bool,
+}
+
+/// Result of a background `docker stats` fetch, delivered to the UI thread.
+#[derive(Debug)]
+pub(crate) struct ContainerUsageUpdate {
+    pub docker_name: String,
+    pub stats: Option<crate::container::ContainerUsageStats>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ContainerPickerState {
+    /// First step: choose workspace for a new session.
+    NewSessionWorkspace { cursor: usize },
+    /// Second step: choose a template for a new session. Reached either via the
+    /// workspace step (NewSession flow) or directly from a sidebar workspace
+    /// entry. Esc/^B returns to the sidebar in both cases.
+    NewSessionTemplate { workspace_idx: usize, cursor: usize },
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsAction {
@@ -66,13 +98,16 @@ pub enum LogEntry {
 #[derive(Debug, Clone, PartialEq)]
 /// Selectable entries in the left sidebar.
 pub enum SidebarItem {
-    Workspace(usize),
     Session(usize),
+    SessionTerminal(usize, usize),
     NetworkGroup(usize),
     Activity(ActivityId),
     Settings(usize),
     Launch(usize),
     Build(usize),
+    NewSession,
+    /// Non-selectable header rendered above the workspace launch entries.
+    WorkspacesHeader,
     NewWorkspace,
 }
 
@@ -124,12 +159,6 @@ pub struct PendingBaseRulesInternalWrite {
     pub expires_at: std::time::Instant,
 }
 
-pub struct PendingAgentSend {
-    pub session_token: String,
-    pub input: String,
-    pub response_tx: oneshot::Sender<Result<crate::server::AgentOkResponse, String>>,
-}
-
 /// Top-level TUI application state and event loop ownership.
 pub struct App {
     pub config: SharedConfig,
@@ -140,7 +169,6 @@ pub struct App {
     proxy_state: ProxyState,
 
     pub workspaces: Vec<WorkspaceStatus>,
-    pub pending_exec: Vec<PendingItem>,
     pub pending_stop: Vec<ContainerStopItem>,
     pub pending_net: Vec<PendingNetworkItem>,
     pub activities: Vec<Activity>,
@@ -150,6 +178,7 @@ pub struct App {
     pub focus: Focus,
     pub sidebar_idx: usize,
     pub sidebar_offset: usize,
+    pub(crate) session_groups: Vec<TuiSessionGroup>,
     pub active_session: Option<usize>,
     pub active_activity: Option<ActivityId>,
     pub active_network_session: Option<usize>,
@@ -158,9 +187,10 @@ pub struct App {
     pub active_settings_project: Option<usize>,
     pub settings_cursor: usize,
 
-    pub container_picker: Option<usize>,
+    pub(crate) container_picker: Option<ContainerPickerState>,
     pub build_container_idx: Option<usize>,
     pub build_project_idx: Option<usize>,
+    pub build_session_group: Option<usize>,
     pub build_cursor: usize,
     pub build_output: VecDeque<(String, bool)>,
     pub build_scroll: usize,
@@ -169,19 +199,18 @@ pub struct App {
     pub remove_workspace_confirm: Option<RemoveWorkspaceConfirmState>,
     pub base_rules_changed: Option<BaseRulesChangedState>,
 
-    pub exec_pending_rx: mpsc::Receiver<PendingItem>,
     pub stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
-    pub agent_control_rx: mpsc::Receiver<AgentControlRequest>,
-    pub pending_agent_sends: VecDeque<PendingAgentSend>,
-    pub subagent_first_output_at: HashMap<String, std::time::Instant>,
-    pub ready_subagent_tokens: HashSet<String>,
-    pub last_agent_spawn_at: HashMap<String, std::time::Instant>,
     pub net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
     pub activity_rx: mpsc::UnboundedReceiver<ActivityEvent>,
     pub audit_rx: mpsc::Receiver<AuditEntry>,
     build_event_rx: mpsc::UnboundedReceiver<BuildEvent>,
     build_event_tx: mpsc::UnboundedSender<BuildEvent>,
     build_task: Option<BuildTaskState>,
+    container_usage_rx: mpsc::UnboundedReceiver<ContainerUsageUpdate>,
+    container_usage_tx: mpsc::UnboundedSender<ContainerUsageUpdate>,
+    rules_scan_rx: mpsc::UnboundedReceiver<Vec<(PathBuf, WatchedFileStamp)>>,
+    rules_scan_tx: mpsc::UnboundedSender<Vec<(PathBuf, WatchedFileStamp)>>,
+    rules_scan_in_flight: bool,
 
     pub should_quit: bool,
     pub passthrough_mode: bool,
@@ -192,6 +221,7 @@ pub struct App {
     pub scroll_mode: bool,
     pub scroll_mouse_passthrough: bool,
     pub terminal_scroll: usize,
+    pub(crate) container_usage: HashMap<String, CachedContainerUsage>,
     last_base_rules_poll: std::time::Instant,
     watched_rules_stamps: HashMap<PathBuf, WatchedFileStamp>,
     pending_base_rules_internal_write: HashMap<PathBuf, PendingBaseRulesInternalWrite>,
@@ -213,6 +243,7 @@ enum BuildEvent {
         label: String,
         launch_project_idx: usize,
         launch_container_idx: usize,
+        launch_session_group: Option<usize>,
         success: bool,
         cancelled: bool,
         exit_code: Option<i32>,
@@ -223,58 +254,7 @@ enum BuildEvent {
 
 #[derive(Debug, Clone)]
 struct BuildTaskState {
-    label: String,
     shell_command: String,
-    cancel_flag: Arc<AtomicBool>,
-}
-
-fn key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
-    match key.code {
-        KeyCode::Char(c) => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                let b = c as u8;
-                if b.is_ascii_alphabetic() {
-                    Some(vec![b & 0x1f])
-                } else {
-                    Some(c.to_string().into_bytes())
-                }
-            } else {
-                let mut buf = [0u8; 4];
-                Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
-            }
-        }
-        KeyCode::Enter => Some(b"\r".to_vec()),
-        KeyCode::Backspace => Some(b"\x7f".to_vec()),
-        KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
-        KeyCode::Tab => Some(b"\t".to_vec()),
-        KeyCode::Up => Some(b"\x1b[A".to_vec()),
-        KeyCode::Down => Some(b"\x1b[B".to_vec()),
-        KeyCode::Right => Some(b"\x1b[C".to_vec()),
-        KeyCode::Left => Some(b"\x1b[D".to_vec()),
-        KeyCode::Home => Some(b"\x1b[H".to_vec()),
-        KeyCode::End => Some(b"\x1b[F".to_vec()),
-        KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
-        KeyCode::PageDown => Some(b"\x1b[6~".to_vec()),
-        KeyCode::Esc => Some(b"\x1b".to_vec()),
-        KeyCode::F(n) if (1..=12).contains(&n) => {
-            let f_keys: [&[u8]; 12] = [
-                b"\x1bOP",
-                b"\x1bOQ",
-                b"\x1bOR",
-                b"\x1bOS",
-                b"\x1b[15~",
-                b"\x1b[17~",
-                b"\x1b[18~",
-                b"\x1b[19~",
-                b"\x1b[20~",
-                b"\x1b[21~",
-                b"\x1b[23~",
-                b"\x1b[24~",
-            ];
-            Some(f_keys[(n - 1) as usize].to_vec())
-        }
-        _ => None,
-    }
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -286,7 +266,12 @@ pub async fn run(mut app: App) -> Result<()> {
     let _termios_guard = disable_xon_xoff();
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
+    execute!(
+        stdout,
+        crossterm::terminal::SetTitle("Harness Hat"),
+        EnterAlternateScreen,
+        cursor::Hide
+    )?;
     let mut restore_guard = TerminalRestoreGuard::new();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -401,11 +386,19 @@ async fn event_loop(
     let mut events = EventStream::new();
     let tick = tokio::time::Duration::from_millis(50);
     let mut mouse_capture_enabled = false;
+    let mut approval_bell_rung = false;
 
     loop {
         sync_mouse_capture(terminal.backend_mut(), app, &mut mouse_capture_enabled)?;
         app.drain_channels();
         app.tick_base_rules_file_watch();
+        let modal_visible = app.has_pending_approval_modal();
+        if modal_visible && !approval_bell_rung {
+            ring_terminal_bell(terminal.backend_mut())?;
+            approval_bell_rung = true;
+        } else if !modal_visible {
+            approval_bell_rung = false;
+        }
         terminal.draw(|frame| render::render(frame, app))?;
 
         if app.should_quit {
@@ -423,18 +416,15 @@ async fn event_loop(
                     Some(Ok(Event::Paste(text))) => {
                         if app.focus == Focus::NewWorkspace {
                             app.append_new_project_text(&text);
-                        } else if let Some(si) = app.active_session {
-                            if let Some(session) = app.sessions.get(si) {
-                                session.send_input(text.into_bytes());
-                            }
+                        } else if let Some(si) = app.active_session
+                            && let Some(session) = app.sessions.get(si)
+                        {
+                            session.send_input(text.into_bytes());
                         }
                     }
                     Some(Ok(Event::Resize(cols, rows))) => {
-                        let (pty_cols, pty_rows) = if app.passthrough_mode {
-                            (cols.max(20), rows.max(6))
-                        } else {
-                            (cols.saturating_sub(38).max(20), rows.saturating_sub(10).max(6))
-                        };
+                        let (pty_cols, pty_rows) =
+                            (cols.saturating_sub(38).max(20), rows.saturating_sub(10).max(6));
                         for session in &mut app.sessions {
                             let _ = session.resize(pty_rows, pty_cols);
                         }
@@ -451,31 +441,14 @@ async fn event_loop(
     Ok(())
 }
 
-fn session_mode_requires_mouse_capture(mode: TermMode) -> bool {
-    mode.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
-        && mode.contains(TermMode::SGR_MOUSE)
+fn ring_terminal_bell<W: std::io::Write>(writer: &mut W) -> std::io::Result<()> {
+    writer.write_all(b"\x07")?;
+    writer.flush()
 }
 
 fn should_enable_mouse_capture(app: &App) -> bool {
-    if app.focus != Focus::Terminal {
-        return false;
-    }
-    // In explicit scroll mode, keep mouse capture disabled so terminal-native
-    // text selection works while reviewing scrollback.
-    if app.scroll_mode {
-        return false;
-    }
-    let Some(si) = app.active_session else {
-        return false;
-    };
-    let Some(session) = app.sessions.get(si) else {
-        return false;
-    };
-    if session.mouse_scroll == crate::config::MouseScrollMode::Agent {
-        return true;
-    }
-    let mode = *session.term.lock().mode();
-    session_mode_requires_mouse_capture(mode)
+    let _ = app;
+    false
 }
 
 fn sync_mouse_capture<W: std::io::Write>(
@@ -498,3 +471,13 @@ fn sync_mouse_capture<W: std::io::Write>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod bell_tests {
+    #[test]
+    fn ring_terminal_bell_writes_bell_character() {
+        let mut buf = Vec::new();
+        super::ring_terminal_bell(&mut buf).expect("write bell");
+        assert_eq!(buf, b"\x07");
+    }
+}

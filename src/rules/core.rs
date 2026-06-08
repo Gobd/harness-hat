@@ -1,50 +1,13 @@
-/// Parses `harness-rules.toml` files and composes global + per-project rules.
-///
-/// `harness-rules.toml` lives in the canonical project root (committed to git).
-/// It controls what the AI agent is allowed to do: which host-side commands
-/// can run, and which network destinations are reachable.
+/// Parses `harness-rules.toml` files and composes global + per-workspace
+/// network policy.
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 
-use crate::config::AliasValue;
-
-pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
-pub const DEFAULT_AGENTCTL_SPAWN_DELAY_MS: u64 = 500;
-pub const MIN_AGENTCTL_SPAWN_DELAY_MS: u64 = 100;
-pub const DEFAULT_AGENTCTL_MAX_SUBAGENTS: usize = 10;
 pub const CURRENT_RULES_VERSION: u32 = 1;
 
 // ── Enums (re-used across config and rules) ──────────────────────────────────
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalMode {
-    Auto,
-    Prompt,
-    Deny,
-}
-
-impl Default for ApprovalMode {
-    fn default() -> Self {
-        Self::Prompt
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum ConcurrencyPolicy {
-    Queue,
-    Reject,
-    Parallel,
-}
-
-impl Default for ConcurrencyPolicy {
-    fn default() -> Self {
-        Self::Queue
-    }
-}
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -63,20 +26,13 @@ impl Default for NetworkPolicy {
 // ── harness-rules.toml schema ───────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct ProjectRules {
     /// Schema version for future harness-rules.toml migrations.
     #[serde(default = "current_rules_version")]
     pub version: u32,
-    /// Optional instructions for a human or LLM agent. This field is preserved
-    /// across automatic edits to this file (e.g. when harness-hat appends a new
-    /// `hostdo` command rule).
+    /// Optional project instructions. This field is preserved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_instructions: Option<String>,
-    #[serde(default)]
-    pub agentctl: AgentctlRules,
-    #[serde(default)]
-    pub hostdo: HostdoRules,
     #[serde(default)]
     pub network: NetworkRules,
 }
@@ -90,88 +46,9 @@ impl Default for ProjectRules {
         Self {
             version: CURRENT_RULES_VERSION,
             llm_instructions: None,
-            agentctl: AgentctlRules::default(),
-            hostdo: HostdoRules::default(),
             network: NetworkRules::default(),
         }
     }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct AgentctlRules {
-    #[serde(default = "default_agentctl_spawn_delay_ms")]
-    pub spawn_delay_ms: u64,
-    #[serde(default = "default_agentctl_max_subagents")]
-    pub max_subagents: usize,
-}
-
-impl AgentctlRules {
-    pub fn effective_spawn_delay_ms(&self) -> u64 {
-        self.spawn_delay_ms.max(MIN_AGENTCTL_SPAWN_DELAY_MS)
-    }
-}
-
-impl Default for AgentctlRules {
-    fn default() -> Self {
-        Self {
-            spawn_delay_ms: DEFAULT_AGENTCTL_SPAWN_DELAY_MS,
-            max_subagents: DEFAULT_AGENTCTL_MAX_SUBAGENTS,
-        }
-    }
-}
-
-fn default_agentctl_spawn_delay_ms() -> u64 {
-    DEFAULT_AGENTCTL_SPAWN_DELAY_MS
-}
-
-fn default_agentctl_max_subagents() -> usize {
-    DEFAULT_AGENTCTL_MAX_SUBAGENTS
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-pub struct HostdoRules {
-    #[serde(default)]
-    pub default_policy: ApprovalMode,
-    #[serde(default)]
-    pub commands: Vec<RuleCommand>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub command_aliases: HashMap<String, AliasValue>,
-}
-
-/// A single allowed host-side command.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-pub struct RuleCommand {
-    /// Optional human-readable label shown in the TUI and audit log.
-    /// Defaults to the argv joined with spaces when absent.
-    pub name: Option<String>,
-    /// Exact argv that must match the request.
-    pub argv: Vec<String>,
-    /// Optional Docker image for short-lived container execution.
-    ///
-    /// `None` means the command runs directly on the host. `Some(image)` means
-    /// the command only matches requests made as `hostdo run --image <image> ...`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
-    /// Absolute path on the host. Use the canonical project path.
-    pub cwd: String,
-    pub env_profile: Option<String>,
-    #[serde(default = "default_timeout")]
-    pub timeout_secs: u64,
-    #[serde(default)]
-    pub concurrency: ConcurrencyPolicy,
-    pub approval_mode: ApprovalMode,
-}
-
-impl RuleCommand {
-    /// Human-readable label for TUI display and audit log.
-    pub fn display_name(&self) -> String {
-        self.name.clone().unwrap_or_else(|| self.argv.join(" "))
-    }
-}
-
-fn default_timeout() -> u64 {
-    DEFAULT_TIMEOUT_SECS
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -192,7 +69,7 @@ impl Default for NetworkRules {
     }
 }
 
-/// One parsed network rule in Coder Agent Firewall style:
+/// One parsed network rule:
 /// `method=GET,POST domain=api.example.com path=/api/*,/auth/* port=443,8443`.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NetworkRule {
@@ -208,8 +85,6 @@ pub struct NetworkRule {
 /// Global rules and all project rules are unioned together.
 #[derive(Debug, Clone, Default)]
 pub struct ComposedRules {
-    pub agentctl: AgentctlRules,
-    pub hostdo: HostdoRules,
     pub network_rules: Vec<NetworkRule>,
     pub network_deny_rules: Vec<NetworkRule>,
     pub network_default: NetworkPolicy,
@@ -219,34 +94,13 @@ impl ComposedRules {
     /// Compose global rules + one or more project rule sets.
     /// Global rules come first (higher priority in declaration order).
     pub fn compose(global: &ProjectRules, projects: &[ProjectRules]) -> Self {
-        let mut commands = global.hostdo.commands.clone();
         let mut network_allowlist = global.network.allowlist.clone();
         let mut network_denylist = global.network.denylist.clone();
-        let mut agentctl = global.agentctl.clone();
 
-        // Union: add project rules that don't duplicate a global argv.
         for proj in projects {
-            agentctl = proj.agentctl.clone();
-            for cmd in &proj.hostdo.commands {
-                if !commands
-                    .iter()
-                    .any(|c| c.argv == cmd.argv && c.image == cmd.image)
-                {
-                    commands.push(cmd.clone());
-                }
-            }
             network_allowlist.extend(proj.network.allowlist.clone());
             network_denylist.extend(proj.network.denylist.clone());
         }
-
-        // Hostdo default policy: most restrictive wins (deny > prompt > auto).
-        let hostdo_default = std::iter::once(&global.hostdo.default_policy)
-            .chain(projects.iter().map(|p| &p.hostdo.default_policy))
-            .fold(ApprovalMode::Auto, |acc, p| match (&acc, p) {
-                (ApprovalMode::Deny, _) | (_, ApprovalMode::Deny) => ApprovalMode::Deny,
-                (ApprovalMode::Prompt, _) | (_, ApprovalMode::Prompt) => ApprovalMode::Prompt,
-                _ => ApprovalMode::Auto,
-            });
 
         let mut network_rules = Vec::new();
         let mut seen = HashSet::new();
@@ -272,12 +126,6 @@ impl ComposedRules {
         }
 
         Self {
-            agentctl,
-            hostdo: HostdoRules {
-                default_policy: hostdo_default,
-                commands,
-                command_aliases: HashMap::new(),
-            },
             network_rules,
             network_deny_rules,
             // Coder-style rules engine is explicit allowlist with prompt-by-default.
@@ -338,38 +186,6 @@ impl ComposedRules {
         } else {
             self.network_default.clone()
         }
-    }
-
-    /// Expand `$WORKSPACE` prefixes in rule command cwds.
-    pub fn expand_cwd_vars(&mut self, workspace_path: &str) {
-        for cmd in &mut self.hostdo.commands {
-            if cmd.cwd == "$WORKSPACE" {
-                cmd.cwd = workspace_path.to_string();
-            } else if let Some(rest) = cmd.cwd.strip_prefix("$WORKSPACE/") {
-                cmd.cwd = format!("{workspace_path}/{rest}");
-            }
-        }
-    }
-
-    /// Find an exact-match hostdo command by argv.
-    ///
-    /// `cwd` remains part of the rule because it still determines where the
-    /// command runs and is persisted for developer review, but it is not part
-    /// of the approval identity.
-    pub fn find_hostdo_command<'a>(&'a self, argv: &[String]) -> Option<&'a RuleCommand> {
-        self.find_hostdo_command_for_target(argv, None)
-    }
-
-    /// Find an exact-match hostdo command by argv and execution image.
-    pub fn find_hostdo_command_for_target<'a>(
-        &'a self,
-        argv: &[String],
-        image: Option<&str>,
-    ) -> Option<&'a RuleCommand> {
-        self.hostdo
-            .commands
-            .iter()
-            .find(|c| c.argv == argv && c.image.as_deref() == image)
     }
 }
 
@@ -589,39 +405,6 @@ fn validate_rules_version(version: u32, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Append an auto-approved command to the rules file at `path`.
-///
-/// If the argv already exists in the file, the file is left unchanged. The
-/// parent directory is created if needed.
-#[cfg(test)]
-pub fn append_auto_approval(path: &Path, argv: &[String], cwd: &str) -> Result<()> {
-    append_command_rule(path, argv, cwd)
-}
-
-#[cfg(test)]
-fn append_command_rule(path: &Path, argv: &[String], cwd: &str) -> Result<()> {
-    let mut rules = load(path)?;
-    if rules
-        .hostdo
-        .commands
-        .iter()
-        .any(|c| c.argv == argv && c.image.is_none())
-    {
-        return Ok(());
-    }
-    rules.hostdo.commands.push(RuleCommand {
-        name: None,
-        argv: argv.to_vec(),
-        image: None,
-        cwd: cwd.to_string(),
-        env_profile: None,
-        timeout_secs: default_timeout(),
-        concurrency: ConcurrencyPolicy::default(),
-        approval_mode: ApprovalMode::Auto,
-    });
-    write_rules_file(path, &rules)
-}
-
 /// Write rules to a file with the standard comment header.
 pub fn write_rules_file(path: &Path, rules: &ProjectRules) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -639,124 +422,20 @@ pub fn render_rules_file(rules: &ProjectRules) -> Result<String> {
 }
 
 const RULES_FILE_HEADER: &str = "\
-# harness-rules.toml — policy for what the AI agent can do in this project.
-# Commit this file to your repository. harness-hat reads it but never pushes
+# harness-rules.toml - network policy for Harness Hat container sessions.
+# Commit this file to your repository. Harness Hat reads it but never pushes
 # changes back during workspace sync.
 #
-# Agents/LLMs are not permitted to edit this file directly. Harness Hat monitors
-# this policy file and will notify the user if an agent attempts to modify it.
-#
-# Preferred place for *human/LLM instructions*:
+# Preferred place for human/LLM instructions:
 # llm_instructions = \"\"\"\n\
 # Environment:
-# - You are operating inside a Linux Docker container managed by harness-hat.
+# - You are operating inside a Linux Docker container managed by Harness Hat.
 # - Your workspace is mounted into the container; edits usually persist to the host.
 # - Do not assume host tools, credentials, or services are directly available in the container.
-#
-# Host-side commands:
-# - Use `hostdo run ...` when you need host-side build/package tooling such as cargo,
-#   npm, pnpm, yarn, go, make, pytest, or similar commands.
-# - Examples: `hostdo run cargo test`, `hostdo run npm install`, `hostdo run go test ./...`.
-# - Only use `hostdo run --image <docker-image> ...` when the user explicitly asks
-#   you to run against a Docker image or containerized runner.
-# - Use `hostdo run --timeout <seconds> ...` when the user explicitly asks for a
-#   longer or shorter host-side command timeout, or when a command exits before
-#   finishing and clearly needs more time than the default rule allows.
-# - Examples: `hostdo run --timeout 120 cargo test`,
-#   `hostdo run --timeout 1800 npm run build`.
-# - `hostdo run --image` runs a command in a short-lived Docker runner instead of
-#   directly on the host.
-# - Examples: `hostdo run --image node:20 npm test`,
-#   `hostdo run --image rust:1.88 cargo test`.
-# - Use `hostdo run ...` when command output needs to remain available after
-#   launch, when you need to check status separately, or when you expect to
-#   interact with the command over stdin.
-# - `hostdo run ...` waits for approval and command startup, then prints a job
-#   id. Use `hostdo status <job-id>`, `hostdo tail <job-id>`, and
-#   `hostdo stop <job-id>` to inspect or stop it.
-# - Use `hostdo tail <job-id> --rows <lines>` to inspect recent output, and
-#   add `--stdout` or `--stderr` to select one stream.
-# - Use `hostdo tail <job-id> --all` to read full captured output.
-# - Use `hostdo send <job-id> \"text\"` to send one input line, or pipe data into
-#   `hostdo send <job-id>` to forward stdin as-is.
-# - Use `hostdo list` to see tracked jobs for this workspace.
-# - Use `hostdo list --running` to show only currently running jobs.
-# - `hostdo` requests are policy checked against the `[hostdo]` rules below and may
-#   prompt the developer.
-# - Prefer existing auto-approved `hostdo` commands or `hostdo.command_aliases`
-#   before asking for a new host command approval.
-#
-# Subagents:
-# - Run `agentctl list` first to see the configured subagent profiles available
-#   in this environment. Use the profile name from the first column; do not
-#   guess hardcoded names such as `codex`, `claude`, or `qwen`.
-# - Use `agentctl spawn <profile> [--name <child>]` to start a same-workspace
-#   subagent from one of those configured container profiles.
-# - After spawning, give the child a task with
-#   `agentctl send <child> \"task prompt\" --enter`.
-# - A typical sequence is `agentctl list`, `agentctl spawn <profile> --name review`,
-#   `agentctl status review`, `agentctl tail review --rows 30`, then
-#   `agentctl send review \"inspect the failing test\" --enter`.
-# - Use `agentctl spawn-many <profile> <count> --prefix <name>` for larger
-#   batches; launches are paced by `[agentctl].spawn_delay_ms` and never below
-#   100ms between spawn requests.
-# - Codex subagent launches additionally wait for the previous Codex launch to
-#   fail MCP startup, clear MCP startup, sit waiting without MCP diagnostics for
-#   a short stable window, or reach the 35s diagnostic timeout.
-# - `[agentctl].max_subagents` caps live descendants under a single top-level
-#   agent, including subagents, sub-subagents, and deeper descendants.
-# - Use `agentctl status <child>`, `agentctl tail <child> --rows 30`,
-#   `agentctl tail <child> --all`, `agentctl send <child> \"text\" --enter`,
-#   `agentctl send <child> --key enter`, and `agentctl stop <child>` to inspect
-#   and control direct child agents.
-# - If `agentctl list` reports `image-missing`, the profile exists but its
-#   Docker image must be built or pulled before `agentctl spawn` will work.
-# - Subagent names are scoped to the parent that created them; duplicate names
-#   may exist elsewhere in the tree.
-#
-# Container lifecycle:
 # - Use `killme` only when the user explicitly asks you to end this container.
 # \"\"\"
 #
-# ── Hostdo (host-side command execution) ─────────────────────────────────────
-#
-# default_policy: what happens when a command doesn't match any rule below.
-#   auto   — run without prompting (use with caution)
-#   prompt — ask the developer in the TUI (default)
-#   deny   — reject silently
-#
-# Passthrough command (exact argv match, auto-approved):
-#   [[hostdo.commands]]
-#   argv = [\"cargo\", \"test\"] # run inside container with `hostdo run cargo test`
-#   cwd = \"$WORKSPACE\"         # execution cwd only, not part of approval matching
-#   timeout_secs = 60
-#   approval_mode = \"auto\"
-#
-# Short-lived Docker runner (exact argv + image match, auto-approved):
-#   [[hostdo.commands]]
-#   argv = [\"npm\", \"test\"]     # run with `hostdo run --image node:20 npm test`
-#   image = \"node:20\"
-#   cwd = \"$WORKSPACE\"
-#   timeout_secs = 60
-#   approval_mode = \"auto\"
-#
-# Command alias (agent sends `hostdo run tests`, expands server-side):
-#   [hostdo.command_aliases]
-#   tests = \"cargo test\" # run inside container with `hostdo run tests`
-#   build = { cmd = \"cargo build --release\", cwd = \"$WORKSPACE\" }
-#
-# $WORKSPACE = workspace path on the host.
-#
-# ── Agentctl helper defaults ────────────────────────────────────────────────
-#
-# `agentctl spawn` and `spawn-many` read this value from the workspace rules file
-# when `--delay-ms` is omitted. The effective delay is clamped to at least 100ms.
-# `max_subagents` limits live descendants under a single top-level agent.
-#   [agentctl]
-#   spawn_delay_ms = 500
-#   max_subagents = 10
-
-# ── Network (HTTP/HTTPS proxy policy) ────────────────────────────────────────
+# Network (HTTP/HTTPS proxy policy)
 #
 # Coder-style network rules. Deny matches win over allow matches; if no rule
 # matches, request is prompted.

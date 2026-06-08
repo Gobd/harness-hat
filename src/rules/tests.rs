@@ -1,651 +1,87 @@
-#[cfg(test)]
-mod tests {
-    use crate::rules::{
-        AgentctlRules, ApprovalMode, ComposedRules, ConcurrencyPolicy, HostdoRules, NetworkPolicy,
-        NetworkRules, ProjectRules, RuleCommand, append_auto_approval, host_matches, load,
-        parse_network_allowlist_rule, write_rules_file,
-    };
-    use std::time::{SystemTime, UNIX_EPOCH};
+use super::{ComposedRules, NetworkPolicy, NetworkRules, ProjectRules, host_matches, load};
 
-    #[test]
-    fn parses_current_schema() {
-        let raw = r#"
+#[test]
+fn load_parses_network_rules_only() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("harness-rules.toml");
+    std::fs::write(
+        &path,
+        r#"
 version = 1
 
-[hostdo]
-default_policy = "prompt"
+[network]
+allowlist = ["domain=example.com", "method=CONNECT domain=*.example.com port=8443"]
+denylist = ["domain=blocked.example.com"]
+"#,
+    )
+    .expect("write rules");
+
+    let rules = load(&path).expect("load rules");
+    assert_eq!(rules.network.allowlist.len(), 2);
+    assert_eq!(rules.network.denylist.len(), 1);
+}
+
+#[test]
+fn load_ignores_non_network_sections() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("harness-rules.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
 
 [agentctl]
 spawn_delay_ms = 500
-max_subagents = 20
+max_subagents = 10
 
-[[hostdo.commands]]
-argv = ["cargo", "check"]
-cwd = "$WORKSPACE"
-approval_mode = "auto"
-
-# Aliases: plain passthrough and with cwd override.
-[hostdo.command_aliases]
-lint = "cargo clippy"
-tests = { cmd = "cargo test", cwd = "$WORKSPACE" }
+[exec]
+default_policy = "prompt"
+commands = []
 
 [network]
-allowlist = ["domain=github.com"]
-denylist = ["domain=blocked.example.com"]
-"#;
-
-        let parsed: Result<ProjectRules, toml::de::Error> = toml::from_str(raw);
-        let rules = parsed.expect("expected current schema to parse");
-        assert_eq!(rules.version, 1);
-        assert_eq!(rules.agentctl.spawn_delay_ms, 500);
-        assert_eq!(rules.agentctl.max_subagents, 20);
-        assert_eq!(rules.agentctl.effective_spawn_delay_ms(), 500);
-        assert_eq!(rules.hostdo.command_aliases.len(), 2);
-        assert_eq!(rules.hostdo.command_aliases["lint"].cmd(), "cargo clippy");
-        assert_eq!(rules.hostdo.command_aliases["tests"].cmd(), "cargo test");
-        assert_eq!(
-            rules.network.denylist,
-            vec!["domain=blocked.example.com".to_string()]
-        );
-    }
-
-    #[test]
-    fn missing_rules_version_defaults_to_current() {
-        let rules: ProjectRules = toml::from_str(
-            r#"
-[network]
-allowlist = ["domain=github.com"]
+allowlist = ["domain=api.openai.com"]
 "#,
-        )
-        .expect("parse rules");
-
-        assert_eq!(rules.version, crate::rules::CURRENT_RULES_VERSION);
-    }
-
-    #[test]
-    fn load_rejects_future_rules_version() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("harness-hat-rules-future-{nonce}"));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let path = dir.join("harness-rules.toml");
-        std::fs::write(&path, "version = 999\n").expect("write rules");
-
-        let err = load(&path).expect_err("future version should be rejected");
-        assert!(
-            err.to_string().contains("unsupported version 999"),
-            "unexpected error: {err}"
-        );
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
-    }
-
-    #[test]
-    fn agentctl_spawn_delay_has_100ms_floor() {
-        let rules: ProjectRules = toml::from_str(
-            r#"
-[agentctl]
-spawn_delay_ms = 0
-"#,
-        )
-        .expect("parse rules");
-
-        assert_eq!(rules.agentctl.spawn_delay_ms, 0);
-        assert_eq!(rules.agentctl.max_subagents, 10);
-        assert_eq!(rules.agentctl.effective_spawn_delay_ms(), 100);
-        assert_eq!(AgentctlRules::default().effective_spawn_delay_ms(), 500);
-        assert_eq!(AgentctlRules::default().max_subagents, 10);
-    }
-
-    #[test]
-    fn composed_agentctl_uses_project_agentctl_defaults() {
-        let global = ProjectRules {
-            agentctl: AgentctlRules {
-                spawn_delay_ms: 250,
-                max_subagents: 10,
-            },
-            ..Default::default()
-        };
-        let project = ProjectRules {
-            agentctl: AgentctlRules {
-                spawn_delay_ms: 750,
-                max_subagents: 15,
-            },
-            ..Default::default()
-        };
-
-        let composed = ComposedRules::compose(&global, &[project]);
-
-        assert_eq!(composed.agentctl.spawn_delay_ms, 750);
-        assert_eq!(composed.agentctl.max_subagents, 15);
-    }
-
-    #[test]
-    fn rejects_legacy_readme_schema() {
-        let raw = r#"
-[[commands]]
-argv = ["cargo", "check"]
-cwd = "$WORKSPACE"
-approval_mode = "auto"
-
-[network]
-allowlist = ["domain=github.com policy=allow"]
-"#;
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("harness-hat-rules-invalid-{nonce}"));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let path = dir.join("harness-rules.toml");
-        std::fs::write(&path, raw).expect("write rules");
-
-        let parsed = load(&path);
-        assert!(parsed.is_err(), "legacy schema should be rejected");
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
-    }
-
-    #[test]
-    fn rejects_exclude_patterns_field() {
-        let raw = r#"
-exclude_patterns = ["node_modules/**"]
-
-[network]
-allowlist = ["domain=github.com"]
-"#;
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("harness-hat-rules-invalid-excludes-{nonce}"));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let path = dir.join("harness-rules.toml");
-        std::fs::write(&path, raw).expect("write rules");
-        let parsed = load(&path);
-        assert!(parsed.is_err(), "exclude_patterns should be rejected");
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
-    }
-
-    #[test]
-    fn wildcard_host_matches_subdomain_only() {
-        assert!(host_matches("*.oaistatic.com", "cdn.oaistatic.com"));
-        assert!(!host_matches("*.oaistatic.com", "oaistatic.com"));
-    }
-
-    #[test]
-    fn wildcard_host_match_is_case_insensitive() {
-        assert!(host_matches("*.OpenAI.com", "AUTH.OPENAI.COM"));
-        assert!(!host_matches("*.OpenAI.com", "openai.com"));
-    }
-
-    #[test]
-    fn hostdo_command_match_ignores_cwd() {
-        let rules = ComposedRules {
-            agentctl: AgentctlRules::default(),
-            hostdo: HostdoRules {
-                default_policy: ApprovalMode::Prompt,
-                commands: vec![RuleCommand {
-                    name: None,
-                    argv: vec!["cargo".into(), "test".into()],
-                    image: None,
-                    cwd: "/some/path".into(),
-                    env_profile: None,
-                    timeout_secs: 60,
-                    concurrency: ConcurrencyPolicy::Queue,
-                    approval_mode: ApprovalMode::Auto,
-                }],
-                command_aliases: Default::default(),
-            },
-            network_rules: vec![],
-            network_deny_rules: vec![],
-            network_default: NetworkPolicy::Deny,
-        };
-
-        let matched = rules.find_hostdo_command(&["cargo".into(), "test".into()]);
-        assert!(matched.is_some(), "argv match should not depend on cwd");
-    }
-
-    #[test]
-    fn append_auto_approval_dedupes_by_argv() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("harness-hat-rules-test-{nonce}"));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let path = dir.join("harness-rules.toml");
-        let argv = vec!["cargo".to_string(), "test".to_string()];
-
-        append_auto_approval(&path, &argv, "$WORKSPACE").expect("first append");
-        append_auto_approval(&path, &argv, "$WORKSPACE").expect("second append");
-
-        let rules = load(&path).expect("load rules");
-        assert_eq!(rules.hostdo.commands.len(), 1);
-        assert_eq!(rules.hostdo.commands[0].argv, argv);
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
-    }
-
-    #[test]
-    fn write_rules_file_always_includes_header() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("harness-hat-rules-header-{nonce}"));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let path = dir.join("harness-rules.toml");
-
-        write_rules_file(&path, &ProjectRules::default()).expect("write");
-        let s = std::fs::read_to_string(&path).expect("read");
-        assert!(
-            s.starts_with("# harness-rules.toml — policy"),
-            "missing header prefix"
-        );
-        assert!(
-            s.contains("Preferred place for *human/LLM instructions*"),
-            "missing instruction hint"
-        );
-        assert!(s.contains("version = 1"), "missing schema version");
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
-    }
-
-    #[test]
-    fn append_auto_approval_preserves_header() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("harness-hat-rules-header-append-{nonce}"));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let path = dir.join("harness-rules.toml");
-
-        append_auto_approval(&path, &["echo".to_string(), "hi".to_string()], "/tmp")
-            .expect("append");
-        let s = std::fs::read_to_string(&path).expect("read");
-        assert!(
-            s.starts_with("# harness-rules.toml — policy"),
-            "missing header after append"
-        );
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
-    }
-
-    #[test]
-    fn composed_rules_pick_most_restrictive_default_policy() {
-        let global = ProjectRules {
-            hostdo: HostdoRules {
-                default_policy: ApprovalMode::Prompt,
-                ..Default::default()
-            },
-            network: NetworkRules::default(),
-            ..Default::default()
-        };
-        let proj1 = ProjectRules {
-            hostdo: HostdoRules {
-                default_policy: ApprovalMode::Auto,
-                ..Default::default()
-            },
-            network: NetworkRules::default(),
-            ..Default::default()
-        };
-        let proj2 = ProjectRules {
-            hostdo: HostdoRules {
-                default_policy: ApprovalMode::Deny,
-                ..Default::default()
-            },
-            network: NetworkRules::default(),
-            ..Default::default()
-        };
-
-        let composed = ComposedRules::compose(&global, &[proj1, proj2]);
-
-        // Deny > Prompt > Auto
-        assert_eq!(composed.hostdo.default_policy, ApprovalMode::Deny);
-        assert_eq!(composed.network_default, NetworkPolicy::Prompt);
-    }
-
-    #[test]
-    fn match_network_allowlist_works() {
-        let rules = ComposedRules {
-            network_rules: vec![
-                parse_network_allowlist_rule("domain=api.example.com path=/api/v2/*")
-                    .expect("parse rule"),
-                parse_network_allowlist_rule(
-                    "method=POST domain=api.example.com path=/api/v2/auth/*",
-                )
-                .expect("parse rule"),
-            ],
-            network_default: NetworkPolicy::Prompt,
-            ..Default::default()
-        };
-
-        // Method-specific match.
-        assert_eq!(
-            rules.match_network("POST", "api.example.com", "/api/v2/auth/login"),
-            NetworkPolicy::Auto
-        );
-
-        // Path wildcard match.
-        assert_eq!(
-            rules.match_network("GET", "api.example.com", "/api/v2/user"),
-            NetworkPolicy::Auto
-        );
-
-        // Unmatched path is prompted by default.
-        assert_eq!(
-            rules.match_network("GET", "api.example.com", "/other"),
-            NetworkPolicy::Prompt
-        );
-    }
-
-    #[test]
-    fn parses_network_rule_ports() {
-        let rule = parse_network_allowlist_rule("method=GET domain=api.example.com port=443,8443")
-            .expect("parse rule");
-
-        assert_eq!(rule.ports, vec![443, 8443]);
-    }
-
-    #[test]
-    fn port_specific_network_rules_require_matching_port() {
-        let rules = ComposedRules {
-            network_rules: vec![
-                parse_network_allowlist_rule("domain=api.example.com port=8443")
-                    .expect("parse rule"),
-            ],
-            network_default: NetworkPolicy::Prompt,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            rules.match_network_for_port("GET", "api.example.com", "/", Some(8443)),
-            NetworkPolicy::Auto
-        );
-        assert_eq!(
-            rules.match_network_for_port("GET", "api.example.com", "/", Some(443)),
-            NetworkPolicy::Prompt
-        );
-        assert_eq!(
-            rules.match_network("GET", "api.example.com", "/"),
-            NetworkPolicy::Prompt
-        );
-    }
-
-    #[test]
-    fn connect_allow_without_port_only_auto_allows_https() {
-        let rules = ComposedRules {
-            network_rules: vec![
-                parse_network_allowlist_rule("domain=github.com").expect("parse rule"),
-            ],
-            network_default: NetworkPolicy::Prompt,
-            ..Default::default()
-        };
-
-        assert_eq!(rules.match_connect("github.com", 443), NetworkPolicy::Auto);
-        assert_eq!(rules.match_connect("github.com", 22), NetworkPolicy::Prompt);
-    }
-
-    #[test]
-    fn connect_allow_with_port_auto_allows_that_raw_port() {
-        let rules = ComposedRules {
-            network_rules: vec![
-                parse_network_allowlist_rule("domain=github.com port=22").expect("parse rule"),
-            ],
-            network_default: NetworkPolicy::Prompt,
-            ..Default::default()
-        };
-
-        assert_eq!(rules.match_connect("github.com", 22), NetworkPolicy::Auto);
-        assert_eq!(
-            rules.match_connect("github.com", 443),
-            NetworkPolicy::Prompt
-        );
-    }
-
-    #[test]
-    fn connect_deny_without_port_denies_every_port() {
-        let rules = ComposedRules {
-            network_rules: vec![
-                parse_network_allowlist_rule("domain=github.com port=22").expect("parse rule"),
-            ],
-            network_deny_rules: vec![
-                parse_network_allowlist_rule("domain=github.com").expect("parse rule"),
-            ],
-            network_default: NetworkPolicy::Prompt,
-            ..Default::default()
-        };
-
-        assert_eq!(rules.match_connect("github.com", 22), NetworkPolicy::Deny);
-        assert_eq!(rules.match_connect("github.com", 443), NetworkPolicy::Deny);
-    }
-
-    #[test]
-    fn composed_network_denylist_precedes_allowlist() {
-        let global = ProjectRules {
-            network: NetworkRules {
-                allowlist: vec!["domain=*.example.com".into()],
-                denylist: vec![],
-            },
-            ..Default::default()
-        };
-        let project = ProjectRules {
-            network: NetworkRules {
-                allowlist: vec![],
-                denylist: vec!["domain=api.example.com".into()],
-            },
-            ..Default::default()
-        };
-
-        let rules = ComposedRules::compose(&global, &[project]);
-
-        assert_eq!(
-            rules.match_network("GET", "api.example.com", "/v1/users"),
-            NetworkPolicy::Deny
-        );
-        assert_eq!(
-            rules.match_network("GET", "cdn.example.com", "/asset.js"),
-            NetworkPolicy::Auto
-        );
-        assert_eq!(
-            rules.match_network("GET", "outside.example.net", "/"),
-            NetworkPolicy::Prompt
-        );
-    }
-
-    #[test]
-    fn expand_cwd_vars_replaces_placeholders() {
-        let mut rules = ComposedRules {
-            hostdo: HostdoRules {
-                commands: vec![
-                    RuleCommand {
-                        argv: vec!["ls".into()],
-                        cwd: "$WORKSPACE".into(),
-                        ..Default::default()
-                    },
-                    RuleCommand {
-                        argv: vec!["ls".into(), "-a".into()],
-                        cwd: "$WORKSPACE/subdir".into(),
-                        ..Default::default()
-                    },
-                    RuleCommand {
-                        argv: vec!["pwd".into()],
-                        cwd: "/absolute/path".into(),
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        rules.expand_cwd_vars("/home/user/project");
-
-        assert_eq!(rules.hostdo.commands[0].cwd, "/home/user/project");
-        assert_eq!(rules.hostdo.commands[1].cwd, "/home/user/project/subdir");
-        assert_eq!(rules.hostdo.commands[2].cwd, "/absolute/path");
-    }
-
-    #[test]
-    fn find_hostdo_command_exact_match() {
-        let rules = ComposedRules {
-            hostdo: HostdoRules {
-                default_policy: ApprovalMode::Prompt,
-                commands: vec![
-                    RuleCommand {
-                        argv: vec!["cargo".into(), "test".into()],
-                        cwd: "/tmp".into(), // Cwd irrelevant for matching
-                        approval_mode: ApprovalMode::Auto,
-                        ..Default::default()
-                    },
-                    RuleCommand {
-                        argv: vec!["npm".into(), "install".into()],
-                        cwd: "/app".into(),
-                        approval_mode: ApprovalMode::Prompt,
-                        ..Default::default()
-                    },
-                ],
-                command_aliases: Default::default(),
-            },
-            ..Default::default()
-        };
-
-        let matched = rules.find_hostdo_command(&["cargo".into(), "test".into()]);
-        assert!(matched.is_some());
-        assert_eq!(matched.unwrap().approval_mode, ApprovalMode::Auto);
-
-        let matched_npm = rules.find_hostdo_command(&["npm".into(), "install".into()]);
-        assert!(matched_npm.is_some());
-        assert_eq!(matched_npm.unwrap().approval_mode, ApprovalMode::Prompt);
-    }
-
-    #[test]
-    fn find_hostdo_command_distinguishes_image_target() {
-        let rules = ComposedRules {
-            hostdo: HostdoRules {
-                default_policy: ApprovalMode::Prompt,
-                commands: vec![
-                    RuleCommand {
-                        argv: vec!["npm".into(), "test".into()],
-                        image: None,
-                        cwd: "/tmp".into(),
-                        approval_mode: ApprovalMode::Auto,
-                        ..Default::default()
-                    },
-                    RuleCommand {
-                        argv: vec!["npm".into(), "test".into()],
-                        image: Some("node:20".into()),
-                        cwd: "/tmp".into(),
-                        approval_mode: ApprovalMode::Prompt,
-                        ..Default::default()
-                    },
-                ],
-                command_aliases: Default::default(),
-            },
-            ..Default::default()
-        };
-
-        let host_match = rules.find_hostdo_command_for_target(&["npm".into(), "test".into()], None);
-        assert_eq!(host_match.unwrap().approval_mode, ApprovalMode::Auto);
-
-        let image_match =
-            rules.find_hostdo_command_for_target(&["npm".into(), "test".into()], Some("node:20"));
-        assert_eq!(image_match.unwrap().approval_mode, ApprovalMode::Prompt);
-
-        let missing_image =
-            rules.find_hostdo_command_for_target(&["npm".into(), "test".into()], Some("node:18"));
-        assert!(missing_image.is_none());
-    }
-
-    #[test]
-    fn find_hostdo_command_no_partial_match() {
-        let rules = ComposedRules {
-            hostdo: HostdoRules {
-                default_policy: ApprovalMode::Prompt,
-                commands: vec![RuleCommand {
-                    argv: vec!["cargo".into(), "test".into()],
-                    cwd: "/tmp".into(),
-                    approval_mode: ApprovalMode::Auto,
-                    ..Default::default()
-                }],
-                command_aliases: Default::default(),
-            },
-            ..Default::default()
-        };
-
-        // Partial match (subset)
-        let matched = rules.find_hostdo_command(&["cargo".into()]);
-        assert!(matched.is_none());
-
-        // Partial match (superset)
-        let matched =
-            rules.find_hostdo_command(&["cargo".into(), "test".into(), "--verbose".into()]);
-        assert!(matched.is_none());
-    }
-
-    #[test]
-    fn find_hostdo_command_respects_argument_order() {
-        let rules = ComposedRules {
-            hostdo: HostdoRules {
-                default_policy: ApprovalMode::Prompt,
-                commands: vec![RuleCommand {
-                    argv: vec!["arg1".into(), "arg2".into()],
-                    cwd: "/tmp".into(),
-                    approval_mode: ApprovalMode::Auto,
-                    ..Default::default()
-                }],
-                command_aliases: Default::default(),
-            },
-            ..Default::default()
-        };
-
-        let matched = rules.find_hostdo_command(&["arg2".into(), "arg1".into()]); // Different order
-        assert!(matched.is_none());
-
-        let matched = rules.find_hostdo_command(&["arg1".into(), "arg2".into()]); // Correct order
-        assert!(matched.is_some());
-    }
-
-    #[test]
-    fn find_hostdo_command_empty_argv() {
-        let rules = ComposedRules {
-            hostdo: HostdoRules {
-                default_policy: ApprovalMode::Prompt,
-                commands: vec![
-                    RuleCommand {
-                        argv: vec![], // Empty argv rule
-                        cwd: "/tmp".into(),
-                        approval_mode: ApprovalMode::Deny,
-                        ..Default::default()
-                    },
-                    RuleCommand {
-                        argv: vec!["ls".into()],
-                        cwd: "/".into(),
-                        approval_mode: ApprovalMode::Auto,
-                        ..Default::default()
-                    },
-                ],
-                command_aliases: Default::default(),
-            },
-            ..Default::default()
-        };
-
-        let matched = rules.find_hostdo_command(&[]);
-        assert!(matched.is_some());
-        assert_eq!(matched.unwrap().approval_mode, ApprovalMode::Deny);
-
-        let matched = rules.find_hostdo_command(&["ls".into()]);
-        assert!(matched.is_some());
-        assert_eq!(matched.unwrap().approval_mode, ApprovalMode::Auto);
-    }
+    )
+    .expect("write rules");
+
+    let rules = load(&path).expect("load rules with non-network sections");
+    assert_eq!(rules.network.allowlist, ["domain=api.openai.com"]);
+}
+
+#[test]
+fn compose_merges_network_rules_and_denies_win() {
+    let global = ProjectRules {
+        network: NetworkRules {
+            allowlist: vec!["domain=example.com".to_string()],
+            denylist: vec!["domain=blocked.example.com".to_string()],
+        },
+        ..ProjectRules::default()
+    };
+    let project = ProjectRules {
+        network: NetworkRules {
+            allowlist: vec!["domain=project.example.com".to_string()],
+            denylist: Vec::new(),
+        },
+        ..ProjectRules::default()
+    };
+
+    let composed = ComposedRules::compose(&global, &[project]);
+    assert_eq!(
+        composed.match_network("GET", "example.com", "/"),
+        NetworkPolicy::Auto
+    );
+    assert_eq!(
+        composed.match_network("GET", "project.example.com", "/"),
+        NetworkPolicy::Auto
+    );
+    assert_eq!(
+        composed.match_network("GET", "blocked.example.com", "/"),
+        NetworkPolicy::Deny
+    );
+}
+
+#[test]
+fn wildcard_domains_do_not_match_apex() {
+    assert!(host_matches("*.example.com", "api.example.com"));
+    assert!(!host_matches("*.example.com", "example.com"));
 }

@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -26,7 +25,6 @@ pub const ACTIVITY_TERMINAL_TTL_SECS: u64 =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActivityState {
     PendingApproval,
-    PullingImage,
     Running,
     Forwarding,
     Complete,
@@ -46,7 +44,6 @@ impl ActivityState {
     pub fn label(&self) -> &'static str {
         match self {
             Self::PendingApproval => "pending approval",
-            Self::PullingImage => "pulling image",
             Self::Running => "running",
             Self::Forwarding => "forwarding",
             Self::Complete => "complete",
@@ -63,12 +60,6 @@ impl ActivityState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActivityKind {
-    Hostdo {
-        argv: Vec<String>,
-        image: Option<String>,
-        timeout_secs: u64,
-        cwd: PathBuf,
-    },
     Network {
         method: String,
         host: String,
@@ -147,8 +138,6 @@ pub struct Activity {
     pub started_at: Instant,
     pub updated_at: Instant,
     pub finished_at: Option<Instant>,
-    pub command_started_at: Option<Instant>,
-    pub command_finished_at: Option<Instant>,
     pub terminal_unselected_at: Option<Instant>,
     pub cancel_flag: Arc<AtomicBool>,
 }
@@ -176,8 +165,6 @@ impl Activity {
             started_at: now,
             updated_at: now,
             finished_at,
-            command_started_at: None,
-            command_finished_at: None,
             terminal_unselected_at: None,
             cancel_flag,
         }
@@ -185,7 +172,6 @@ impl Activity {
 
     pub fn title(&self) -> String {
         match &self.kind {
-            ActivityKind::Hostdo { argv, .. } => argv.join(" "),
             ActivityKind::Network {
                 method, host, path, ..
             } => {
@@ -209,33 +195,6 @@ impl Activity {
         self.finished_at
             .unwrap_or_else(Instant::now)
             .saturating_duration_since(self.started_at)
-    }
-
-    pub fn command_elapsed_duration(&self) -> Option<Duration> {
-        let started_at = self.command_started_at?;
-        Some(
-            self.command_finished_at
-                .unwrap_or_else(Instant::now)
-                .saturating_duration_since(started_at),
-        )
-    }
-
-    pub fn mark_command_started(&mut self, at: Instant) {
-        if matches!(self.kind, ActivityKind::Hostdo { .. }) {
-            self.command_started_at.get_or_insert(at);
-            self.command_finished_at = None;
-        }
-    }
-
-    pub fn mark_command_finished(&mut self, at: Instant) {
-        if matches!(self.kind, ActivityKind::Hostdo { .. }) && self.command_started_at.is_some() {
-            self.command_finished_at.get_or_insert(at);
-        }
-    }
-
-    pub fn clear_command_timing(&mut self) {
-        self.command_started_at = None;
-        self.command_finished_at = None;
     }
 
     pub fn request_cancel(&self) {
@@ -293,18 +252,26 @@ pub async fn wait_cancelled(flag: Arc<AtomicBool>) {
 mod tests {
     use super::*;
 
+    fn network_activity_kind(method: &str, host: &str, path: &str) -> ActivityKind {
+        ActivityKind::Network {
+            method: method.to_string(),
+            host: host.to_string(),
+            path: path.to_string(),
+            protocol: "https".to_string(),
+            payload_preview: String::new(),
+            payload_truncated: false,
+            content_type: None,
+            content_length: None,
+        }
+    }
+
     #[test]
     fn terminal_activity_elapsed_uses_finished_timestamp() {
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let mut activity = Activity::new(
             "project".to_string(),
             Some("container".to_string()),
-            ActivityKind::Hostdo {
-                argv: vec!["cargo".to_string(), "test".to_string()],
-                image: None,
-                timeout_secs: 60,
-                cwd: PathBuf::from("/workspace"),
-            },
+            network_activity_kind("GET", "example.com", "/"),
             ActivityState::Running,
             cancel_flag,
         );
@@ -318,48 +285,16 @@ mod tests {
     }
 
     #[test]
-    fn hostdo_activity_title_omits_hostdo_options() {
+    fn network_activity_title_includes_request_target() {
         let activity = Activity::new(
             "project".to_string(),
             Some("container".to_string()),
-            ActivityKind::Hostdo {
-                argv: vec!["cargo".to_string(), "test".to_string()],
-                image: Some("rust".to_string()),
-                timeout_secs: 120,
-                cwd: PathBuf::from("/workspace"),
-            },
+            network_activity_kind("POST", "api.example.com", "/v1/items"),
             ActivityState::Running,
             Arc::new(AtomicBool::new(false)),
         );
 
-        assert_eq!(activity.title(), "cargo test");
-    }
-
-    #[test]
-    fn command_elapsed_tracks_command_phase_only() {
-        let mut activity = Activity::new(
-            "project".to_string(),
-            Some("container".to_string()),
-            ActivityKind::Hostdo {
-                argv: vec!["cargo".to_string(), "test".to_string()],
-                image: Some("rust".to_string()),
-                timeout_secs: 120,
-                cwd: PathBuf::from("/workspace"),
-            },
-            ActivityState::PullingImage,
-            Arc::new(AtomicBool::new(false)),
-        );
-        let now = Instant::now();
-        activity.started_at = now - Duration::from_secs(130);
-        activity.updated_at = now;
-
-        assert_eq!(activity.elapsed_duration().as_secs(), 130);
-        assert_eq!(activity.command_elapsed_duration(), None);
-
-        activity.mark_command_started(now - Duration::from_secs(80));
-        activity.mark_command_finished(now - Duration::from_secs(5));
-
-        assert_eq!(activity.command_elapsed_duration().unwrap().as_secs(), 75);
+        assert_eq!(activity.title(), "POST api.example.com/v1/items");
     }
 
     #[test]
@@ -368,12 +303,7 @@ mod tests {
         let mut activity = Activity::new(
             "project".to_string(),
             Some("container".to_string()),
-            ActivityKind::Hostdo {
-                argv: vec!["cargo".to_string(), "test".to_string()],
-                image: None,
-                timeout_secs: 60,
-                cwd: PathBuf::from("/workspace"),
-            },
+            network_activity_kind("GET", "example.com", "/"),
             ActivityState::Running,
             cancel_flag,
         );

@@ -1,361 +1,236 @@
 # harness-hat.example.toml
 #
-# Main manager config for harness-hat.
-# Per-workspace command rules, network policy, and agent instructions live in the
-# workspace's own harness-rules.toml file, not here.
+# Main manager config for Harness Hat.
+# Network policy and optional instructions live in each workspace's
+# harness-rules.toml file.
 
-# Schema version. Missing versions are treated as version 1 for backwards
-# compatibility; future versions can use this for migrations.
 version = 1
 
 # Directory used to resolve Dockerfiles and the Docker build context.
-# The init flow uses `./docker` when it exists, otherwise it falls back to
-# `~/.config/harness-hat/docker`.
 docker_dir = __HARNESS_HAT_DOCKER_DIR__
 
-[workspace]
-
 [manager]
-# Global rules file used by the manager for persisted approvals.
+# Global network rules file used by the manager for persisted approvals.
 global_rules_file = "~/.config/harness-hat/harness-rules.toml"
 
-# ---------------------------------------------------------------------------
-# Defaults applied to workspaces unless a workspace overrides them.
-# ---------------------------------------------------------------------------
-
 [defaults.ui]
-# Width of the left sidebar in the main TUI, in columns.
-# The default is 32; increase this if your workspace names are longer.
 sidebar_width = 32
-
-# Show the always-on log pane at the bottom of the TUI. The pane is hidden by
-# default; set this to true to show it. Fullscreen log view remains available.
 show_log_pane = false
 
-[defaults.hostdo]
-# Local exec bridge used by the `hostdo` helper inside containers.
+[defaults.control]
+# Local authenticated control server used by killme and session identity.
 server_port = 7878
-
-# Must be reachable from Docker containers. On Linux, 0.0.0.0 is the most
-# portable default, but it also exposes the authenticated local bridge on host
-# network interfaces. Prefer a Docker bridge/local VM interface if you know it,
-# or use a host firewall to restrict this port to local Docker traffic.
 server_host = "0.0.0.0"
-
-# Env var name that carries the shared auth token for the exec bridge.
 token_env_var = "HARNESS_HAT_TOKEN"
 
-# Maximum command timeout an agent may request with `hostdo --timeout`, in seconds.
-max_timeout_secs = 3600
-
-# Executables that are always denied via hostdo calls.
-# These are common shell escape or privilege escalation paths.
-denied_executables = ["sh", "bash", "zsh", "fish", "csh", "ksh", "sudo", "su", "doas"]
-
-# Common shell/file utilities that should not be run through hostdo.
-# This example spells out the built-in default list.
-# Set a different non-empty list here to replace these defaults.
-hostdo_block_common = ["ls", "dir", "cat", "grep", "egrep", "fgrep", "rg", "find", "fd", "sed", "awk", "head", "tail", "less", "more", "sort", "uniq", "cut", "xargs", "wc", "cp", "mv", "rm", "mkdir", "rmdir", "touch", "chmod", "chown", "ln", "readlink", "realpath", "stat", "du", "df", "tar", "zip", "unzip"]
-
-# Additional string fragments that are denied if they appear in any argument.
-denied_argument_fragments = []
-
-# Optional server-side aliases for hostdo.
-# Values can be:
-# - a plain string
-# - a table with `cmd` and optional `cwd`
-#
-# `cwd` can use:
-# - "$WORKSPACE" for the workspace path on the host
-#
-# Examples:
-# command_aliases = { tests = "cargo test" }
-# command_aliases = { lint = { cmd = "cargo clippy", cwd = "$WORKSPACE" } }
-# command_aliases = { build = { cmd = "npm run build", cwd = "$WORKSPACE" } }
-# command_aliases = {}
-
 [defaults.proxy]
-# Local proxy used for outbound HTTP/HTTPS policy enforcement.
 proxy_port = 28781
-
-# Must be reachable from Docker containers. Use the narrowest Docker-reachable
-# bind address your environment supports; 0.0.0.0 is portable but broader than
-# ideal on shared or untrusted networks.
 proxy_host = "0.0.0.0"
-
-# If true, force all outbound HTTP/HTTPS traffic through proxy.
 strict_network = true
 
-# ---------------------------------------------------------------------------
-# Logging and telemetry.
-# ---------------------------------------------------------------------------
-
 [logging]
-# Directory for runtime state and logs.
-# This file stores:
-# - `harness-hat.log` (daily rotating text logs)
-# - runtime state used by the manager and proxy
 log_dir = "~/.local/share/harness-hat"
 
-# Stable instance id written by harness-hat on first startup.
-# This is exported as `service.instance.id` in OpenTelemetry.
-# instance_id = "generated-on-first-run"
-
-# Optional OpenTelemetry export.
-# Remove or leave commented out to disable.
-#
-# [logging.otlp]
-# Collector endpoint.
-# Examples:
-#   gRPC:      http://localhost:4317
-#   HTTP/proto http://localhost:4318/v1/traces
-# endpoint = "http://localhost:4317"
-#
-# One of: grpc, http
-# protocol = "grpc"
-#
-# Which events to export.
-# One of:
-#   all        - every hostdo and proxy event
-#   approvals  - only events that required a developer prompt
-#   none       - disable OTel spans
-# level = "approvals"
-#
-# Example collector config:
-# [logging.otlp]
-# endpoint = "http://localhost:4317"
-# protocol = "grpc"
-# level = "approvals"
-
-# ---------------------------------------------------------------------------
-# Named environment profiles.
-# These are referenced by hostdo command rules in harness-rules.toml via
-# `env_profile`.
-# ---------------------------------------------------------------------------
-
-[env_profiles.node]
-vars = { NODE_ENV = "development" }
-
-# Add more named env profiles as needed.
-# [env_profiles.python]
-# vars = { PYTHONUNBUFFERED = "1" }
-
-# ---------------------------------------------------------------------------
-# Managed workspaces are optional.
-# Add one [[workspaces]] block per canonical repository when you want Harness Hat
-# to manage a workspace. The CLI can still launch without any workspaces defined.
-# Workspace-specific hostdo overrides belong inside each [[workspaces]] block
-# when you add one later.
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Shared container defaults.
-# These are merged into every container profile.
-# ---------------------------------------------------------------------------
-
 [defaults.containers]
-# Optional default mount point inside the container.
-# If omitted, harness-hat uses /workspace.
-# mount_target = "/workspace"
-
-# Mouse wheel routing for agent terminal panes.
-# Options:
-#   "auto"    - pass through when the inner TUI requested SGR mouse reporting,
-#               otherwise scroll Harness Hat history
-#   "harness" - always scroll Harness Hat history
-#   "agent"   - pass wheel events through to the agent TUI
-# mouse_scroll = "auto"
-
-# Optional mounts shared by all profiles.
-# `container` must be an absolute path inside the container.
-# `mode` is either "ro" or "rw".
-#
-# [[defaults.containers.mounts]]
-# host = "~/.gitconfig"
-# container = "/home/ubuntu/.gitconfig"
-# mode = "ro"
-
-# Env vars passed through to every container.
-# These must be variable names only, not NAME=value pairs.
 env_passthrough = ["TERM", "COLORTERM", "COLORFGBG"]
-
-# Fixed env vars set in every container.
-# env = { EXAMPLE = "value" }
-
-# Optional hosts that bypass MITM handling for every profile.
-# Usually better to keep this empty and set bypasses per profile instead.
-# bypass_proxy = []
-
-# Optional container-local TCP forwards to host services.
-# This example makes http://localhost:8081 inside the container connect to
-# host.docker.internal:8081. The host service must be reachable from Docker.
-# [[defaults.containers.localhost_forwards]]
-# container_port = 8081
-# host_port = 8081
-
-# ---------------------------------------------------------------------------
-# Container profiles.
-# Each profile is a direct launch target shown in the manager.
-# `image` is a Dockerfile stem resolved as:
-#   <docker_dir>/<image>.dockerfile
-# If omitted, `image` defaults to "default".
-# Use lowercase stems only (`a-z`, `0-9`, `-`, `_`, `.`).
-# ---------------------------------------------------------------------------
-
-[container_profiles.claude]
-image = "default"
-
-# Optional override for this profile's mount point.
-# mount_target = "/workspace"
-
-# Explicit argv used to launch the profile inside the container.
-# Harness Hat infers any built-in runtime compatibility behavior from `command[0]`.
-command = ["claude"]
-
-# Unlimited-permissions example:
-# command = ["claude", "--dangerously-skip-permissions"]
-
-# Extra allowlist entries written into a starter harness-rules.toml when one
-# does not already exist for the workspace.
-starter_network_allowlist = [
-  "domain=api.anthropic.com",
-  "domain=statsig.anthropic.com",
-  "domain=sentry.io",
-]
-
-# Optional profile-specific env passthrough.
-# env_passthrough = ["ANTHROPIC_API_KEY"]
-
-# Hosts that should bypass MITM TLS interception for this profile.
-# This disables TLS traffic inspection for these domains.
 bypass_proxy = [
   "api.anthropic.com",
   "claude.ai",
   "platform.claude.com",
   "downloads.claude.ai",
-  "storage.googleapis.com"
-]
-
-# Persist Claude auth/session state across primary launches.
-# Subagents receive a startup snapshot instead of a shared writable mount.
-[[container_profiles.claude.mounts]]
-host = "~/.claude.json"
-container = "/home/ubuntu/.claude.json"
-mode = "rw"
-
-[[container_profiles.claude.mounts]]
-host = "~/.claude"
-container = "/home/ubuntu/.claude"
-mode = "rw"
-
-[container_profiles.codex]
-image = "default"
-command = ["codex"]
-
-# Optional terminal palette tweak for CLIs that read better in grayscale.
-grayscale_palette = true
-
-# Optional MCP startup log scraping for `agentctl status`.
-mcp_log_paths = [
-  "/home/ubuntu/.codex/log/codex-tui.log",
-  "/root/.codex/log/codex-tui.log",
-]
-
-# Unlimited-permissions example:
-# command = ["codex", "--ask-for-approval", "never", "--sandbox", "danger-full-access"]
-
-# Extra allowlist entries written into a starter harness-rules.toml when one
-# does not already exist for the workspace.
-starter_network_allowlist = [
-  "domain=api.openai.com",
-]
-
-# Optional profile-specific env passthrough.
-# env_passthrough = ["OPENAI_API_KEY"]
-
-bypass_proxy = [
+  "storage.googleapis.com",
   "chatgpt.com",
   "*.chatgpt.com",
   "*.openai.com",
   "api.openai.com",
   "chat.openai.com",
   "auth.openai.com",
-]
-
-# Persist Codex auth/session state across primary launches.
-# Subagents receive a private startup snapshot, including Codex state/cache files,
-# instead of a shared writable mount.
-[[container_profiles.codex.mounts]]
-host = "~/.codex"
-container = "/home/ubuntu/.codex"
-mode = "rw"
-
-[[container_profiles.codex.mounts]]
-host = "~/.config/codex"
-container = "/home/ubuntu/.config/codex"
-mode = "rw"
-
-[container_profiles.gemini]
-image = "default"
-command = ["gemini"]
-
-# Unlimited-permissions example:
-# command = ["gemini", "--approval-mode", "yolo"]
-
-# Extra allowlist entries written into a starter harness-rules.toml when one
-# does not already exist for the workspace.
-starter_network_allowlist = [
-  "domain=generativelanguage.googleapis.com",
-  "domain=aistudio.google.com",
-  "domain=accounts.google.com",
-  "domain=oauth2.googleapis.com",
-  "domain=www.googleapis.com",
-]
-
-# Optional profile-specific env passthrough.
-# env_passthrough = ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_CLOUD_PROJECT"]
-
-bypass_proxy = [
   "*.googleapis.com",
   "generativelanguage.googleapis.com",
   "aistudio.google.com",
   "accounts.google.com",
   "oauth2.googleapis.com",
   "www.googleapis.com",
+  "openrouter.ai",
+  "api.openrouter.ai",
+  "chatgpt.com",
+  "db.chatgpt.com",
+  "raw.githubusercontent.com",
+  "github.com"
 ]
 
-# Persist Gemini auth/session state across primary launches.
-# Subagents receive a startup snapshot instead of a shared writable mount.
-[[container_profiles.gemini.mounts]]
-host = "~/.gemini"
-container = "/home/ubuntu/.gemini"
+# Shared session-state mounts applied to every template.
+# These keep the agent CLIs' auth/session caches available across launches.
+#
+# `.claude.json` is rewritten in place by every Claude Code instance, so sharing
+# the host's live file lets the host and container(s) race and corrupt it
+# ("JSON Parse error: Unterminated string"), which resets the config and logs
+# the container out. It is therefore seeded as a private per-session copy: the
+# container reads the current session through at launch, then owns the file
+# privately and never writes back to the host. Set `seed = false` to restore the
+# shared live bind mount, or add `seed = true` to any other file mount to
+# privatize it the same way. (Unset defaults to seeding `.claude.json` only.)
+[[defaults.containers.mounts]]
+host = "~/.claude.json"
+container = "/home/coder/.claude.json"
+mode = "rw"
+seed = true
+
+[[defaults.containers.mounts]]
+host = "~/.claude"
+container = "/home/coder/.claude"
 mode = "rw"
 
-[container_profiles.pi]
-image = "default"
-command = ["pi"]
+[[defaults.containers.mounts]]
+host = "~/.codex"
+container = "/home/coder/.codex"
+mode = "rw"
 
-# Extra allowlist entries written into a starter harness-rules.toml when one
-# does not already exist for the workspace.
+[[defaults.containers.mounts]]
+host = "~/.config/codex"
+container = "/home/coder/.config/codex"
+mode = "rw"
+
+[[defaults.containers.mounts]]
+host = "~/.gemini"
+container = "/home/coder/.gemini"
+mode = "rw"
+
+[[defaults.containers.mounts]]
+host = "~/.pi"
+container = "/home/coder/.pi"
+mode = "rw"
+
+# Optional defaults applied to every template.
+# mount_target = "/workspace"
+# memory = "4g"
+# cpus = "2"
+# shm_size = "1g"
+#
+# mouse_scroll:
+#   "auto"     - pass through when the inner terminal requested mouse reporting
+#   "harness"  - always scroll Harness Hat history
+#   "terminal" - always pass wheel events through to the container terminal
+# mouse_scroll = "auto"
+
+# ---------------------------------------------------------------------------
+# Docker templates.
+#
+# Each [container_profiles.<name>] entry is a launchable Docker image template.
+# `image` is a Dockerfile stem resolved as <docker_dir>/<image>.dockerfile.
+# If `command` is omitted, Docker runs the image's default command.
+# ---------------------------------------------------------------------------
+
+[container_profiles.typescript]
+image = "typescript"
+memory = "4g"
+cpus = "2"
+shm_size = "1g"
 starter_network_allowlist = [
-  "domain=api.anthropic.com",
-  "domain=api.openai.com",
-  "domain=generativelanguage.googleapis.com",
-  "domain=openrouter.ai",
-  "domain=api.openrouter.ai",
+  "domain=github.com",
+  "domain=api.github.com",
+  "domain=raw.githubusercontent.com",
+  "domain=objects.githubusercontent.com",
+  "domain=registry.npmjs.org",
+  "domain=*.npmjs.org",
+  "domain=bun.sh",
 ]
 
-# Optional profile-specific env passthrough.
-# env_passthrough = ["ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"]
+[container_profiles.go]
+image = "go"
+memory = "4g"
+cpus = "2"
+shm_size = "1g"
+starter_network_allowlist = [
+  "domain=github.com",
+  "domain=api.github.com",
+  "domain=raw.githubusercontent.com",
+  "domain=objects.githubusercontent.com",
+  "domain=pkg.go.dev",
+  "domain=proxy.golang.org",
+  "domain=sum.golang.org",
+]
 
-# Map a host-local OpenAI-compatible server to Pi as http://localhost:8081.
-# [[container_profiles.pi.localhost_forwards]]
+[container_profiles.rust]
+image = "rust"
+memory = "6g"
+cpus = "3"
+shm_size = "1g"
+starter_network_allowlist = [
+  "domain=github.com",
+  "domain=api.github.com",
+  "domain=raw.githubusercontent.com",
+  "domain=objects.githubusercontent.com",
+  "domain=crates.io",
+  "domain=static.crates.io",
+  "domain=index.crates.io",
+]
+
+[container_profiles.php]
+image = "php"
+memory = "4g"
+cpus = "2"
+shm_size = "1g"
+starter_network_allowlist = [
+  "domain=github.com",
+  "domain=api.github.com",
+  "domain=raw.githubusercontent.com",
+  "domain=objects.githubusercontent.com",
+  "domain=getcomposer.org",
+  "domain=packagist.org",
+  "domain=repo.packagist.org",
+]
+
+[container_profiles.base]
+image = "default"
+starter_network_allowlist = [
+  "domain=github.com",
+  "domain=api.github.com",
+  "domain=raw.githubusercontent.com",
+  "domain=objects.githubusercontent.com",
+  "domain=registry.npmjs.org",
+  "domain=*.npmjs.org",
+  "domain=pypi.org",
+  "domain=files.pythonhosted.org",
+  "domain=crates.io",
+  "domain=static.crates.io",
+  "domain=index.crates.io",
+]
+
+# Larger development environment example.
+[container_profiles.large]
+image = "default"
+memory = "8g"
+cpus = "4"
+shm_size = "2g"
+
+# Optional extra mounts for tool credentials or caches.
+# [[container_profiles.large.mounts]]
+# host = "~/.gitconfig"
+# container = "/home/coder/.gitconfig"
+# mode = "ro"
+
+# Optional fixed command override. Prefer leaving this unset for shell-first
+# sessions unless a template needs a specific entrypoint.
+# command = ["/bin/bash"]
+
+# Optional per-template env passthrough.
+# env_passthrough = ["OPENAI_API_KEY"]
+
+# Optional hosts that bypass MITM TLS interception for this template.
+# bypass_proxy = ["api.example.com"]
+
+# Optional container-local TCP forwards to host services.
+# [[container_profiles.large.localhost_forwards]]
 # container_port = 8081
 # host_port = 8081
 
-# Persist Pi auth/session state across primary launches.
-# Subagents receive a startup snapshot instead of a shared writable mount.
-[[container_profiles.pi.mounts]]
-host = "~/.pi"
-container = "/home/ubuntu/.pi"
-mode = "rw"
+# ---------------------------------------------------------------------------
+# Workspaces.
+#
+# Add one [[workspaces]] block per repository you want to manage.
+# ---------------------------------------------------------------------------
+
+# [[workspaces]]
+# name = "example"
+# canonical_path = "~/src/example"

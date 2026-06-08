@@ -16,7 +16,7 @@ use std::sync::{
 };
 use std::time::Duration;
 use std::time::Instant;
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::NamedTempFile;
 
 use crate::config::MountMode;
 use crate::container::helpers::{blend_toward_bg, luma_u8, xterm_256_index_to_rgb};
@@ -24,17 +24,37 @@ use tracing::instrument;
 
 const INPUT_ECHO_GRACE: Duration = Duration::from_millis(350);
 
+/// Docker label keys stamped on every harness-hat container so that other
+/// processes (e.g. `hh shell`) can discover and identify running sessions
+/// without depending on the manager being alive.
+pub const LABEL_ALIAS: &str = "harness-hat.alias";
+pub const LABEL_WORKSPACE: &str = "harness-hat.workspace";
+pub const LABEL_TEMPLATE: &str = "harness-hat.template";
+pub const LABEL_SESSION: &str = "harness-hat.session";
+
+/// Identity used when shelling into a running session.
+pub const SHELL_USER: &str = "1000:1000";
+pub const SHELL_HOME: &str = "/home/coder";
+
+/// Extract a single label value from a docker `{{.Labels}}` line, which is a
+/// comma-separated list of `key=value` pairs.
+pub fn parse_docker_label(labels: &str, key: &str) -> Option<String> {
+    labels.split(',').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k.trim() == key).then(|| v.trim().to_string())
+    })
+}
+
 /// Live container session state and PTY plumbing for a launched container.
 pub struct ContainerSession {
     pub container_name: String,
-    pub agent_kind: crate::config::AgentKind,
     pub mouse_scroll: crate::config::MouseScrollMode,
     pub container_id: String,
     pub docker_name: String,
+    /// Short random id (zero-padded 4 digits) used by `hh shell <alias>`.
+    pub alias: String,
     pub project: String,
     pub session_token: String,
-    pub parent_session_token: Option<String>,
-    pub subagent_name: Option<String>,
     pub mount_target: String,
     pub launched_at: Instant,
     pub terminal_snapshot_hash: u64,
@@ -47,10 +67,11 @@ pub struct ContainerSession {
     pub has_bell: Arc<AtomicBool>,
     pub exit_reported: bool,
     pub(crate) _scoped_proxy: Option<crate::proxy::ScopedProxyListener>,
-    pub(crate) _cred_tempfile: Option<NamedTempFile>,
+    /// Private per-session copies of seeded mounts (e.g. `.claude.json`), kept
+    /// alive for the container's lifetime and cleaned up on drop.
+    pub(crate) _seed_tempfiles: Vec<NamedTempFile>,
     pub(crate) _env_tempfile: Option<NamedTempFile>,
-    pub(crate) _hostdo_tempfile: Option<NamedTempFile>,
-    pub(crate) _agent_config_tempdir: Option<TempDir>,
+    pub(crate) _control_tempfile: Option<NamedTempFile>,
 }
 
 /// Event sink that keeps the Alacritty-backed PTY state synchronized with the
@@ -179,14 +200,8 @@ impl ContainerSession {
         self.notifier.notify(bytes);
     }
 
-    pub fn is_subagent(&self) -> bool {
-        self.parent_session_token.is_some()
-    }
-
     pub fn display_name(&self) -> &str {
-        self.subagent_name
-            .as_deref()
-            .unwrap_or(self.container_name.as_str())
+        self.container_name.as_str()
     }
 
     pub fn terminal_stable_for(&self) -> Duration {
@@ -214,6 +229,11 @@ impl ContainerSession {
 
     pub fn terminal_total_rows(&self) -> usize {
         self.term.lock().total_lines()
+    }
+
+    /// Friendly hint shown in the UI for shelling into this session.
+    pub fn shell_in_hint(&self) -> String {
+        format!("hh shell {}", self.alias)
     }
 
     fn terminal_visible_hash(&self) -> u64 {
@@ -400,6 +420,20 @@ mod tests {
         assert_eq!(sanitize_docker_name("my project"), "my-project");
         assert_eq!(sanitize_docker_name("my@proj!ect"), "my-proj-ect");
         assert_eq!(sanitize_docker_name(""), "container");
+    }
+
+    #[test]
+    fn parse_docker_label_extracts_value() {
+        let labels = "com.example=1,harness-hat.alias=0042,harness-hat.workspace=my proj";
+        assert_eq!(
+            super::parse_docker_label(labels, "harness-hat.alias").as_deref(),
+            Some("0042")
+        );
+        assert_eq!(
+            super::parse_docker_label(labels, "harness-hat.workspace").as_deref(),
+            Some("my proj")
+        );
+        assert_eq!(super::parse_docker_label(labels, "missing"), None);
     }
 
     #[test]

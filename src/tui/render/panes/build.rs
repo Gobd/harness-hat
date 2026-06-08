@@ -2,20 +2,48 @@ use super::*;
 
 pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Rect, dimmed: bool) {
     let cfg = app.config.get();
-    let selected_ctr = app.container_picker.unwrap_or(0);
-    let workspace_name = app
-        .selected_project_idx()
-        .and_then(|pi| app.workspaces.get(pi))
-        .map(|p| p.name.as_str())
-        .unwrap_or("(no workspace)");
+    let Some(picker) = app.container_picker.as_ref() else {
+        return;
+    };
+
+    let (selected_idx, workspace_name, workspace_path, title): (
+        usize,
+        &str,
+        Option<std::path::PathBuf>,
+        String,
+    ) = match picker {
+        ContainerPickerState::NewSessionWorkspace { cursor } => (
+            *cursor,
+            app.workspaces
+                .get(*cursor)
+                .map(|ws| ws.name.as_str())
+                .unwrap_or("(select workspace)"),
+            cfg.workspaces
+                .get(*cursor)
+                .map(|ws| ws.canonical_path.clone()),
+            "Create Session".to_string(),
+        ),
+        ContainerPickerState::NewSessionTemplate {
+            workspace_idx,
+            cursor,
+        } => (
+            *cursor,
+            app.workspaces
+                .get(*workspace_idx)
+                .map(|ws| ws.name.as_str())
+                .unwrap_or("(no workspace)"),
+            app.config
+                .get()
+                .workspaces
+                .get(*workspace_idx)
+                .map(|ws| ws.canonical_path.clone()),
+            "Select Container Template".to_string(),
+        ),
+    };
 
     let tone = |c| maybe_dim(c, dimmed);
-    let workspace_path = app
-        .selected_project_idx()
-        .and_then(|pi| cfg.workspaces.get(pi))
-        .map(|proj| proj.canonical_path.clone());
     let block = Block::default()
-        .title(format!(" Run Container for '{}' ", workspace_name))
+        .title(format!(" {} for '{}' ", title, workspace_name))
         .title_style(
             Style::default()
                 .fg(tone(Color::Cyan))
@@ -31,7 +59,7 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                "  Choose an agent to launch below. Your host dir ",
+                "  Choose a container template to launch below. Your workspace dir ",
                 Style::default().fg(tone(Color::DarkGray)),
             ),
             Span::styled(
@@ -44,7 +72,7 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
                     .add_modifier(Modifier::DIM),
             ),
             Span::styled(
-                " will be mounted inside the agent container at ",
+                " will be mounted inside the container at ",
                 Style::default().fg(tone(Color::DarkGray)),
             ),
             Span::styled(
@@ -53,38 +81,82 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
                     .fg(tone(Color::White))
                     .add_modifier(Modifier::DIM),
             ),
-            Span::styled(
-                ", and the agent will start automatically.",
-                Style::default().fg(tone(Color::DarkGray)),
-            ),
+            Span::styled(".", Style::default().fg(tone(Color::DarkGray))),
         ]),
         Line::from(""),
     ];
 
-    for (i, c) in cfg.containers.iter().enumerate() {
-        let marker = if i == selected_ctr { "▶ " } else { "  " };
-        let name_style = if i == selected_ctr {
-            Style::default()
-                .fg(tone(Color::White))
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(tone(Color::White))
-        };
+    match picker {
+        ContainerPickerState::NewSessionWorkspace { .. } => {
+            for (i, ws) in app.workspaces.iter().enumerate() {
+                let marker = if i == selected_idx { "▶ " } else { "  " };
+                let name_style = if i == selected_idx {
+                    Style::default()
+                        .fg(tone(Color::White))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(tone(Color::White))
+                };
+                let hotkey = ws
+                    .sidebar_hotkey
+                    .map(|h| format!(" [{}]", h.to_ascii_uppercase()))
+                    .unwrap_or_else(String::new);
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {marker}"),
+                        Style::default().fg(tone(Color::Cyan)),
+                    ),
+                    Span::styled(ws.name.clone(), name_style),
+                    Span::styled(hotkey, Style::default().fg(tone(Color::DarkGray))),
+                ]));
+            }
+        }
+        _ => {
+            for (i, c) in cfg.containers.iter().enumerate() {
+                let marker = if i == selected_idx { "▶ " } else { "  " };
+                let name_style = if i == selected_idx {
+                    Style::default()
+                        .fg(tone(Color::White))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(tone(Color::White))
+                };
 
-        let spans = vec![
-            Span::styled(
-                format!("  {marker}"),
-                Style::default().fg(tone(Color::Cyan)),
-            ),
-            Span::styled(c.name.clone(), name_style),
-        ];
-        lines.push(Line::from(spans));
+                let spans = vec![
+                    Span::styled(
+                        format!("  {marker}"),
+                        Style::default().fg(tone(Color::Cyan)),
+                    ),
+                    Span::styled(c.name.clone(), name_style),
+                ];
+                lines.push(Line::from(spans));
 
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "      image: {}  (dockerfile: {}.dockerfile)",
+                        c.image, c.image_stem
+                    ),
+                    Style::default().fg(tone(Color::DarkGray)),
+                )));
+            }
+        }
+    }
+
+    if matches!(picker, ContainerPickerState::NewSessionTemplate { .. }) {
+        let workspace_path = workspace_path;
         lines.push(Line::from(Span::styled(
             format!(
-                "      image: {}  (dockerfile: {}.dockerfile)",
-                c.image, c.image_stem
+                "      The host dir {} will be mounted as /workspace.",
+                workspace_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<workspace>".to_string()),
             ),
+            Style::default().fg(tone(Color::DarkGray)),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "      This workspace will be the target for the new session.",
             Style::default().fg(tone(Color::DarkGray)),
         )));
     }

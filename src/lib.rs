@@ -13,22 +13,20 @@
 )]
 
 pub mod activity;
-pub mod agents;
 mod ansi;
 pub mod ca;
 pub mod cli;
 pub mod config;
 pub mod container;
-pub mod exec;
 mod fs_util;
 pub mod init;
 pub mod manager;
 pub mod new_project;
-pub mod passthrough;
 pub mod proxy;
 pub mod rules;
 pub mod server;
 pub mod shared_config;
+pub mod shell;
 pub mod state;
 pub mod telemetry;
 pub mod tui;

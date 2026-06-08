@@ -1,101 +1,6 @@
 use super::*;
 
 impl App {
-    pub(crate) fn approve_exec(&mut self, idx: usize, remember: bool) {
-        if idx >= self.pending_exec.len() {
-            return;
-        }
-        if remember {
-            let item = &self.pending_exec[idx];
-            let argv = item.argv.clone();
-            let image = item.image.clone();
-            let timeout_secs = item.timeout_secs;
-            let project_name = item.project.clone();
-            let cwd = self.portable_cwd(&item.rule_cwd, &project_name);
-            if let Some(rules_path) = self.project_rules_path(&project_name) {
-                match self.persist_exec_rule(
-                    &rules_path,
-                    &argv,
-                    image.as_deref(),
-                    timeout_secs,
-                    &cwd,
-                    crate::rules::ApprovalMode::Auto,
-                ) {
-                    Ok(()) => {
-                        let command_label =
-                            format_exec_rule_label(&argv, image.as_deref(), timeout_secs);
-                        self.push_log(
-                            format!("Saved rule to {}: {}", rules_path.display(), command_label),
-                            false,
-                        );
-                    }
-                    Err(e) => self.push_log(format!("Failed to save rule: {e}"), true),
-                }
-            } else {
-                self.push_log(
-                    format!("Cannot remember: unknown workspace '{project_name}'"),
-                    true,
-                );
-            }
-        }
-        if let Some(tx) = self.pending_exec[idx].response_tx.take() {
-            let _ = tx.send(ApprovalDecision::Approve { remember });
-        }
-        self.pending_exec.remove(idx);
-    }
-
-    pub(crate) fn deny_exec(&mut self, idx: usize) {
-        if idx >= self.pending_exec.len() {
-            return;
-        }
-        if let Some(tx) = self.pending_exec[idx].response_tx.take() {
-            let _ = tx.send(ApprovalDecision::Deny);
-        }
-        self.pending_exec.remove(idx);
-    }
-
-    pub(crate) fn deny_exec_forever(&mut self, idx: usize) {
-        if idx >= self.pending_exec.len() {
-            return;
-        }
-        let item = &self.pending_exec[idx];
-        let argv = item.argv.clone();
-        let image = item.image.clone();
-        let timeout_secs = item.timeout_secs;
-        let project_name = item.project.clone();
-        let cwd = self.portable_cwd(&item.rule_cwd, &project_name);
-        if let Some(rules_path) = self.project_rules_path(&project_name) {
-            match self.persist_exec_rule(
-                &rules_path,
-                &argv,
-                image.as_deref(),
-                timeout_secs,
-                &cwd,
-                crate::rules::ApprovalMode::Deny,
-            ) {
-                Ok(()) => {
-                    let command_label =
-                        format_exec_rule_label(&argv, image.as_deref(), timeout_secs);
-                    self.push_log(
-                        format!(
-                            "Saved deny rule to {}: {}",
-                            rules_path.display(),
-                            command_label
-                        ),
-                        false,
-                    );
-                }
-                Err(e) => self.push_log(format!("Failed to save deny rule: {e}"), true),
-            }
-        } else {
-            self.push_log(
-                format!("Cannot persist deny: unknown workspace '{project_name}'"),
-                true,
-            );
-        }
-        self.deny_exec(idx);
-    }
-
     pub(crate) fn approve_net(&mut self, idx: usize) {
         if idx >= self.pending_net.len() {
             return;
@@ -215,57 +120,8 @@ impl App {
             .map(|p| p.name.clone())
     }
 
-    pub(crate) fn persist_exec_rule(
-        &mut self,
-        rules_path: &std::path::Path,
-        argv: &[String],
-        image: Option<&str>,
-        timeout_secs: u64,
-        cwd: &str,
-        approval_mode: crate::rules::ApprovalMode,
-    ) -> Result<()> {
-        let mut rules = crate::rules::load(rules_path)
-            .with_context(|| format!("loading rules file '{}'", rules_path.display()))?;
-        let mut changed = false;
-        if let Some(cmd) = rules
-            .hostdo
-            .commands
-            .iter_mut()
-            .find(|c| c.argv == argv && c.image.as_deref() == image)
-        {
-            if timeout_secs > cmd.timeout_secs {
-                cmd.timeout_secs = timeout_secs;
-                changed = true;
-            }
-            if cmd.approval_mode != approval_mode {
-                cmd.approval_mode = approval_mode;
-                changed = true;
-            }
-        } else {
-            rules.hostdo.commands.push(crate::rules::RuleCommand {
-                name: None,
-                argv: argv.to_vec(),
-                image: image.map(str::to_string),
-                cwd: cwd.to_string(),
-                env_profile: None,
-                timeout_secs,
-                concurrency: crate::rules::ConcurrencyPolicy::Queue,
-                approval_mode,
-            });
-            changed = true;
-        }
-        if !changed {
-            return Ok(());
-        }
-        let expected_content = crate::rules::render_rules_file(&rules)
-            .with_context(|| format!("rendering rules file '{}'", rules_path.display()))?;
-        self.note_rules_internal_write(rules_path.to_path_buf(), expected_content);
-        crate::rules::write_rules_file(rules_path, &rules)
-            .with_context(|| format!("writing rules file '{}'", rules_path.display()))?;
-        Ok(())
-    }
-
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn persist_network_rule(
         &mut self,
         host: &str,
@@ -351,6 +207,7 @@ impl App {
         );
     }
 
+    #[allow(dead_code)]
     pub(crate) fn portable_cwd(&self, cwd: &Path, project_name: &str) -> String {
         let cfg = self.config.get();
         let project = cfg.workspaces.iter().find(|p| p.name == project_name);
@@ -409,17 +266,5 @@ pub(crate) fn send_pending_network_decision(
     let _ = tx.send(decision);
     for tx in item.merged_response_txs.drain(..) {
         let _ = tx.send(decision);
-    }
-}
-
-fn format_exec_rule_label(argv: &[String], image: Option<&str>, timeout_secs: u64) -> String {
-    let command = match image {
-        Some(image) => format!("--image {image} {}", argv.join(" ")),
-        None => argv.join(" "),
-    };
-    if timeout_secs == crate::rules::DEFAULT_TIMEOUT_SECS {
-        command
-    } else {
-        format!("--timeout {timeout_secs} {command}")
     }
 }

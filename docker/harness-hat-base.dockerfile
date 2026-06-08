@@ -97,13 +97,28 @@ RUN apt-get update -o APT::Update::Error-Mode=any && apt-get install -y --no-ins
       python3-venv \
       unzip \
       bubblewrap \
-      build-essential \
+      htop \
       iproute2 \
       iptables \
       gosu \
     && rm -rf /var/lib/apt/lists/*
 
-# Install a current Node runtime for agent CLIs (Gemini CLI requires Node 20+).
+# Match Coder's conventional non-root user while keeping uid/gid 1000 for
+# host-mounted auth and workspace files.
+RUN set -eu; \
+    if getent passwd ubuntu >/dev/null 2>&1; then \
+      groupmod -n coder ubuntu; \
+      usermod -l coder -d /home/coder -m -s /bin/bash ubuntu; \
+    elif ! getent passwd coder >/dev/null 2>&1; then \
+      groupadd -g 1000 coder; \
+      useradd -m -u 1000 -g 1000 -s /bin/bash coder; \
+    fi; \
+    # Keep /home/ubuntu as a legacy alias for older configs and mounts.
+    if [ ! -e /home/ubuntu ]; then \
+      ln -s /home/coder /home/ubuntu; \
+    fi
+
+# Install a current Node runtime for common development CLIs.
 # The NodeSource `nodejs` package already carries npm, and Ubuntu's `npm`
 # package conflicts with it.
 RUN set -eu; \
@@ -115,10 +130,6 @@ RUN set -eu; \
     apt-get update -o APT::Update::Error-Mode=any && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-COPY scripts/hostdo.py /usr/local/bin/hostdo
-RUN chmod 755 /usr/local/bin/hostdo
-COPY scripts/agentctl.py /usr/local/bin/agentctl
-RUN chmod 755 /usr/local/bin/agentctl
 COPY scripts/killme.py /usr/local/bin/killme
 RUN chmod 755 /usr/local/bin/killme
 COPY --from=tun2proxy-build /usr/local/cargo/bin/tun2proxy-bin /usr/local/bin/tun2proxy-bin
@@ -140,56 +151,6 @@ if [ -f "$HH_CERT" ]; then
         cp "$HH_CERT" "$HH_COMBINED_BUNDLE" 2>/dev/null || true
     fi
     chmod 0644 "$HH_COMBINED_BUNDLE" 2>/dev/null || true
-fi
-
-# Subagents receive read-only snapshots of agent auth/config state instead of
-# bind-mounted writable home directories. Copy those snapshots into the fresh
-# container filesystem before dropping privileges so each subagent can write its
-# own runtime state without contending with siblings or the primary agent.
-HH_AGENT_CONFIG_MANIFEST="${HARNESS_HAT_AGENT_CONFIG_SNAPSHOT:-}"
-if [ -n "$HH_AGENT_CONFIG_MANIFEST" ] && [ -f "$HH_AGENT_CONFIG_MANIFEST" ]; then
-    tab="$(printf '\t')"
-    while IFS="$tab" read -r src_rel dest_path; do
-        [ -n "$src_rel" ] || continue
-        [ -n "$dest_path" ] || continue
-        src_path="/tmp/harness-hat-agent-config/$src_rel"
-        [ -e "$src_path" ] || continue
-        dest_parent="$(dirname "$dest_path")"
-        mkdir -p "$dest_parent" 2>/dev/null || true
-        rm -rf "$dest_path" 2>/dev/null || true
-        if [ -d "$src_path" ]; then
-            mkdir -p "$dest_path" 2>/dev/null || true
-            cp -a "$src_path"/. "$dest_path"/ 2>/dev/null || true
-        else
-            cp -a "$src_path" "$dest_path" 2>/dev/null || true
-        fi
-        chown -R 1000:1000 "$dest_path" 2>/dev/null || true
-    done < "$HH_AGENT_CONFIG_MANIFEST"
-fi
-
-# Best-effort: ensure bind-mounted auth/session state under /home/ubuntu is
-# readable by uid 1000 (common issue on macOS/Linux).
-if [ "$(id -u)" = "0" ]; then
-    if [ -f /home/ubuntu/.claude.json ]; then
-        chown 1000:1000 /home/ubuntu/.claude.json 2>/dev/null || true
-        chmod 600 /home/ubuntu/.claude.json 2>/dev/null || true
-    fi
-    if [ -d /home/ubuntu/.claude ]; then
-        chown -R 1000:1000 /home/ubuntu/.claude 2>/dev/null || true
-        chmod 700 /home/ubuntu/.claude 2>/dev/null || true
-        chmod -R u+rwX /home/ubuntu/.claude 2>/dev/null || true
-    fi
-fi
-
-# Copy staged Claude credentials into place.  harness-hat mounts the host
-# keychain credential at a staging path to avoid nested bind-mount conflicts.
-HH_STAGED_CREDS="/tmp/.harness-hat-claude-credentials.json"
-if [ -f "$HH_STAGED_CREDS" ]; then
-    CLAUDE_DIR="/home/ubuntu/.claude"
-    mkdir -p "$CLAUDE_DIR" 2>/dev/null || true
-    cp "$HH_STAGED_CREDS" "$CLAUDE_DIR/.credentials.json" 2>/dev/null || true
-    chown 1000:1000 "$CLAUDE_DIR/.credentials.json" 2>/dev/null || true
-    chmod 600 "$CLAUDE_DIR/.credentials.json" 2>/dev/null || true
 fi
 
 start_localhost_forwards() {
@@ -361,21 +322,21 @@ if [ "${HARNESS_HAT_STRICT_NETWORK:-0}" = "1" ]; then
     case "$proxy_conn_limit" in
         ''|*[!0-9]*) proxy_conn_limit=0 ;;
     esac
-    exec_hostport="$(printf '%s' "$HARNESS_HAT_URL" | sed -E 's#^[a-zA-Z]+://##')"
-    exec_scheme="$(printf '%s' "$HARNESS_HAT_URL" | sed -E 's#^([a-zA-Z]+)://.*#\1#')"
-    [ -n "$exec_scheme" ] || exec_scheme="http"
-    exec_host="${exec_hostport%:*}"
-    exec_port="${exec_hostport##*:}"
+    control_hostport="$(printf '%s' "$HARNESS_HAT_URL" | sed -E 's#^[a-zA-Z]+://##')"
+    control_scheme="$(printf '%s' "$HARNESS_HAT_URL" | sed -E 's#^([a-zA-Z]+)://.*#\1#')"
+    [ -n "$control_scheme" ] || control_scheme="http"
+    control_host="${control_hostport%:*}"
+    control_port="${control_hostport##*:}"
 
     proxy_ip="$(getent ahostsv4 "$proxy_host" 2>/dev/null | awk '{print $1; exit}')"
-    exec_ip="$(getent ahostsv4 "$exec_host" 2>/dev/null | awk '{print $1; exit}')"
+    control_ip="$(getent ahostsv4 "$control_host" 2>/dev/null | awk '{print $1; exit}')"
     forward_host="${HARNESS_HAT_LOCALHOST_FORWARD_HOST:-host.docker.internal}"
     forward_ip=""
     if [ -n "${HARNESS_HAT_LOCALHOST_FORWARDS:-}" ]; then
         forward_ip="$(getent ahostsv4 "$forward_host" 2>/dev/null | awk '{print $1; exit}')"
     fi
-    if [ -z "$proxy_ip" ] || [ -z "$exec_ip" ]; then
-        echo "harness-hat: strict_network failed to resolve proxy ($proxy_host) or exec ($exec_host) hosts" >&2
+    if [ -z "$proxy_ip" ] || [ -z "$control_ip" ]; then
+        echo "harness-hat: strict_network failed to resolve proxy ($proxy_host) or control ($control_host) hosts" >&2
         exit 1
     fi
     if [ -n "${HARNESS_HAT_LOCALHOST_FORWARDS:-}" ] && [ -z "$forward_ip" ]; then
@@ -383,15 +344,15 @@ if [ "${HARNESS_HAT_STRICT_NETWORK:-0}" = "1" ]; then
         exit 1
     fi
 
-    # Keep hostdo control traffic on the direct exec-bridge path.
+    # Keep lifecycle control traffic on the direct control-server path.
     # In strict mode with virtual DNS, hostnames can resolve to synthetic
     # 198.18.0.0/15 addresses; using the resolved bridge IP avoids that.
-    export HARNESS_HAT_URL="${exec_scheme}://${exec_ip}:${exec_port}"
+    export HARNESS_HAT_URL="${control_scheme}://${control_ip}:${control_port}"
 
-    echo "harness-hat: strict_network using $IPT; proxy=$proxy_ip:$proxy_port exec=$exec_ip:$exec_port proxy_conn_limit=$proxy_conn_limit" >&2
+    echo "harness-hat: strict_network using $IPT; proxy=$proxy_ip:$proxy_port control=$control_ip:$control_port proxy_conn_limit=$proxy_conn_limit" >&2
     # ── Layer 1: strict egress filter ────────────────────────────────────
     # Allow only: loopback, tun0 (captured traffic), established/related,
-    # Docker DNS, proxy, exec, and configured localhost forwards. Traffic
+    # Docker DNS, proxy, control server, and configured localhost forwards. Traffic
     # written to tun0 is not raw egress;
     # tun2proxy consumes it in userspace and opens the real upstream sockets.
     # Anything escaping that path on a physical interface is rejected here.
@@ -411,7 +372,7 @@ if [ "${HARNESS_HAT_STRICT_NETWORK:-0}" = "1" ]; then
         fi
     fi
     $IPT -w -t filter -A HH_EGRESS -p tcp -d "$proxy_ip" --dport "$proxy_port" -j ACCEPT
-    $IPT -w -t filter -A HH_EGRESS -p tcp -d "$exec_ip" --dport "$exec_port" -j ACCEPT
+    $IPT -w -t filter -A HH_EGRESS -p tcp -d "$control_ip" --dport "$control_port" -j ACCEPT
     if [ -n "${HARNESS_HAT_LOCALHOST_FORWARDS:-}" ]; then
         old_ifs="$IFS"
         IFS=','
@@ -442,7 +403,7 @@ if [ "${HARNESS_HAT_STRICT_NETWORK:-0}" = "1" ]; then
     fi
 
     # ── Layer 2: tun2proxy routing ───────────────────────────────────────
-    # Bypass the scoped proxy and exec bridge addresses so tun2proxy can talk
+    # Bypass the scoped proxy and control server addresses so tun2proxy can talk
     # to them directly.  Docker's DNS (127.0.0.11) remains reachable.
     TUN2PROXY_BIN="$(command -v tun2proxy-bin 2>/dev/null || true)"
     if [ -z "$TUN2PROXY_BIN" ]; then
@@ -467,7 +428,7 @@ if [ "${HARNESS_HAT_STRICT_NETWORK:-0}" = "1" ]; then
             --proxy "http://harness-hat:${HARNESS_HAT_SCOPED_PROXY_AUTH}@${proxy_ip}:${proxy_port}" \
             --dns virtual \
             --bypass "$proxy_ip" \
-            --bypass "$exec_ip" \
+            --bypass "$control_ip" \
             --bypass "$forward_ip" \
             >/tmp/harness-hat-tun2proxy.log 2>&1 &
     else
@@ -476,7 +437,7 @@ if [ "${HARNESS_HAT_STRICT_NETWORK:-0}" = "1" ]; then
             --proxy "http://harness-hat:${HARNESS_HAT_SCOPED_PROXY_AUTH}@${proxy_ip}:${proxy_port}" \
             --dns virtual \
             --bypass "$proxy_ip" \
-            --bypass "$exec_ip" \
+            --bypass "$control_ip" \
             >/tmp/harness-hat-tun2proxy.log 2>&1 &
     fi
     HH_TUN2PROXY_PID=$!
@@ -504,8 +465,14 @@ exec "$@"
 SCRIPT
 RUN chmod 755 /usr/local/bin/harness-hat-init.sh
 
-# ubuntu:24.04 ships with an 'ubuntu' user at uid/gid 1000.
-USER ubuntu
+RUN npm install -g \
+    @openai/codex \
+    @google/gemini-cli \
+    @earendil-works/pi-coding-agent \
+    @anthropic-ai/claude-code
+
+# Coder-compatible user at uid/gid 1000.
+USER coder
 WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/harness-hat-init.sh"]

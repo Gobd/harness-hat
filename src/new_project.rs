@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::config::AliasValue;
-use crate::rules::{HostdoRules, ProjectRules};
+use crate::rules::{NetworkRules, ProjectRules};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Built-in project template families used when seeding a new workspace.
@@ -60,69 +58,41 @@ pub fn write_rules_if_missing(workspace_dir: &Path, project_type: ProjectType) -
 
 /// Return the starter rule set for a new project type.
 pub fn default_rules(project_type: ProjectType) -> ProjectRules {
-    let command_aliases = match project_type {
-        ProjectType::None => HashMap::new(),
-        ProjectType::Rust => aliases([
-            ("build", "cargo build"),
-            ("check", "cargo check"),
-            ("test", "cargo test"),
-            ("fmt", "cargo fmt"),
-            ("lint", "cargo clippy"),
+    let mut allowlist = vec![
+        "domain=github.com".to_string(),
+        "domain=api.github.com".to_string(),
+        "domain=raw.githubusercontent.com".to_string(),
+        "domain=objects.githubusercontent.com".to_string(),
+    ];
+    match project_type {
+        ProjectType::None => {}
+        ProjectType::Rust => allowlist.extend([
+            "domain=crates.io".to_string(),
+            "domain=static.crates.io".to_string(),
+            "domain=index.crates.io".to_string(),
         ]),
-        ProjectType::Node => aliases([
-            ("install", "npm install"),
-            ("test", "npm run test"),
-            ("lint", "npm run lint"),
-            ("build", "npm run build"),
-            ("dev", "npm run dev"),
-            ("pnpm_test", "pnpm test"),
-            ("yarn_test", "yarn test"),
-            ("bun_test", "bun test"),
+        ProjectType::Node => allowlist.extend([
+            "domain=registry.npmjs.org".to_string(),
+            "domain=*.npmjs.org".to_string(),
         ]),
-        ProjectType::Python => aliases([
-            ("test", "pytest"),
-            ("pytest", "pytest"),
-            ("unittest", "python -m unittest"),
-            ("ruff", "ruff check ."),
-            ("black", "black ."),
-            ("flake8", "flake8"),
-            ("mypy", "mypy ."),
-            ("pip_install", "pip install -r requirements.txt"),
-            ("poetry_install", "poetry install"),
+        ProjectType::Python => allowlist.extend([
+            "domain=pypi.org".to_string(),
+            "domain=files.pythonhosted.org".to_string(),
         ]),
-        ProjectType::Go => aliases([
-            ("build", "go build ./..."),
-            ("test", "go test ./..."),
-            ("fmt", "gofmt -w ."),
-            ("vet", "go vet ./..."),
-            ("tidy", "go mod tidy"),
+        ProjectType::Go => allowlist.extend([
+            "domain=pkg.go.dev".to_string(),
+            "domain=sum.golang.org".to_string(),
+            "domain=proxy.golang.org".to_string(),
         ]),
-    };
+    }
 
     ProjectRules {
-        hostdo: HostdoRules {
-            command_aliases,
-            ..HostdoRules::default()
+        network: NetworkRules {
+            allowlist,
+            denylist: Vec::new(),
         },
         ..ProjectRules::default()
     }
-}
-
-fn aliases<const N: usize>(
-    items: [(&'static str, &'static str); N],
-) -> HashMap<String, AliasValue> {
-    items
-        .into_iter()
-        .map(|(name, cmd)| {
-            (
-                name.to_string(),
-                AliasValue::WithOptions {
-                    cmd: cmd.to_string(),
-                    cwd: Some(PathBuf::from("$WORKSPACE")),
-                },
-            )
-        })
-        .collect()
 }
 
 /// Append a workspace block to `harness-hat.toml` using the built-in template.
@@ -238,27 +208,31 @@ mod tests {
     }
 
     #[test]
-    fn templates_include_expected_aliases_and_excludes() {
+    fn templates_include_expected_network_allowlist() {
         let rules = default_rules(ProjectType::Rust);
-        assert!(rules.hostdo.command_aliases.contains_key("build"));
-        let build = rules
-            .hostdo
-            .command_aliases
-            .get("build")
-            .expect("build alias");
-        match build {
-            crate::config::AliasValue::WithOptions { cmd, cwd } => {
-                assert_eq!(cmd, "cargo build");
-                assert_eq!(cwd.as_ref().unwrap().as_os_str(), "$WORKSPACE");
-            }
-            _ => panic!("expected WithOptions alias"),
-        }
+        assert!(
+            rules
+                .network
+                .allowlist
+                .contains(&"domain=github.com".to_string())
+        );
+        assert!(
+            rules
+                .network
+                .allowlist
+                .contains(&"domain=crates.io".to_string())
+        );
     }
 
     #[test]
     fn none_project_type_has_no_starter_rules() {
         let rules = default_rules(ProjectType::None);
-        assert!(rules.hostdo.command_aliases.is_empty());
+        assert!(
+            rules
+                .network
+                .allowlist
+                .contains(&"domain=github.com".to_string())
+        );
     }
 
     #[test]
@@ -283,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn starter_rules_header_includes_hostdo_timeout_guidance() {
+    fn starter_rules_header_is_network_only() {
         let root = unique_temp_dir("rules-timeout-guidance");
         let canon = root.join("canon");
         fs::create_dir_all(&canon).expect("create canon");
@@ -292,11 +266,9 @@ mod tests {
         assert!(wrote);
 
         let rendered = fs::read_to_string(canon.join("harness-rules.toml")).expect("read rules");
-        assert!(rendered.contains("hostdo run --timeout <seconds> ..."));
-        assert!(rendered.contains("hostdo run --timeout 120 cargo test"));
-        assert!(rendered.contains("hostdo run ..."));
-        assert!(rendered.contains("hostdo tail <job-id> --rows <lines>"));
-        assert!(rendered.contains("hostdo send <job-id>"));
+        assert!(rendered.contains("Network (HTTP/HTTPS proxy policy)"));
+        assert!(rendered.contains("[network]"));
+        assert!(rendered.contains("allowlist"));
     }
 
     #[test]
