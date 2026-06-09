@@ -16,6 +16,7 @@ impl App {
         }
 
         self.build_output.clear();
+        self.build_finished = None;
         self.build_scroll = 0;
         if self.build_project_idx.is_none() {
             self.build_project_idx = self.selected_project_idx();
@@ -36,25 +37,40 @@ impl App {
         }
 
         let cancel_flag = Arc::new(AtomicBool::new(false));
-        self.build_task = Some(BuildTaskState {
-            shell_command: shell_command.clone(),
-        });
+        let shell_command_for_state = shell_command.clone();
 
         let tx = self.build_event_tx.clone();
         let launch_session_group = self.build_session_group;
         let label = label.to_string();
-        tokio::spawn(async move {
+        let task_cancel = Arc::clone(&cancel_flag);
+        let handle = tokio::spawn(async move {
             run_build_shell_command(
                 label,
                 shell_command,
                 launch_project_idx,
                 launch_container_idx,
                 launch_session_group,
-                cancel_flag,
+                task_cancel,
                 tx,
             )
             .await;
         });
+
+        self.build_task = Some(BuildTaskState {
+            shell_command: shell_command_for_state,
+            cancel_flag,
+            handle,
+        });
+    }
+
+    /// Request cancellation of the in-flight build (if any) and abort the task.
+    /// Called on quit and when the user presses Esc on the build pane.
+    pub(crate) fn cancel_docker_build(&mut self) {
+        if let Some(task) = self.build_task.take() {
+            task.cancel_flag.store(true, Ordering::SeqCst);
+            task.handle.abort();
+            self.push_log("docker build cancelled", true);
+        }
     }
 
     pub(crate) fn push_build_output(&mut self, line: impl Into<String>, is_error: bool) {
@@ -134,6 +150,7 @@ impl App {
         self.active_session = None;
         self.active_settings_project = None;
         self.container_picker = None;
+        self.build_finished = None;
         self.focus = Focus::ImageBuild;
         self.push_log(
             format!("docker image '{image}' not found locally; build required"),

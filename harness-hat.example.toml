@@ -19,13 +19,19 @@ show_log_pane = false
 
 [defaults.control]
 # Local authenticated control server used by killme and session identity.
+# Bind to loopback only. Setting a non-loopback host requires
+# `allow_remote_control = true` and exposes the control API to the network.
 server_port = 7878
-server_host = "0.0.0.0"
+server_host = "127.0.0.1"
+# allow_remote_control = false
 token_env_var = "HARNESS_HAT_TOKEN"
 
 [defaults.proxy]
+# Bind the MITM proxy to loopback only. Non-loopback proxy hosts require
+# `allow_remote_control = true` and turn the proxy into a network-reachable
+# MITM relay.
 proxy_port = 28781
-proxy_host = "0.0.0.0"
+proxy_host = "127.0.0.1"
 strict_network = true
 
 [logging]
@@ -106,12 +112,6 @@ mode = "rw"
 # memory = "4g"
 # cpus = "2"
 # shm_size = "1g"
-#
-# mouse_scroll:
-#   "auto"     - pass through when the inner terminal requested mouse reporting
-#   "harness"  - always scroll Harness Hat history
-#   "terminal" - always pass wheel events through to the container terminal
-# mouse_scroll = "auto"
 
 # ---------------------------------------------------------------------------
 # Docker templates.

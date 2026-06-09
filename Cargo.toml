@@ -11,10 +11,10 @@ homepage = "https://github.com/only-cliches/harness-hat"
 keywords = ["docker", "sandbox", "proxy", "tui", "isolation"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["target/", ".git/", ".github/"]
-default-run = "harness-hat"
+default-run = "hh"
 
 [[bin]]
-name = "harness-hat"
+name = "hh"
 path = "src/main.rs"
 
 [dependencies]
@@ -70,3 +70,10 @@ shell-words = "1.1"
 which = "7"
 libc = "0.2"
 tempfile = "3"
+subtle = "2"
+fs2 = "0.4"
+lru = "0.12"
+idna = "0.5"
+tokio-util = { version = "0.7", features = ["rt"] }
+sha2 = "0.10"
+hex = "0.4"

@@ -9,7 +9,7 @@ pub const CURRENT_RULES_VERSION: u32 = 1;
 
 // ── Enums (re-used across config and rules) ──────────────────────────────────
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkPolicy {
     Auto,
@@ -102,32 +102,9 @@ impl ComposedRules {
             network_denylist.extend(proj.network.denylist.clone());
         }
 
-        let mut network_rules = Vec::new();
-        let mut seen = HashSet::new();
-        for raw in network_allowlist {
-            if !seen.insert(raw.clone()) {
-                continue;
-            }
-            // `load()` validates the syntax, so skip invalid entries defensively.
-            if let Ok(parsed) = parse_network_allowlist_rule(&raw) {
-                network_rules.push(parsed);
-            }
-        }
-        let mut network_deny_rules = Vec::new();
-        let mut seen = HashSet::new();
-        for raw in network_denylist {
-            if !seen.insert(raw.clone()) {
-                continue;
-            }
-            // `load()` validates the syntax, so skip invalid entries defensively.
-            if let Ok(parsed) = parse_network_allowlist_rule(&raw) {
-                network_deny_rules.push(parsed);
-            }
-        }
-
         Self {
-            network_rules,
-            network_deny_rules,
+            network_rules: parse_dedup_network_rules(network_allowlist),
+            network_deny_rules: parse_dedup_network_rules(network_denylist),
             // Coder-style rules engine is explicit allowlist with prompt-by-default.
             network_default: NetworkPolicy::Prompt,
         }
@@ -160,7 +137,7 @@ impl ComposedRules {
         {
             NetworkPolicy::Auto
         } else {
-            self.network_default.clone()
+            self.network_default
         }
     }
 
@@ -184,7 +161,7 @@ impl ComposedRules {
         {
             NetworkPolicy::Auto
         } else {
-            self.network_default.clone()
+            self.network_default
         }
     }
 }
@@ -220,18 +197,26 @@ fn domain_matches(patterns: &[String], host: &str) -> bool {
     if patterns.is_empty() {
         return true;
     }
+    // Host strings are canonicalized by the caller (lowercase, trailing-dot
+    // stripped, IDNA-normalized) — see `proxy::helpers::canonicalize_host`.
+    // Defensive: lowercase + trim trailing `.` here in case some path forgot.
+    let host_canon = normalize_host_for_match(host);
     patterns.iter().any(|pattern| {
+        let pattern = pattern.trim();
         if pattern == "*" {
             return true;
         }
         // Coder semantics: "*.example.com" matches subdomains, not apex.
         if let Some(apex) = pattern.strip_prefix("*.") {
-            let host_lc = host.to_ascii_lowercase();
-            let apex_lc = apex.to_ascii_lowercase();
-            return host_lc.ends_with(&format!(".{apex_lc}"));
+            let apex_lc = normalize_host_for_match(apex);
+            return host_canon.ends_with(&format!(".{apex_lc}"));
         }
-        pattern.eq_ignore_ascii_case(host)
+        normalize_host_for_match(pattern) == host_canon
     })
+}
+
+fn normalize_host_for_match(host: &str) -> String {
+    host.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -239,11 +224,105 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
     domain_matches(&[pattern.to_string()], host)
 }
 
+/// Normalize a request path before policy matching:
+/// - strip the query string (`?...`) and fragment (`#...`)
+/// - percent-decode (best-effort, invalid escapes left as-is)
+/// - collapse `//` runs and resolve `..`/`.` segments
+///
+/// Path matching is byte-exact (case-sensitive) once normalized, mirroring how
+/// real HTTP servers route. Authors who need case-insensitive rules can encode
+/// both casings explicitly.
+fn normalize_path_for_match(path: &str) -> String {
+    let without_query = path
+        .split_once('?')
+        .map(|(p, _)| p)
+        .unwrap_or(path)
+        .split_once('#')
+        .map(|(p, _)| p)
+        .unwrap_or_else(|| path.split_once('?').map(|(p, _)| p).unwrap_or(path));
+
+    let decoded = percent_decode_path(without_query);
+
+    // Collapse `//` and resolve `.`/`..` segments.
+    let leading_slash = decoded.starts_with('/');
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in decoded.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            segments.pop();
+            continue;
+        }
+        segments.push(segment);
+    }
+    let mut out = String::with_capacity(decoded.len());
+    if leading_slash {
+        out.push('/');
+    }
+    out.push_str(&segments.join("/"));
+    if out.is_empty() {
+        out.push('/');
+    }
+    out
+}
+
+fn percent_decode_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = hex_nibble(bytes[i + 1]);
+            let lo = hex_nibble(bytes[i + 2]);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn path_matches(patterns: &[String], path: &str) -> bool {
     if patterns.is_empty() {
         return true;
     }
-    patterns.iter().any(|pattern| wildcard_match(pattern, path))
+    let normalized = normalize_path_for_match(path);
+    patterns
+        .iter()
+        .any(|pattern| path_pattern_matches(pattern, &normalized))
+}
+
+/// Match a single path pattern against an already-normalized path.
+/// A trailing `*` is segment-anchored: `path=/v1/*` matches `/v1/foo` and
+/// `/v1/foo/bar` but not `/v1` or `/v1foo`. Embedded `*` retains
+/// substring-style semantics for backward compatibility.
+fn path_pattern_matches(pattern: &str, path: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        // Segment-anchored trailing wildcard: must match the prefix then `/`.
+        if prefix.is_empty() {
+            // `/*` matches anything starting with `/`.
+            return path.starts_with('/');
+        }
+        return path.starts_with(prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/');
+    }
+    if pattern == "*" {
+        return true;
+    }
+    wildcard_match(pattern, path)
 }
 
 fn port_matches(patterns: &[u16], port: Option<u16>) -> bool {
@@ -323,7 +402,25 @@ pub fn parse_network_allowlist_rule(raw: &str) -> Result<NetworkRule> {
             }
             "domain" => {
                 anyhow::ensure!(domains.is_empty(), "duplicate domain key in '{raw}'");
-                domains = values;
+                for d in &values {
+                    anyhow::ensure!(
+                        !d.starts_with('.'),
+                        "domain pattern '{d}' must not start with '.' in '{raw}' (use '*.{}' for subdomains, or the apex for exact)",
+                        d.trim_start_matches('.')
+                    );
+                    anyhow::ensure!(
+                        !d.is_empty(),
+                        "empty domain pattern in '{raw}'"
+                    );
+                    // Reject obviously bogus / non-ASCII patterns. Callers must
+                    // pre-IDNA encode patterns to ASCII (`xn--…`) so matching
+                    // is straightforward against canonicalized hosts.
+                    anyhow::ensure!(
+                        d == "*" || d.bytes().all(|b| b.is_ascii() && b != b' '),
+                        "domain pattern '{d}' must be ASCII (use punycode/xn-- for IDN) in '{raw}'"
+                    );
+                }
+                domains = values.into_iter().map(|v| v.to_ascii_lowercase()).collect();
             }
             "path" => {
                 anyhow::ensure!(paths.is_empty(), "duplicate path key in '{raw}'");
@@ -355,6 +452,17 @@ pub fn parse_network_allowlist_rule(raw: &str) -> Result<NetworkRule> {
     })
 }
 
+/// Deduplicate `raws` (preserving first occurrence) and parse each into a
+/// [`NetworkRule`], defensively skipping any that fail to parse — `load()`
+/// already validates syntax, so invalid entries shouldn't reach here.
+fn parse_dedup_network_rules(raws: Vec<String>) -> Vec<NetworkRule> {
+    let mut seen = HashSet::new();
+    raws.into_iter()
+        .filter(|raw| seen.insert(raw.clone()))
+        .filter_map(|raw| parse_network_allowlist_rule(&raw).ok())
+        .collect()
+}
+
 // ── Loading / saving ─────────────────────────────────────────────────────────
 
 /// Load a `harness-rules.toml` file.  Returns a default (empty) rule set if the
@@ -368,25 +476,24 @@ pub fn load(path: &Path) -> Result<ProjectRules> {
     let parsed: ProjectRules = toml::from_str(&raw)
         .with_context(|| format!("parsing harness-rules.toml: {}", path.display()))?;
     validate_rules_version(parsed.version, path)?;
-    for entry in &parsed.network.allowlist {
-        parse_network_allowlist_rule(entry).with_context(|| {
-            format!(
-                "invalid [network].allowlist entry '{}' in {}",
-                entry,
-                path.display()
-            )
-        })?;
-    }
-    for entry in &parsed.network.denylist {
-        parse_network_allowlist_rule(entry).with_context(|| {
-            format!(
-                "invalid [network].denylist entry '{}' in {}",
-                entry,
-                path.display()
-            )
-        })?;
-    }
+    validate_network_list("allowlist", &parsed.network.allowlist, path)?;
+    validate_network_list("denylist", &parsed.network.denylist, path)?;
     Ok(parsed)
+}
+
+/// Validate every entry in a `[network]` list, attributing failures to the
+/// named list (`allowlist`/`denylist`) and source file.
+fn validate_network_list(list: &str, entries: &[String], path: &Path) -> Result<()> {
+    for entry in entries {
+        parse_network_allowlist_rule(entry).with_context(|| {
+            format!(
+                "invalid [network].{list} entry '{}' in {}",
+                entry,
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn validate_rules_version(version: u32, path: &Path) -> Result<()> {

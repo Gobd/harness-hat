@@ -1,6 +1,5 @@
 use super::{
-    Config, DefaultsConfig, MouseScrollMode, image_tag_for_stem, load,
-    resolve_workspace_sidebar_hotkeys,
+    Config, DefaultsConfig, image_tag_for_stem, load, resolve_workspace_sidebar_hotkeys,
 };
 
 fn temp_workspace() -> tempfile::TempDir {
@@ -71,7 +70,6 @@ bypass_proxy = [
 
 [container_profiles.dev]
 image = "default"
-mouse_scroll = "terminal"
 "#,
             docker_dir.display(),
             root.path().join("global-rules.toml").display(),
@@ -86,7 +84,6 @@ mouse_scroll = "terminal"
     assert_eq!(template.memory.as_deref(), Some("2g"));
     assert_eq!(template.cpus.as_deref(), Some("1.5"));
     assert_eq!(template.shm_size.as_deref(), Some("512m"));
-    assert_eq!(template.mouse_scroll, MouseScrollMode::Terminal);
     let home = dirs::home_dir().expect("home dir");
     for (host, container) in [
         (home.join(".claude.json"), "/home/coder/.claude.json"),

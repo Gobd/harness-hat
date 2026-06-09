@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub const CURRENT_CONFIG_VERSION: u32 = 1;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Schema version for future harness-hat.toml migrations.
     #[serde(default = "current_config_version")]
@@ -56,6 +57,7 @@ pub(crate) fn current_config_version() -> u32 {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ManagerConfig {
     /// Path to the global harness-rules.toml where auto-approved commands are persisted.
     /// Created on first use if it does not exist.
@@ -66,6 +68,7 @@ pub struct ManagerConfig {
 // ── Defaults ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct DefaultsConfig {
     #[serde(default)]
     pub ui: UiDefaults,
@@ -78,6 +81,7 @@ pub struct DefaultsConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct UiDefaults {
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: u16,
@@ -104,6 +108,7 @@ impl Default for UiDefaults {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ControlDefaults {
     #[serde(default = "default_control_port")]
     pub server_port: u16,
@@ -111,6 +116,10 @@ pub struct ControlDefaults {
     pub server_host: String,
     #[serde(default = "default_token_env")]
     pub token_env_var: String,
+    /// Opt-in to binding the control server / proxy to non-loopback addresses.
+    /// Required to expose the API over a network.
+    #[serde(default)]
+    pub allow_remote_control: bool,
 }
 
 /// Provides the default value for `ControlDefaults.server_port`.
@@ -132,11 +141,13 @@ impl Default for ControlDefaults {
             server_port: default_control_port(),
             server_host: default_host(),
             token_env_var: default_token_env(),
+            allow_remote_control: false,
         }
     }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ProxyDefaults {
     #[serde(default = "default_proxy_port")]
     pub proxy_port: u16,
@@ -169,6 +180,7 @@ impl Default for ProxyDefaults {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct EnvProfile {
     #[serde(default)]
     pub vars: HashMap<String, String>,

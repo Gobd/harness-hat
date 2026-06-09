@@ -6,18 +6,29 @@
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
+use lru::LruCache;
+use rcgen::{
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+    KeyUsagePurpose,
+};
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use tokio::sync::OnceCell;
 
 use crate::fs_util::{set_private_file_permissions, write_private_file};
 
-pub struct CaStore {
-    /// CA cert PEM — inject this into containers so they trust the proxy.
-    pub cert_pem: String,
+/// Upper bound on the in-memory leaf-cert cache. The cache is keyed on the
+/// attacker-controllable CONNECT/SNI host, so it must be bounded to avoid a
+/// memory-exhaustion DoS. Evicted entries are simply regenerated on next use.
+const CERT_CACHE_CAPACITY: usize = 1024;
+
+/// CA signing material. Held behind an `Arc` so it can be moved into the
+/// `spawn_blocking` closure that performs leaf-key generation without borrowing
+/// `&self` across the await point.
+struct SigningMaterial {
     ca_key: KeyPair,
     /// Reconstructed CA cert for signing leaf certs (may differ in validity
     /// period from the on-disk cert, but uses the same key and DN).
@@ -25,7 +36,16 @@ pub struct CaStore {
     /// Original CA cert DER — included in leaf cert chains so TLS clients
     /// can verify the chain against what they imported.
     ca_cert_der: Vec<u8>,
-    cert_cache: Mutex<HashMap<String, Arc<ServerConfig>>>,
+}
+
+pub struct CaStore {
+    /// CA cert PEM — inject this into containers so they trust the proxy.
+    pub cert_pem: String,
+    signing: Arc<SigningMaterial>,
+    /// Bounded cache of per-domain `ServerConfig`s. Each slot holds a
+    /// `OnceCell` so that concurrent first-misses for the same host coalesce
+    /// into a single keygen rather than duplicating work.
+    cert_cache: Mutex<LruCache<String, Arc<OnceCell<Arc<ServerConfig>>>>>,
 }
 
 impl CaStore {
@@ -39,6 +59,12 @@ impl CaStore {
             return Self::load(&cert_path, &key_path);
         }
         Self::generate_and_save(&cert_path, &key_path)
+    }
+
+    fn new_cache() -> Mutex<LruCache<String, Arc<OnceCell<Arc<ServerConfig>>>>> {
+        Mutex::new(LruCache::new(
+            NonZeroUsize::new(CERT_CACHE_CAPACITY).expect("cache capacity is non-zero"),
+        ))
     }
 
     fn load(cert_path: &Path, key_path: &Path) -> Result<Self> {
@@ -58,10 +84,12 @@ impl CaStore {
 
         Ok(Self {
             cert_pem,
-            ca_key,
-            ca_cert_for_signing,
-            ca_cert_der,
-            cert_cache: Mutex::new(HashMap::new()),
+            signing: Arc::new(SigningMaterial {
+                ca_key,
+                ca_cert_for_signing,
+                ca_cert_der,
+            }),
+            cert_cache: Self::new_cache(),
         })
     }
 
@@ -80,24 +108,31 @@ impl CaStore {
 
         Ok(Self {
             cert_pem,
-            ca_key,
-            ca_cert_for_signing: ca_cert,
-            ca_cert_der,
-            cert_cache: Mutex::new(HashMap::new()),
+            signing: Arc::new(SigningMaterial {
+                ca_key,
+                ca_cert_for_signing: ca_cert,
+                ca_cert_der,
+            }),
+            cert_cache: Self::new_cache(),
         })
     }
 
     fn build_ca_cert(key: &KeyPair) -> Result<rcgen::Certificate> {
         let mut params = CertificateParams::default();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        // Constrain the CA key to what it is actually used for. Without this an
+        // rcgen CA cert ships with no KeyUsage extension at all.
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         params
             .distinguished_name
             .push(DnType::CommonName, "Harness Hat Proxy CA");
         params
             .distinguished_name
             .push(DnType::OrganizationName, "harness-hat");
+        // 10-year validity (renew by deleting ~/.harness-hat/ca.{crt,key}).
+        // rcgen emits a SubjectKeyIdentifier by default.
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after = rcgen::date_time_ymd(2124, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2034, 1, 1);
         params.self_signed(key).context("generating CA certificate")
     }
 
@@ -117,31 +152,25 @@ impl CaStore {
         STANDARD.decode(b64).context("parsing CA cert PEM")
     }
 
-    /// Return (or generate and cache) a rustls `ServerConfig` presenting a
-    /// leaf certificate for `domain`, signed by this CA.
-    pub fn leaf_server_config(&self, domain: &str) -> Result<Arc<ServerConfig>> {
-        {
-            let cache = self.cert_cache.lock().unwrap();
-            if let Some(cfg) = cache.get(domain) {
-                return Ok(Arc::clone(cfg));
-            }
-        }
-
+    /// Synchronously sign a leaf `ServerConfig` for `domain`. CPU-bound (RSA/EC
+    /// keygen + signing); callers run this on a blocking thread.
+    fn sign_leaf(signing: &SigningMaterial, domain: &str) -> Result<Arc<ServerConfig>> {
         let leaf_key = KeyPair::generate().context("generating leaf key")?;
         let mut params =
             CertificateParams::new(vec![domain.to_string()]).context("building leaf params")?;
         params.is_ca = IsCa::NoCa;
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         params.not_after = rcgen::date_time_ymd(2034, 1, 1);
 
         let leaf_cert = params
-            .signed_by(&leaf_key, &self.ca_cert_for_signing, &self.ca_key)
+            .signed_by(&leaf_key, &signing.ca_cert_for_signing, &signing.ca_key)
             .context("signing leaf certificate")?;
 
         // Chain: leaf + original CA cert (what the container's trust store knows).
         let cert_chain: Vec<CertificateDer<'static>> = vec![
             CertificateDer::from(leaf_cert.der().to_vec()),
-            CertificateDer::from(self.ca_cert_der.clone()),
+            CertificateDer::from(signing.ca_cert_der.clone()),
         ];
 
         // Private key for the leaf cert.
@@ -152,12 +181,38 @@ impl CaStore {
             .with_single_cert(cert_chain, key_der)
             .context("building leaf ServerConfig")?;
 
-        let config = Arc::new(server_config);
-        self.cert_cache
-            .lock()
-            .unwrap()
-            .insert(domain.to_string(), config.clone());
-        Ok(config)
+        Ok(Arc::new(server_config))
+    }
+
+    /// Return (or generate and cache) a rustls `ServerConfig` presenting a
+    /// leaf certificate for `domain`, signed by this CA.
+    ///
+    /// Keygen runs on a blocking thread; concurrent first-misses for the same
+    /// host coalesce so the work is only done once per cache slot.
+    pub async fn leaf_server_config(&self, domain: &str) -> Result<Arc<ServerConfig>> {
+        let cell = {
+            let mut cache = self
+                .cert_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cache
+                .get_or_insert(domain.to_string(), || Arc::new(OnceCell::new()))
+                .clone()
+        };
+
+        let config = cell
+            .get_or_try_init(|| {
+                let signing = Arc::clone(&self.signing);
+                let domain = domain.to_string();
+                async move {
+                    tokio::task::spawn_blocking(move || Self::sign_leaf(&signing, &domain))
+                        .await
+                        .context("leaf keygen task panicked")?
+                }
+            })
+            .await?;
+
+        Ok(Arc::clone(config))
     }
 }
 
@@ -185,14 +240,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn leaf_server_config_caches_results() {
+    #[tokio::test]
+    async fn leaf_server_config_caches_results() {
         let dir = tempdir().expect("create temp dir");
         let store = CaStore::load_or_create(dir.path()).expect("create store");
 
-        let config1 = store.leaf_server_config("example.com").expect("first leaf");
+        let config1 = store
+            .leaf_server_config("example.com")
+            .await
+            .expect("first leaf");
         let config2 = store
             .leaf_server_config("example.com")
+            .await
             .expect("second leaf");
 
         assert!(
@@ -202,6 +261,7 @@ mod tests {
 
         let config3 = store
             .leaf_server_config("other.com")
+            .await
             .expect("different domain");
         assert!(
             !Arc::ptr_eq(&config1, &config3),

@@ -18,11 +18,17 @@ impl SharedConfig {
     }
 
     pub fn get(&self) -> Arc<Config> {
-        self.inner.read().expect("config lock poisoned").clone()
+        // Treat a poisoned lock as recoverable: the inner data is just an
+        // `Arc<Config>` whose invariants do not depend on partial mutation,
+        // so reading the prior value is safe and preferable to panicking.
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn set(&self, config: Arc<Config>) {
-        *self.inner.write().expect("config lock poisoned") = config;
+        *self.inner.write().unwrap_or_else(|e| e.into_inner()) = config;
     }
 }
 

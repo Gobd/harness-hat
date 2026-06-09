@@ -25,20 +25,6 @@ impl Default for WorkspaceConfig {
 
 // ── Containers ───────────────────────────────────────────────────────────────
 
-/// How mouse wheel events in terminals are routed.
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum MouseScrollMode {
-    /// Preserve existing behavior: pass through when the inner TUI requested
-    /// SGR mouse reporting, otherwise scroll Harness Hat's terminal history.
-    #[default]
-    Auto,
-    /// Always use mouse wheel events for Harness Hat terminal scrollback.
-    Harness,
-    /// Pass mouse wheel events through to the container terminal as SGR mouse input.
-    Terminal,
-}
-
 /// Internal resolved container launch definition synthesized from
 /// `[container_profiles.<name>]` entries.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -64,10 +50,6 @@ pub struct ContainerDef {
     /// Render ANSI palette requests in grayscale for this profile.
     #[serde(default)]
     pub grayscale_palette: bool,
-    /// Controls whether mouse wheel events scroll Harness Hat history or are
-    /// passed through to the container terminal.
-    #[serde(default)]
-    pub mouse_scroll: MouseScrollMode,
     /// Additional allowlist entries written into a starter `harness-rules.toml`.
     #[serde(default)]
     pub starter_network_allowlist: Vec<String>,
@@ -106,6 +88,7 @@ pub struct ContainerDef {
 
 /// Named container profile used directly as a launch target.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ContainerProfile {
     /// Dockerfile stem looked up as `<docker_dir>/<image>.dockerfile`.
     /// Defaults to `default` when omitted.
@@ -117,8 +100,6 @@ pub struct ContainerProfile {
     pub command: Option<Vec<String>>,
     #[serde(default)]
     pub grayscale_palette: Option<bool>,
-    #[serde(default)]
-    pub mouse_scroll: Option<MouseScrollMode>,
     #[serde(default)]
     pub starter_network_allowlist: Vec<String>,
     #[serde(default)]
@@ -145,13 +126,12 @@ pub struct ContainerProfile {
 
 /// Shared defaults merged into every container definition.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ContainerDefaults {
     #[serde(default)]
     pub mount_target: Option<PathBuf>,
     #[serde(default)]
     pub grayscale_palette: Option<bool>,
-    #[serde(default)]
-    pub mouse_scroll: Option<MouseScrollMode>,
     #[serde(default)]
     pub mounts: Vec<ContainerMount>,
     #[serde(default)]
@@ -193,6 +173,7 @@ pub fn normalize_command_name(command: &str) -> Option<String> {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ContainerMount {
     /// Host-side source path (supports `~` expansion).
     pub host: PathBuf,
@@ -214,6 +195,18 @@ pub struct ContainerMount {
     pub seed: Option<bool>,
 }
 
+impl ContainerMount {
+    /// Whether this mount is seeded as a private per-session copy rather than
+    /// bind-mounted live (see [`ContainerMount::seed`]). When `seed` is unset,
+    /// defaults to seeding only `.claude.json`. This is the single source of
+    /// truth shared by container launch and the TUI mounts view.
+    pub fn is_seeded(&self) -> bool {
+        self.seed.unwrap_or_else(|| {
+            self.container.file_name() == Some(std::ffi::OsStr::new(".claude.json"))
+        })
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MountMode {
@@ -223,6 +216,7 @@ pub enum MountMode {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LocalhostForward {
     /// Port to bind on 127.0.0.1 inside the container.
     pub container_port: u16,
@@ -242,6 +236,7 @@ impl LocalhostForward {
 // ── Logging ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct LoggingConfig {
     /// Directory for runtime logs and local runtime state files.
     #[serde(default = "default_log_dir")]
@@ -269,6 +264,7 @@ fn default_log_dir() -> PathBuf {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct OtlpConfig {
     /// Collector endpoint, e.g. `http://localhost:4317` (gRPC) or
     /// `http://localhost:4318/v1/traces` (HTTP/proto).

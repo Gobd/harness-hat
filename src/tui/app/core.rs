@@ -97,7 +97,7 @@ impl App {
         session_registry: SessionRegistry,
         stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
         net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
-        activity_rx: mpsc::UnboundedReceiver<ActivityEvent>,
+        activity_rx: mpsc::Receiver<ActivityEvent>,
         audit_rx: mpsc::Receiver<AuditEntry>,
         state: StateManager,
         proxy_state: ProxyState,
@@ -170,9 +170,10 @@ impl App {
             log,
             log_scroll: 0,
             focus: Focus::Sidebar,
-            sidebar_idx: Self::first_selectable_sidebar_idx(
-                &[SidebarItem::NewSession, SidebarItem::NewWorkspace].to_vec(),
-            ),
+            sidebar_idx: Self::first_selectable_sidebar_idx(&[
+                SidebarItem::NewSession,
+                SidebarItem::NewWorkspace,
+            ]),
             sidebar_offset: 0,
             session_groups: Vec::new(),
             active_session: None,
@@ -200,6 +201,7 @@ impl App {
             build_event_rx,
             build_event_tx,
             build_task: None,
+            build_finished: None,
             container_usage_rx,
             container_usage_tx,
             rules_scan_rx,
@@ -212,7 +214,6 @@ impl App {
             terminal_fullscreen: false,
             last_terminal_esc: None,
             scroll_mode: false,
-            scroll_mouse_passthrough: false,
             terminal_scroll: 0,
             container_usage: HashMap::new(),
             last_base_rules_poll: std::time::Instant::now(),
@@ -249,6 +250,22 @@ impl App {
         self.rules_scan_in_flight = true;
         let tx = self.rules_scan_tx.clone();
         std::thread::spawn(move || {
+            // Drop-guard: `rules_scan_in_flight` is only cleared when a result
+            // arrives via `apply_rules_scan`. If stamping panics partway, this
+            // guarantees a (possibly empty) result is still sent so the flag is
+            // reset and the rules-tampering watch keeps running (H15).
+            struct SendOnDrop {
+                tx: Option<mpsc::UnboundedSender<Vec<(PathBuf, WatchedFileStamp)>>>,
+            }
+            impl Drop for SendOnDrop {
+                fn drop(&mut self) {
+                    if let Some(tx) = self.tx.take() {
+                        let _ = tx.send(Vec::new());
+                    }
+                }
+            }
+            let mut guard = SendOnDrop { tx: Some(tx) };
+
             let stamps: Vec<(PathBuf, WatchedFileStamp)> = watched_paths
                 .into_iter()
                 .map(|path| {
@@ -256,7 +273,9 @@ impl App {
                     (path, stamp)
                 })
                 .collect();
-            let _ = tx.send(stamps);
+            if let Some(tx) = guard.tx.take() {
+                let _ = tx.send(stamps);
+            }
         });
     }
 
@@ -675,12 +694,31 @@ impl App {
         })
     }
 
+    /// Upper bound on `self.activities` (H12). The list TTL-prunes terminal
+    /// entries but `Running`/`PendingApproval` entries are kept indefinitely;
+    /// without a cap a noisy in-container client can grow the Vec without
+    /// bound. We prefer dropping the oldest non-terminal entry over rejecting
+    /// new activity events, so the UI always reflects the most recent state.
+    const MAX_ACTIVITIES: usize = 1000;
+
     pub(crate) fn apply_activity_event(&mut self, event: ActivityEvent) {
         match event {
             ActivityEvent::Started(activity) => {
                 if let Some(existing) = self.activity_by_id_mut(&activity.id) {
                     *existing = *activity;
                 } else {
+                    // Cap-and-prune: when we're at the ceiling, evict the
+                    // oldest non-terminal activity (terminal ones already
+                    // expire via the TTL). If everything is terminal, drop
+                    // the very oldest entry to make room.
+                    if self.activities.len() >= Self::MAX_ACTIVITIES {
+                        let victim = self
+                            .activities
+                            .iter()
+                            .position(|a| !a.state.is_terminal())
+                            .unwrap_or(0);
+                        self.activities.remove(victim);
+                    }
                     self.activities.push(*activity);
                 }
             }
@@ -843,6 +881,17 @@ impl App {
 
         let mut indices = self.session_tree_indices(idx);
         indices.sort_unstable();
+        // The high-to-low removal + per-step `remap_session_indices_after_removal`
+        // below is only correct when at most one session is removed per
+        // `close_session` call. `session_tree_indices` returns exactly one
+        // index today, so this holds — but if it ever grows (e.g. closing a
+        // parent + its forks), the remap would be applied multiple times to
+        // `active_session > removed_idx`, producing an off-by-one (M24).
+        debug_assert!(
+            indices.len() <= 1,
+            "close_session expects session_tree_indices() to yield at most one index; got {}. If this changes, switch to a single batched remap.",
+            indices.len()
+        );
         let tokens = indices
             .iter()
             .filter_map(|idx| {
@@ -878,7 +927,7 @@ impl App {
             if let Some(session) = self.sessions.get(remove_idx) {
                 self.container_usage.remove(&session.docker_name);
                 if !session.is_exited() {
-                    session.terminate();
+                    let _ = session.terminate();
                 }
             }
             self.sessions.remove(remove_idx);
@@ -915,13 +964,11 @@ impl App {
                 .is_some_and(|source| container_identities.contains(source));
 
             if matches_activity || matches_container {
-                if let Some(pending) = self.pending_net.get_mut(i) {
-                    crate::tui::app::approvals::send_pending_network_decision(
-                        pending,
-                        crate::proxy::NetworkDecision::Deny,
-                    );
-                }
-                self.pending_net.remove(i);
+                let pending = self.pending_net.remove(i);
+                crate::tui::app::approvals::send_pending_network_decision_owned(
+                    pending,
+                    crate::proxy::NetworkDecision::Deny,
+                );
                 if let Some(activity) = self.activity_by_id_mut(&activity_id) {
                     activity.state = crate::activity::ActivityState::Cancelled;
                     activity.status = Some("container stopped".to_string());
@@ -944,7 +991,7 @@ impl App {
                 continue;
             };
             if !session.is_exited() {
-                session.terminate();
+                let _ = session.terminate();
             }
             session
                 .exited
@@ -998,7 +1045,7 @@ impl App {
     pub(crate) fn terminate_all_sessions(&mut self) {
         for session in &self.sessions {
             if !session.is_exited() {
-                session.terminate();
+                let _ = session.terminate();
             }
         }
     }
@@ -1009,11 +1056,12 @@ impl App {
         container_id: &str,
     ) -> ContainerStopDecision {
         let normalized = container_id.trim();
+        // Exact-match only: prefix matches let a session-token holder ask us to
+        // stop a sibling container in the same workspace by submitting a short
+        // common prefix (H19). The session-token check upstream binds the call
+        // to its own container; this just enforces that here as well.
         let Some(idx) = self.sessions.iter().position(|session| {
-            session.project == project
-                && (session.container_id == normalized
-                    || session.container_id.starts_with(normalized)
-                    || normalized.starts_with(&session.container_id))
+            session.project == project && session.container_id == normalized
         }) else {
             self.push_log(
                 format!(
@@ -1108,8 +1156,23 @@ impl App {
     }
 
     pub(crate) fn push_log(&mut self, text: impl Into<String>, is_error: bool) {
+        let text = text.into();
+        // Drop consecutive duplicates: the same line repeated in a tight loop
+        // (e.g. proxy fail-closed retries) otherwise floods useful entries off
+        // the visible log within milliseconds (L9). Audit entries are kept
+        // unaffected — only `Msg` entries with identical text + severity dedupe.
+        if let Some(LogEntry::Msg {
+            text: prev_text,
+            is_error: prev_is_error,
+            ..
+        }) = self.log.front()
+            && prev_text == &text
+            && *prev_is_error == is_error
+        {
+            return;
+        }
         self.log.push_front(LogEntry::Msg {
-            text: text.into(),
+            text,
             is_error,
             timestamp: chrono::Utc::now(),
         });

@@ -29,17 +29,6 @@ pub(crate) fn set_private_file_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn set_private_dir_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("setting permissions on {}", path.display()))?;
-    }
-    let _ = path;
-    Ok(())
-}
-
 pub(crate) fn write_env_file_entry<W: Write>(
     writer: &mut W,
     key: &str,

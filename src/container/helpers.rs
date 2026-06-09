@@ -129,8 +129,15 @@ pub(crate) fn compose_no_proxy(bypass_proxy: &[String]) -> String {
         if host.is_empty() {
             continue;
         }
-        if !entries.iter().any(|e| e == host) {
-            entries.push(host.to_string());
+        // Hostnames are case-insensitive (RFC 4343); without lowercasing on
+        // both sides of the dedup we'd let `LocalHost` slip past `localhost`
+        // and emit redundant `NO_PROXY` entries that some runtimes mishandle.
+        let host_lower = host.to_ascii_lowercase();
+        if !entries
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(&host_lower))
+        {
+            entries.push(host_lower);
         }
     }
     entries.join(",")

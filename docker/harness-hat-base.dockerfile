@@ -468,8 +468,23 @@ RUN chmod 755 /usr/local/bin/harness-hat-init.sh
 RUN npm install -g \
     @openai/codex \
     @google/gemini-cli \
-    @earendil-works/pi-coding-agent \
-    @anthropic-ai/claude-code
+    @earendil-works/pi-coding-agent
+
+# Claude Code: install the native standalone binary from Anthropic's signed apt
+# repository rather than npm. This lands a system-wide /usr/bin/claude (on PATH
+# for every user and the gosu-exec'd entrypoint), is GPG-verified, and does not
+# run the background auto-updater, so the image stays deterministic — bump the
+# version by rebuilding. Swap `stable` for `latest` (in both the URL and the
+# suite) to track the rolling channel.
+RUN set -eu; \
+    install -d -m 0755 /etc/apt/keyrings; \
+    curl -fsSL https://downloads.claude.ai/keys/claude-code.asc \
+      -o /etc/apt/keyrings/claude-code.asc; \
+    echo "deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude.ai/claude-code/apt/stable stable main" \
+      > /etc/apt/sources.list.d/claude-code.list; \
+    apt-get update -o APT::Update::Error-Mode=any \
+    && apt-get install -y --no-install-recommends claude-code \
+    && rm -rf /var/lib/apt/lists/*
 
 # Coder-compatible user at uid/gid 1000.
 USER coder

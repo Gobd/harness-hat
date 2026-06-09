@@ -7,14 +7,13 @@ use tracing::{debug, info, warn};
 use crate::activity::{Activity, ActivityState};
 use crate::config;
 use crate::proxy::helpers::{
-    container_tls_passthrough_match, ensure_host_header_matches_target,
-    proxy_authorization_matches_token, tunnel_with_activity, write_error_any,
+    container_tls_passthrough_match, is_valid_signing_host, proxy_authorization_matches_token,
+    tunnel_with_activity, write_error_any,
 };
 use crate::proxy::http::{
     connect_head_has_proxy_authorization, finish_blocked_network_activity,
-    forward_request_with_activity, network_policy_allows, parse_connect_target,
-    parse_request_line_and_headers, parse_source_from_connect_head, read_body_any,
-    read_request_head_any,
+    handle_tls_inner_request, network_policy_allows, parse_connect_target,
+    parse_request_line_and_headers, parse_source_from_connect_head, read_request_head_any,
 };
 use crate::proxy::{ProxyState, SourceIdentityStatus};
 use crate::rules::NetworkPolicy;
@@ -77,9 +76,13 @@ pub(crate) fn parse_sni_from_tls_client_hello(record: &[u8]) -> Option<String> {
                     return None;
                 }
                 if name_type == 0 {
-                    let sni = String::from_utf8_lossy(&record[j..j + name_len]).to_string();
-                    if !sni.is_empty() {
-                        return Some(sni);
+                    // RFC 6066: SNI host_name is an ASCII (A-label) string. Reject
+                    // anything non-UTF-8 / non-ASCII rather than lossily mapping it
+                    // to U+FFFD, which would otherwise become a bogus policy match
+                    // key and certificate subject.
+                    let sni = std::str::from_utf8(&record[j..j + name_len]).ok()?;
+                    if !sni.is_empty() && sni.is_ascii() {
+                        return Some(sni.to_string());
                     }
                 }
                 j += name_len;
@@ -268,7 +271,16 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
             );
         })?;
 
-    let server_config = state.ca.leaf_server_config(&host)?;
+    // Gate attacker-controllable CONNECT host before it reaches the cert signer.
+    if !is_valid_signing_host(&host) {
+        state.activity_finished(
+            &connect_activity.id,
+            ActivityState::Failed,
+            Some(format!("refusing to sign leaf cert for invalid host {host:?}")),
+        );
+        anyhow::bail!("invalid CONNECT host for signing: {host:?}");
+    }
+    let server_config = state.ca.leaf_server_config(&host).await?;
     let acceptor = TlsAcceptor::from(server_config);
     let mut tls_stream = acceptor.accept(stream).await.map_err(|e| {
         state.activity_finished(
@@ -286,88 +298,16 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
         Some("TLS tunnel established".to_string()),
     );
 
-    let (inner_head, inner_remainder) = read_request_head_any(&mut tls_stream).await?;
-    let inner_str = match std::str::from_utf8(&inner_head) {
-        Ok(s) => s,
-        Err(_) => {
-            write_error_any(&mut tls_stream, 400, "Bad Request").await?;
-            return Ok(());
-        }
-    };
-
-    let (method, path, headers) = match parse_request_line_and_headers(inner_str) {
-        Some(r) => r,
-        None => {
-            write_error_any(&mut tls_stream, 400, "Bad Request").await?;
-            return Ok(());
-        }
-    };
-    if ensure_host_header_matches_target(&headers, &host, port).is_err() {
-        write_error_any(&mut tls_stream, 400, "Bad Request").await?;
-        return Ok(());
-    }
-
-    let body = read_body_any(&mut tls_stream, &headers, inner_remainder).await?;
-    let activity = state.start_network_activity(
-        source_project.clone(),
-        source_container.clone(),
-        &method,
-        &host,
-        &path,
-        "https",
-        &headers,
-        &body,
-        ActivityState::Forwarding,
-    );
-    state.activity_line(&activity.id, "request body read");
-
-    if source_project.is_none() {
-        warn!(
-            host = %host,
-            method = %method,
-            path = %path,
-            source_container = ?source_container,
-            source_status = source_status.as_str(),
-            connect_has_proxy_authorization,
-            "proxy request missing source project metadata; permanent network rule persistence will not know which project to update"
-        );
-    }
-
-    let policy = rules.match_network_for_port(&method, &host, &path, Some(port));
-
-    let allowed = network_policy_allows(
-        &state,
-        &activity,
-        policy,
-        "waiting for network approval",
-        &method,
-        &host,
-        Some(port),
-        &path,
-        source_project.clone(),
-        source_container.clone(),
-        source_status.as_str(),
-        connect_has_proxy_authorization,
-    )
-    .await;
-
-    if !allowed {
-        finish_blocked_network_activity(&state, &activity);
-        write_error_any(&mut tls_stream, 403, "Forbidden by harness-hat policy").await?;
-        return Ok(());
-    }
-
-    forward_request_with_activity(
+    handle_tls_inner_request(
         &state,
         &mut tls_stream,
-        &activity,
-        "https",
+        &rules,
         &host,
         port,
-        &path,
-        &method,
-        &headers,
-        body,
+        source_project,
+        source_container,
+        source_status,
+        connect_has_proxy_authorization,
     )
     .await
 }

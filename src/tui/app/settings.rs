@@ -244,7 +244,6 @@ impl App {
 
     pub(crate) fn exit_scroll_mode(&mut self) {
         self.scroll_mode = false;
-        self.scroll_mouse_passthrough = false;
         self.terminal_scroll = 0;
     }
 
@@ -392,10 +391,31 @@ impl App {
     const BUILD_ACTION_COUNT: usize = 2;
 
     pub(crate) fn handle_build_key(&mut self, key: KeyEvent) {
-        if self.build_is_running() {
+        if self.build_is_running() || self.build_finished.is_some() {
+            // Let the user retry a finished build without leaving the pane.
+            // INVARIANT: `build_cursor == 0` is the "rebuild same target"
+            // action in `run_build_action()` (the cursor indexes into the
+            // build-pane action list, where 0 means "build + launch" — see
+            // `run_build_action` below). If the action list is reordered, both
+            // here and in `run_build_action` must move together (L15).
+            if !self.build_is_running()
+                && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
+            {
+                self.build_cursor = 0;
+                self.run_build_action();
+                return;
+            }
             let max_scroll = self.build_output.len();
             match key.code {
-                KeyCode::Esc | KeyCode::Char('h') => self.focus = Focus::Sidebar,
+                KeyCode::Esc | KeyCode::Char('h') => {
+                    // If a build is still in flight, Esc cancels it (cooperative
+                    // flag + task abort) rather than leaving it running detached.
+                    if self.build_is_running() {
+                        self.cancel_docker_build();
+                    }
+                    self.build_finished = None;
+                    self.focus = Focus::Sidebar;
+                }
                 KeyCode::Up | KeyCode::Char('k') => {
                     self.build_scroll = self.build_scroll.saturating_add(1).min(max_scroll)
                 }
@@ -414,11 +434,14 @@ impl App {
         }
 
         if matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R')) {
+            // See INVARIANT above: cursor 0 is "rebuild + launch" in
+            // `run_build_action` (L15).
             self.build_cursor = 0;
             self.run_build_action();
             return;
         }
         if matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
+            // Cursor 1 is the "cancel" branch of `run_build_action` (L15).
             self.build_cursor = 1;
             self.run_build_action();
             return;
@@ -553,5 +576,10 @@ impl App {
         self.build_task
             .as_ref()
             .map(|task| task.shell_command.as_str())
+            .or_else(|| {
+                self.build_finished
+                    .as_ref()
+                    .map(|finished| finished.command.as_str())
+            })
     }
 }

@@ -201,11 +201,18 @@ pub struct App {
 
     pub stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
     pub net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
-    pub activity_rx: mpsc::UnboundedReceiver<ActivityEvent>,
+    // Bounded (H12): a malicious in-container client streaming events at full
+    // speed otherwise grows the backing Vec without limit. On full the
+    // producers (proxy/server) `try_send` and drop the event with a debug log
+    // — the TUI's view is best-effort already.
+    pub activity_rx: mpsc::Receiver<ActivityEvent>,
     pub audit_rx: mpsc::Receiver<AuditEntry>,
     build_event_rx: mpsc::UnboundedReceiver<BuildEvent>,
     build_event_tx: mpsc::UnboundedSender<BuildEvent>,
     build_task: Option<BuildTaskState>,
+    /// Result of the most recent build, retained so the output pane (and its
+    /// pass/fail banner) stays visible after the build task itself has ended.
+    pub(crate) build_finished: Option<BuildFinished>,
     container_usage_rx: mpsc::UnboundedReceiver<ContainerUsageUpdate>,
     container_usage_tx: mpsc::UnboundedSender<ContainerUsageUpdate>,
     rules_scan_rx: mpsc::UnboundedReceiver<Vec<(PathBuf, WatchedFileStamp)>>,
@@ -219,7 +226,6 @@ pub struct App {
     pub terminal_fullscreen: bool,
     last_terminal_esc: Option<std::time::Instant>,
     pub scroll_mode: bool,
-    pub scroll_mouse_passthrough: bool,
     pub terminal_scroll: usize,
     pub(crate) container_usage: HashMap<String, CachedContainerUsage>,
     last_base_rules_poll: std::time::Instant,
@@ -252,9 +258,24 @@ enum BuildEvent {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct BuildTaskState {
     shell_command: String,
+    /// Flipped to request cooperative cancellation of the spawned build task.
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Handle to the spawned build task so it can be aborted on quit.
+    handle: tokio::task::JoinHandle<()>,
+}
+
+/// Outcome of a finished build, kept around so the user can read the captured
+/// output and a clear status line instead of the view silently reverting to the
+/// "build required" prompt.
+#[derive(Debug, Clone)]
+pub(crate) struct BuildFinished {
+    pub command: String,
+    pub cancelled: bool,
+    pub exit_code: Option<i32>,
+    pub diagnostic: Option<String>,
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -402,6 +423,7 @@ async fn event_loop(
         terminal.draw(|frame| render::render(frame, app))?;
 
         if app.should_quit {
+            app.cancel_docker_build();
             app.terminate_all_sessions();
             break;
         }

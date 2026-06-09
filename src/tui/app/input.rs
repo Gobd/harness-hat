@@ -117,6 +117,7 @@ impl App {
                 if self.build_is_running() {
                     self.focus = Focus::Sidebar;
                 } else {
+                    self.build_finished = None;
                     self.build_container_idx = None;
                     self.build_project_idx = None;
                     self.build_session_group = None;
@@ -278,7 +279,6 @@ impl App {
                     self.active_session = Some(session_idx);
                     self.preview_session = Some(session_idx);
                     self.scroll_mode = false;
-                    self.scroll_mouse_passthrough = false;
                     self.terminal_scroll = 0;
                     self.focus = Focus::Terminal;
                     self.active_activity = None;
@@ -296,7 +296,6 @@ impl App {
                 self.active_session = Some(session_idx);
                 self.preview_session = Some(session_idx);
                 self.scroll_mode = false;
-                self.scroll_mouse_passthrough = false;
                 self.terminal_scroll = 0;
                 self.focus = Focus::Terminal;
                 self.active_activity = None;
@@ -318,7 +317,6 @@ impl App {
                 self.active_activity = Some(id);
                 self.active_network_session = None;
                 self.scroll_mode = false;
-                self.scroll_mouse_passthrough = false;
                 self.terminal_scroll = 0;
                 self.focus = Focus::Activity;
                 self.active_settings_project = None;
@@ -338,7 +336,6 @@ impl App {
 
         if is_scroll_mode_toggle_key(key) {
             self.scroll_mode = true;
-            self.scroll_mouse_passthrough = false;
             return;
         }
 

@@ -278,21 +278,36 @@ pub(crate) fn render_session_detail(
     ]);
 
     for mount in extra_mounts {
-        lines.push(Line::from(vec![
+        // A seeded mount isn't a live bind: a private copy is taken at launch and
+        // the container owns it, so don't render it like the rw/ro binds above.
+        let seeded = mount.is_seeded();
+        let (label, label_color, arrow): (&str, Color, &str) = if seeded {
+            ("seed", Color::Yellow, " ~> ")
+        } else {
+            (crate::container::mount_mode_arg(&mount.mode), Color::Green, " -> ")
+        };
+        let mut spans = vec![
             Span::styled(
-                format!("  {} ", crate::container::mount_mode_arg(&mount.mode)),
-                Style::default().fg(tone(Color::Green)),
+                format!("  {label} "),
+                Style::default().fg(tone(label_color)),
             ),
             Span::styled(
                 mount.host.display().to_string(),
                 Style::default().fg(tone(Color::White)),
             ),
-            Span::styled(" -> ", Style::default().fg(tone(Color::DarkGray))),
+            Span::styled(arrow, Style::default().fg(tone(Color::DarkGray))),
             Span::styled(
                 mount.container.display().to_string(),
                 Style::default().fg(tone(Color::White)),
             ),
-        ]));
+        ];
+        if seeded {
+            spans.push(Span::styled(
+                "  (per-session copy)",
+                Style::default().fg(tone(Color::DarkGray)),
+            ));
+        }
+        lines.push(Line::from(spans));
     }
 
     lines.extend([
@@ -372,12 +387,7 @@ pub(crate) fn render_term_buffer<T: alacritty_terminal::event::EventListener>(
     let default_bg = resolve_ansi_color(AnsiColor::Named(NamedColor::Background), content.colors);
     let mut default_style = Style::default().fg(default_fg).bg(default_bg);
     if dimmed {
-        if let Some(fg) = default_style.fg {
-            default_style = default_style.fg(attenuate_color(fg));
-        }
-        if let Some(bg) = default_style.bg {
-            default_style = default_style.bg(attenuate_color(bg));
-        }
+        default_style = attenuate_style(default_style);
     }
 
     let cursor_point = content.cursor.point;
@@ -467,21 +477,10 @@ pub(crate) fn render_term_buffer<T: alacritty_terminal::event::EventListener>(
             style = style.add_modifier(Modifier::CROSSED_OUT);
         }
         if cell.flags.contains(TermFlags::DIM) || cell.flags.contains(TermFlags::DIM_BOLD) {
-            style = style.add_modifier(Modifier::DIM);
-            if let Some(fg) = style.fg {
-                style = style.fg(attenuate_color(fg));
-            }
-            if let Some(bg) = style.bg {
-                style = style.bg(attenuate_color(bg));
-            }
+            style = attenuate_style(style.add_modifier(Modifier::DIM));
         }
         if dimmed {
-            if let Some(fg) = style.fg {
-                style = style.fg(attenuate_color(fg));
-            }
-            if let Some(bg) = style.bg {
-                style = style.bg(attenuate_color(bg));
-            }
+            style = attenuate_style(style);
         }
 
         if show_cursor && indexed.point == cursor_point && rr < rows && col < cols {
@@ -599,6 +598,18 @@ pub(crate) fn loading_spinner_frame() -> &'static str {
         .map(|d| d.as_millis() as usize)
         .unwrap_or(0);
     FRAMES[(ms / 120) % FRAMES.len()]
+}
+
+/// Attenuate a style's foreground and background colors (when set), used to
+/// dim inactive panes and DIM-flagged cells.
+pub(crate) fn attenuate_style(mut style: Style) -> Style {
+    if let Some(fg) = style.fg {
+        style = style.fg(attenuate_color(fg));
+    }
+    if let Some(bg) = style.bg {
+        style = style.bg(attenuate_color(bg));
+    }
+    style
 }
 
 pub(crate) fn attenuate_color(color: Color) -> Color {

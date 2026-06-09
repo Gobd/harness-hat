@@ -34,7 +34,8 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 render_idle(frame, area);
             }
             Some(SidebarItem::Build(_))
-                if app.build_is_running() && build_output_is_selected(app) =>
+                if (app.build_is_running() || app.build_finished.is_some())
+                    && build_output_is_selected(app) =>
             {
                 render_build_output(frame, app, area, true);
             }
@@ -83,7 +84,7 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.focus == Focus::ImageBuild {
-        if app.build_is_running() {
+        if app.build_is_running() || app.build_finished.is_some() {
             render_build_output(frame, app, area, false);
         } else {
             render_image_build(frame, app, area, false);

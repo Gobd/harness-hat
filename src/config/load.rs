@@ -64,20 +64,49 @@ pub fn load_composed_rules_for_workspace(
 
 // ── Loading ──────────────────────────────────────────────────────────────────
 
+/// Hard cap on config file size; configs are normally a few KiB. Refuse to
+/// load anything larger (including `/dev/zero` via symlink) so a corrupted or
+/// hostile file cannot trigger an OOM.
+const CONFIG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 #[instrument(skip(path))]
 pub fn load(path: &Path) -> Result<Config> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading config: {}", path.display()))?;
+    let raw = read_config_to_string(path)?;
     let mut config: Config =
         toml::from_str(&raw).with_context(|| format!("parsing config: {}", path.display()))?;
     validate_config_version(config.version, path)?;
     expand_config_paths(&mut config)?;
     validate_docker_dir(&config, path)?;
     resolve_container_profiles(&mut config)?;
-    validate(&config)?;
     canonicalize_workspace_paths(&mut config)?;
+    validate(&config)?;
     ensure_logging_instance_id(path, &raw, &mut config)?;
     Ok(config)
+}
+
+fn read_config_to_string(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("opening config: {}", path.display()))?;
+    let meta = file
+        .metadata()
+        .with_context(|| format!("statting config: {}", path.display()))?;
+    anyhow::ensure!(
+        meta.is_file(),
+        "config {}: not a regular file",
+        path.display()
+    );
+    let mut out = String::new();
+    file.take(CONFIG_MAX_BYTES + 1)
+        .read_to_string(&mut out)
+        .with_context(|| format!("reading config: {}", path.display()))?;
+    anyhow::ensure!(
+        (out.len() as u64) <= CONFIG_MAX_BYTES,
+        "config {}: file exceeds {} bytes",
+        path.display(),
+        CONFIG_MAX_BYTES
+    );
+    Ok(out)
 }
 
 pub fn workspace_sidebar_hotkey_pool() -> &'static [char] {
@@ -232,30 +261,23 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
 
         let mounts = merge_mounts(&defaults.mounts, &session_state_mounts, &profile.mounts);
 
+        // Prefer the profile's value for an `Option` field, else the default's.
+        macro_rules! prefer {
+            ($field:ident) => {
+                profile.$field.clone().or_else(|| defaults.$field.clone())
+            };
+        }
+
         resolved.push(crate::config::ContainerDef {
             name: profile_name.clone(),
             profile: None,
             image: image_tag,
-            mount_target: profile
-                .mount_target
-                .clone()
-                .or_else(|| defaults.mount_target.clone())
-                .unwrap_or_else(default_mount_target),
+            mount_target: prefer!(mount_target).unwrap_or_else(default_mount_target),
             command: profile.command.clone(),
-            grayscale_palette: profile
-                .grayscale_palette
-                .or(defaults.grayscale_palette)
-                .unwrap_or(false),
-            mouse_scroll: profile
-                .mouse_scroll
-                .or(defaults.mouse_scroll)
-                .unwrap_or_default(),
+            grayscale_palette: prefer!(grayscale_palette).unwrap_or(false),
             starter_network_allowlist: profile.starter_network_allowlist.clone(),
             mcp_log_paths: merge_unique_paths(&defaults.mcp_log_paths, &profile.mcp_log_paths),
-            mcp_log_pattern: profile
-                .mcp_log_pattern
-                .clone()
-                .or_else(|| defaults.mcp_log_pattern.clone()),
+            mcp_log_pattern: prefer!(mcp_log_pattern),
             mounts,
             env: merge_env_vars(&defaults.env, &profile.env),
             env_passthrough: merge_unique_strings(
@@ -268,12 +290,9 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
                 &defaults.localhost_forwards,
                 &profile.localhost_forwards,
             ),
-            memory: profile.memory.clone().or_else(|| defaults.memory.clone()),
-            cpus: profile.cpus.clone().or_else(|| defaults.cpus.clone()),
-            shm_size: profile
-                .shm_size
-                .clone()
-                .or_else(|| defaults.shm_size.clone()),
+            memory: prefer!(memory),
+            cpus: prefer!(cpus),
+            shm_size: prefer!(shm_size),
             image_stem,
         });
     }
@@ -300,6 +319,11 @@ fn validate_docker_dir(config: &Config, config_path: &Path) -> Result<()> {
 
 fn canonicalize_workspace_paths(config: &mut Config) -> Result<()> {
     for proj in &mut config.workspaces {
+        anyhow::ensure!(
+            !proj.canonical_path.as_os_str().is_empty(),
+            "project '{}': canonical_path is required",
+            proj.name
+        );
         proj.canonical_path = proj.canonical_path.canonicalize().with_context(|| {
             format!(
                 "project '{}': canonical_path is not accessible: {}",
@@ -307,8 +331,48 @@ fn canonicalize_workspace_paths(config: &mut Config) -> Result<()> {
                 proj.canonical_path.display()
             )
         })?;
+        reject_sensitive_workspace_path(&proj.name, &proj.canonical_path)?;
     }
     Ok(())
+}
+
+/// Refuse workspaces whose canonical path equals or lives under user-secret or
+/// system-config directories. Mounting these into a container as `/workspace`
+/// rw would let any agent CLI exfiltrate or rewrite the host's credentials.
+fn reject_sensitive_workspace_path(name: &str, canonical: &Path) -> Result<()> {
+    let mut sensitive: Vec<PathBuf> = vec![PathBuf::from("/etc")];
+    if let Some(home) = dirs::home_dir() {
+        sensitive.push(home.join(".ssh"));
+        sensitive.push(home.join(".gnupg"));
+    }
+    for s in &sensitive {
+        // Canonicalize the sensitive root too so we compare apples to apples
+        // (e.g. `/etc` may itself be a symlink on some distros).
+        let s_can = s.canonicalize();
+        let s_ref: &Path = s_can.as_deref().unwrap_or(s.as_path());
+        if canonical == s_ref || canonical.starts_with(s_ref) {
+            anyhow::bail!(
+                "project '{}': canonical_path {} resolves under a sensitive directory ({}); refusing to mount",
+                name,
+                canonical.display(),
+                s_ref.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Concatenate `parts` in order, keeping the first item for which `eq` finds no
+/// earlier duplicate (i.e. base takes precedence over profile over override).
+/// Shared by the list-merge helpers below.
+fn merge_dedup<T: Clone>(parts: &[&[T]], eq: impl Fn(&T, &T) -> bool) -> Vec<T> {
+    let mut out: Vec<T> = Vec::new();
+    for item in parts.iter().flat_map(|part| part.iter()) {
+        if !out.iter().any(|existing| eq(existing, item)) {
+            out.push(item.clone());
+        }
+    }
+    out
 }
 
 pub(crate) fn merge_unique_strings(
@@ -316,23 +380,11 @@ pub(crate) fn merge_unique_strings(
     profile: &[String],
     override_items: &[String],
 ) -> Vec<String> {
-    let mut out = Vec::new();
-    for s in base.iter().chain(profile).chain(override_items) {
-        if !out.iter().any(|v| v == s) {
-            out.push(s.clone());
-        }
-    }
-    out
+    merge_dedup(&[base, profile, override_items], |a, b| a == b)
 }
 
 pub(crate) fn merge_unique_paths(base: &[PathBuf], profile: &[PathBuf]) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for path in base.iter().chain(profile) {
-        if !out.iter().any(|existing| existing == path) {
-            out.push(path.clone());
-        }
-    }
-    out
+    merge_dedup(&[base, profile], |a, b| a == b)
 }
 
 fn merge_env_vars(
@@ -373,16 +425,9 @@ pub(crate) fn merge_mounts(
     profile: &[ContainerMount],
     override_items: &[ContainerMount],
 ) -> Vec<ContainerMount> {
-    let mut out = Vec::new();
-    for m in base.iter().chain(profile).chain(override_items) {
-        let dup = out.iter().any(|x: &ContainerMount| {
-            x.host == m.host && x.container == m.container && x.mode == m.mode
-        });
-        if !dup {
-            out.push(m.clone());
-        }
-    }
-    out
+    merge_dedup(&[base, profile, override_items], |a, b| {
+        a.host == b.host && a.container == b.container && a.mode == b.mode
+    })
 }
 
 fn shared_session_state_mounts() -> Result<Vec<ContainerMount>> {
@@ -395,21 +440,29 @@ fn shared_session_state_mounts() -> Result<Vec<ContainerMount>> {
         ("~/.gemini", "/home/coder/.gemini"),
         ("~/.pi", "/home/coder/.pi"),
     ] {
-        mounts.push(shared_session_mount(host, container)?);
+        // Skip mounts whose host source does not exist rather than asking
+        // Docker to bind a missing path (which silently creates a root-owned
+        // empty dir on the host, or fails the run outright).
+        if let Some(mount) = shared_session_mount(host, container)? {
+            mounts.push(mount);
+        }
     }
     Ok(mounts)
 }
 
-fn shared_session_mount(host: &str, container: &str) -> Result<ContainerMount> {
+fn shared_session_mount(host: &str, container: &str) -> Result<Option<ContainerMount>> {
     let host = expand_path(Path::new(host))?;
-    Ok(ContainerMount {
+    if !host.exists() {
+        return Ok(None);
+    }
+    Ok(Some(ContainerMount {
         host: host.clone(),
         container: PathBuf::from(container),
         mode: Default::default(),
         // Unset: the `.claude.json` mount picks up the seed-by-default heuristic
         // in container::spawn; the directory mounts (.claude, .codex, …) don't.
         seed: None,
-    })
+    }))
 }
 
 pub fn image_tag_for_stem(stem: &str) -> String {
@@ -622,15 +675,69 @@ fn ensure_logging_instance_id(path: &Path, raw: &str, config: &mut Config) -> Re
         .parse()
         .with_context(|| format!("parsing config document: {}", path.display()))?;
     doc["logging"]["instance_id"] = value(instance_id.clone());
-    std::fs::write(path, doc.to_string())
+    let rendered = doc.to_string();
+    atomic_write_with_lock(path, rendered.as_bytes())
         .with_context(|| format!("writing config: {}", path.display()))?;
     config.logging.instance_id = Some(instance_id);
     Ok(())
 }
 
+/// Atomically write `contents` to `path` under an advisory exclusive file lock
+/// taken on a sibling lockfile. The write goes to a tmp file in the same
+/// directory (so `rename` is atomic on a single filesystem), is `fsync`'d, then
+/// renamed over the destination.
+pub(crate) fn atomic_write_with_lock(path: &Path, contents: &[u8]) -> Result<()> {
+    use fs2::FileExt;
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    std::fs::create_dir_all(&parent)
+        .with_context(|| format!("creating parent dir: {}", parent.display()))?;
+
+    // Advisory lock co-located with the config so two harness processes serialize.
+    let lock_path = path.with_extension({
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        if ext.is_empty() {
+            "lock".to_string()
+        } else {
+            format!("{ext}.lock")
+        }
+    });
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("opening lock file: {}", lock_path.display()))?;
+    FileExt::lock_exclusive(&lock_file)
+        .with_context(|| format!("acquiring lock: {}", lock_path.display()))?;
+
+    let mut tmp = tempfile::NamedTempFile::new_in(&parent)
+        .with_context(|| format!("creating tmp file in {}", parent.display()))?;
+    tmp.write_all(contents)
+        .with_context(|| format!("writing tmp file in {}", parent.display()))?;
+    tmp.as_file()
+        .sync_all()
+        .with_context(|| format!("fsyncing tmp file in {}", parent.display()))?;
+    tmp.persist(path)
+        .map_err(|e| anyhow::anyhow!("renaming tmp file over {}: {}", path.display(), e.error))?;
+
+    // Best-effort: unlock on drop. Explicit unlock here is unnecessary because
+    // `lock_file` dropping releases the lock.
+    drop(lock_file);
+    Ok(())
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Expand `~` at the start of a path.
+/// Expand `~` at the start of a path. `~user/foo` patterns are explicitly
+/// rejected — silently treating them as a literal path would surprise users
+/// who expect shell-style expansion.
 pub fn expand_path(path: &Path) -> Result<PathBuf> {
     let s = path.to_string_lossy();
     if let Some(rest) = s.strip_prefix("~/") {
@@ -638,6 +745,12 @@ pub fn expand_path(path: &Path) -> Result<PathBuf> {
         Ok(home.join(rest))
     } else if s == "~" {
         dirs::home_dir().context("cannot determine home directory")
+    } else if s.starts_with('~') {
+        anyhow::bail!(
+            "path {:?} uses ~user-style expansion which is not supported; \
+             use an explicit /home/<user>/... path or set $HOME",
+            path
+        )
     } else {
         Ok(path.to_path_buf())
     }

@@ -2,11 +2,12 @@
 mod tests {
     use crate::ca::CaStore;
     use crate::proxy::core::{NetworkDecision, ProxyState, SourceIdentityStatus, SourcePriority};
+    use crate::proxy::connect::parse_sni_from_tls_client_hello;
     use crate::proxy::helpers::{
-        bypass_host_matches, container_tls_passthrough_match,
+        bypass_host_matches, canonicalize_host, container_tls_passthrough_match,
         decode_source_from_proxy_authorization, ensure_host_header_matches_target,
-        format_byte_count, proxy_authorization_matches_token, resolve_public_addrs,
-        split_host_port,
+        format_byte_count, is_valid_signing_host, proxy_authorization_matches_token,
+        resolve_public_addrs, split_host_port,
     };
     use crate::proxy::http::{prompt_network, read_body_any};
     use crate::shared_config::SharedConfig;
@@ -89,13 +90,11 @@ image = "default"
         let ca = Arc::new(CaStore::load_or_create(&ca_dir).unwrap());
         let raw = r#"
 docker_dir = "/tmp"
-[workspace]
-
 [manager]
 global_rules_file = "/tmp/global.toml""#;
         let cfg: crate::config::Config = toml::from_str(raw).unwrap();
         let (pending_tx, _pending_rx) = mpsc::channel(1);
-        let (activity_tx, _activity_rx) = mpsc::unbounded_channel();
+        let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state = ProxyState::new(
             ca,
             SharedConfig::new(Arc::new(cfg)),
@@ -135,13 +134,11 @@ global_rules_file = "/tmp/global.toml""#;
         let ca = Arc::new(CaStore::load_or_create(&ca_dir).unwrap());
         let raw = r#"
 docker_dir = "/tmp"
-[workspace]
-
 [manager]
 global_rules_file = "/tmp/global.toml""#;
         let cfg: crate::config::Config = toml::from_str(raw).unwrap();
         let (pending_tx, _pending_rx) = mpsc::channel(1);
-        let (activity_tx, _activity_rx) = mpsc::unbounded_channel();
+        let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state = ProxyState::new(
             ca,
             SharedConfig::new(Arc::new(cfg)),
@@ -179,13 +176,11 @@ global_rules_file = "/tmp/global.toml""#;
             Arc::new(CaStore::load_or_create(&std::env::temp_dir().join("proxy-test-ca")).unwrap());
         let raw = r#"
 docker_dir = "/tmp"
-[workspace]
-
 [manager]
 global_rules_file = "/tmp/global.toml""#;
         let cfg: crate::config::Config = toml::from_str(raw).unwrap();
         let (pending_tx, _pending_rx) = mpsc::channel(1);
-        let (activity_tx, _activity_rx) = mpsc::unbounded_channel();
+        let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state = ProxyState::new(
             ca,
             SharedConfig::new(Arc::new(cfg)),
@@ -218,13 +213,11 @@ global_rules_file = "/tmp/global.toml""#;
             Arc::new(CaStore::load_or_create(&std::env::temp_dir().join("proxy-test-ca")).unwrap());
         let raw = r#"
 docker_dir = "/tmp"
-[workspace]
-
 [manager]
 global_rules_file = "/tmp/global.toml""#;
         let cfg: crate::config::Config = toml::from_str(raw).unwrap();
         let (pending_tx, _pending_rx) = mpsc::channel(1);
-        let (activity_tx, _activity_rx) = mpsc::unbounded_channel();
+        let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state = ProxyState::new(
             ca,
             SharedConfig::new(Arc::new(cfg)),
@@ -256,13 +249,11 @@ global_rules_file = "/tmp/global.toml""#;
             Arc::new(CaStore::load_or_create(&std::env::temp_dir().join("proxy-test-ca")).unwrap());
         let raw = r#"
 docker_dir = "/tmp"
-[workspace]
-
 [manager]
 global_rules_file = "/tmp/global.toml""#;
         let cfg: crate::config::Config = toml::from_str(raw).unwrap();
         let (pending_tx, _pending_rx) = mpsc::channel(1);
-        let (activity_tx, _activity_rx) = mpsc::unbounded_channel();
+        let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state = ProxyState::new(
             ca,
             SharedConfig::new(Arc::new(cfg)),
@@ -417,12 +408,10 @@ global_rules_file = "/tmp/global.toml""#;
         // Wait, I can just use build_test_app logic if I want but let's just make a dummy config.
         let raw = r#"
 docker_dir = "/tmp"
-[workspace]
-
 [manager]
 global_rules_file = "/tmp/global.toml""#;
         let cfg: crate::config::Config = toml::from_str(raw).unwrap();
-        let (activity_tx, _activity_rx) = mpsc::unbounded_channel();
+        let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state = ProxyState::new(
             ca,
             SharedConfig::new(Arc::new(cfg)),
@@ -460,5 +449,95 @@ global_rules_file = "/tmp/global.toml""#;
 
         let result = prompt_task.await.unwrap();
         assert!(result, "prompt_network should return true for Allow");
+    }
+
+    #[test]
+    fn is_valid_signing_host_accepts_hostnames_and_ips() {
+        assert!(is_valid_signing_host("example.com"));
+        assert!(is_valid_signing_host("sub.example.com"));
+        assert!(is_valid_signing_host("xn--nxasmq6b.example"));
+        assert!(is_valid_signing_host("127.0.0.1"));
+        assert!(is_valid_signing_host("::1"));
+    }
+
+    #[test]
+    fn is_valid_signing_host_rejects_malformed_hosts() {
+        assert!(!is_valid_signing_host(""));
+        assert!(!is_valid_signing_host("-leadinghyphen.com"));
+        assert!(!is_valid_signing_host("trailinghyphen-.com"));
+        assert!(!is_valid_signing_host("has space.com"));
+        assert!(!is_valid_signing_host("under_score.com"));
+        assert!(!is_valid_signing_host("emp..ty"));
+        // Replacement char from a lossy decode must never reach the signer.
+        assert!(!is_valid_signing_host("ex\u{fffd}ample.com"));
+        assert!(!is_valid_signing_host(&"a".repeat(254)));
+    }
+
+    #[test]
+    fn canonicalize_host_normalizes_case_dot_and_idna() {
+        assert_eq!(canonicalize_host("EXAMPLE.COM").unwrap(), "example.com");
+        assert_eq!(canonicalize_host("example.com.").unwrap(), "example.com");
+        // Unicode is IDNA-encoded to its punycode A-label.
+        assert_eq!(canonicalize_host("bücher.example").unwrap(), "xn--bcher-kva.example");
+        assert!(canonicalize_host("").is_err());
+        assert!(canonicalize_host("bad host").is_err());
+    }
+
+    #[test]
+    fn sni_parser_rejects_non_ascii_names() {
+        // Minimal TLS 1.2 ClientHello carrying a single SNI host_name extension.
+        fn client_hello_with_sni(name: &[u8]) -> Vec<u8> {
+            let mut ext_body = Vec::new();
+            let entry_len = 3 + name.len();
+            ext_body.extend_from_slice(&(entry_len as u16).to_be_bytes()); // server_name_list len
+            ext_body.push(0); // name_type = host_name
+            ext_body.extend_from_slice(&(name.len() as u16).to_be_bytes());
+            ext_body.extend_from_slice(name);
+
+            let mut ext = Vec::new();
+            ext.extend_from_slice(&0x0000u16.to_be_bytes()); // ext type = server_name
+            ext.extend_from_slice(&(ext_body.len() as u16).to_be_bytes());
+            ext.extend_from_slice(&ext_body);
+
+            let mut body = Vec::new();
+            body.extend_from_slice(&[0x03, 0x03]); // client_version
+            body.extend_from_slice(&[0u8; 32]); // random
+            body.push(0); // session_id len
+            body.extend_from_slice(&2u16.to_be_bytes()); // cipher_suites len
+            body.extend_from_slice(&[0x00, 0x2f]);
+            body.push(1); // compression methods len
+            body.push(0);
+            body.extend_from_slice(&(ext.len() as u16).to_be_bytes()); // extensions len
+            body.extend_from_slice(&ext);
+
+            let mut hs = Vec::new();
+            hs.push(0x01); // handshake type = ClientHello
+            let len = body.len();
+            hs.push((len >> 16) as u8);
+            hs.push((len >> 8) as u8);
+            hs.push(len as u8);
+            hs.extend_from_slice(&body);
+
+            let mut record = Vec::new();
+            record.push(0x16); // handshake record
+            record.extend_from_slice(&[0x03, 0x01]); // record version
+            record.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+            record.extend_from_slice(&hs);
+            record
+        }
+
+        assert_eq!(
+            parse_sni_from_tls_client_hello(&client_hello_with_sni(b"example.com")).as_deref(),
+            Some("example.com")
+        );
+        // Invalid UTF-8 / non-ASCII SNI is rejected rather than lossily mapped.
+        assert_eq!(
+            parse_sni_from_tls_client_hello(&client_hello_with_sni(&[0xff, 0xfe, b'.', b'x'])),
+            None
+        );
+        assert_eq!(
+            parse_sni_from_tls_client_hello(&client_hello_with_sni("café.example".as_bytes())),
+            None
+        );
     }
 }

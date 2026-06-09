@@ -138,7 +138,6 @@ impl App {
                 }
                 self.active_session = Some(new_si);
                 self.scroll_mode = false;
-                self.scroll_mouse_passthrough = false;
                 self.terminal_scroll = 0;
                 self.focus = Focus::Terminal;
                 self.add_session_terminal(group_idx, new_si);
@@ -184,7 +183,6 @@ mod tests {
                 "htop".to_string(),
             ]),
             grayscale_palette: false,
-            mouse_scroll: crate::config::MouseScrollMode::Auto,
             starter_network_allowlist: Vec::new(),
             mcp_log_paths: Vec::new(),
             mcp_log_pattern: None,
@@ -218,7 +216,6 @@ mod tests {
             mount_target: default_mount_target(),
             command: None,
             grayscale_palette: true,
-            mouse_scroll: crate::config::MouseScrollMode::Auto,
             starter_network_allowlist: Vec::new(),
             mcp_log_paths: Vec::new(),
             mcp_log_pattern: None,

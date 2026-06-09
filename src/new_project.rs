@@ -95,7 +95,10 @@ pub fn default_rules(project_type: ProjectType) -> ProjectRules {
     }
 }
 
-/// Append a workspace block to `harness-hat.toml` using the built-in template.
+/// Append a workspace block to `harness-hat.toml` using `toml_edit` to
+/// preserve formatting and avoid corruption from partial writes. The write
+/// goes through an advisory file lock + tmp-rename like the rest of the
+/// config-mutation path.
 pub fn append_project_block(
     config_path: &Path,
     project_name: &str,
@@ -106,31 +109,55 @@ pub fn append_project_block(
         !project_name.trim().is_empty(),
         "workspace name must not be empty"
     );
+    // Validate that name and canonical path can be encoded as TOML basic
+    // strings even though `toml_edit` is doing the actual encoding now —
+    // rejects control chars and newlines that would otherwise round-trip
+    // through `toml_edit::value` but render misleadingly elsewhere.
+    let _ = toml_basic_string(project_name)?;
+    let canonical_display = canonical_path.display().to_string();
+    let _ = toml_basic_string(&canonical_display)?;
 
-    let name = toml_basic_string(project_name)?;
-    let canonical = toml_basic_string(&canonical_path.display().to_string())?;
+    let raw = match std::fs::read_to_string(config_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!("reading config for append: {}", config_path.display())
+            });
+        }
+    };
+    let mut doc = raw
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("parsing config document: {}", config_path.display()))?;
 
-    let hotkey_line = sidebar_hotkey
-        .map(|ch| format!("sidebar_hotkey = \"{}\"\n", ch.to_ascii_lowercase()))
-        .unwrap_or_default();
+    let mut new_table = toml_edit::Table::new();
+    new_table["name"] = toml_edit::value(project_name.to_string());
+    new_table["canonical_path"] = toml_edit::value(canonical_display);
+    if let Some(ch) = sidebar_hotkey {
+        new_table["sidebar_hotkey"] = toml_edit::value(ch.to_ascii_lowercase().to_string());
+    }
 
-    let block = format!(
-        r#"
+    // Ensure `workspaces` exists and is an array-of-tables; if absent, seed
+    // it. Then push the new table.
+    if doc.get("workspaces").is_none() {
+        doc.insert(
+            "workspaces",
+            toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()),
+        );
+    }
+    let workspaces = doc
+        .get_mut("workspaces")
+        .and_then(|i| i.as_array_of_tables_mut())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}: [[workspaces]] is not an array of tables; refusing to append",
+                config_path.display()
+            )
+        })?;
+    workspaces.push(new_table);
 
-[[workspaces]]
-name = {name}
-canonical_path = {canonical}
-{hotkey_line}"#
-    );
-
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(config_path)
-        .with_context(|| format!("opening config for append: {}", config_path.display()))?;
-    f.write_all(block.as_bytes())
-        .with_context(|| format!("appending to {}", config_path.display()))?;
+    crate::config::atomic_write_with_lock(config_path, doc.to_string().as_bytes())
+        .with_context(|| format!("appending workspace to {}", config_path.display()))?;
     Ok(())
 }
 
@@ -183,6 +210,19 @@ fn toml_basic_string(s: &str) -> Result<String> {
         !s.contains('\n') && !s.contains('\r'),
         "value must not contain newlines"
     );
+    // TOML basic strings forbid all control characters below 0x20 (and DEL,
+    // U+007F) except `\t`. Reject these explicitly rather than emitting a
+    // string that the config parser would later reject — and that would
+    // otherwise have the chance to silently corrupt the file.
+    if let Some(bad) = s
+        .chars()
+        .find(|c| (*c < ' ' && *c != '\t') || *c == '\u{7f}')
+    {
+        anyhow::bail!(
+            "value must not contain control character U+{:04X}",
+            bad as u32
+        );
+    }
     let escaped = s.replace('\\', "\\\\").replace('\"', "\\\"");
     Ok(format!("\"{escaped}\""))
 }
@@ -284,8 +324,6 @@ mod tests {
             r#"
 docker_dir = "{}"
 
-[workspace]
-
 [manager]
 global_rules_file = "{}"
 "#,
@@ -318,8 +356,6 @@ global_rules_file = "{}"
         let raw = format!(
             r#"
 docker_dir = "{}"
-
-[workspace]
 
 [manager]
 global_rules_file = "{}"

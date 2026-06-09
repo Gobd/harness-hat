@@ -83,13 +83,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
 pub(crate) fn status_bar_keys(app: &App) -> &'static str {
     match app.focus {
-        Focus::Sidebar => {
-            if app.build_is_running() {
-                " [↑↓]navigate  [↵]select  [A-Z/0-9]workspace  [^C/^Q]quit  [Alt+o]log"
-            } else {
-                " [↑↓]navigate  [↵]select  [A-Z/0-9]workspace  [^C/^Q]quit  [Alt+o]log"
-            }
-        }
+        Focus::Sidebar => " [↑↓]navigate  [↵]select  [A-Z/0-9]workspace  [^C/^Q]quit  [Alt+o]log",
         Focus::Terminal => " [k]stop container  [Esc/^B]sidebar  [^C/^Q]quit  [Alt+o]log",
         Focus::Activity if app.scroll_mode => {
             " SCROLL: [↑↓/jk]line  [PgUp/PgDn]page  [g/G]top/bottom  [Esc/q]exit scroll"

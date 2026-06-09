@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Parser)]
-#[command(name = "harness-hat", version, about = "Harness Hat — manager UI")]
+#[command(name = "hh", version, about = "Harness Hat — manager UI")]
 struct CliOptions {
     /// Path to config file. Used by the interactive workspace manager (the
     /// default action when no subcommand is given).
@@ -43,7 +43,7 @@ pub fn parse() -> Result<Cli> {
 }
 
 pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
-    const USAGE: &str = "Usage: harness-hat [--config PATH] [init [PATH] | shell [ID]]";
+    const USAGE: &str = "Usage: hh [--config PATH] [init [PATH] | shell [ID]]";
     if raw.is_empty() {
         bail!("missing argv[0]. {USAGE}");
     }

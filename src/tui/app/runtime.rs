@@ -2,6 +2,13 @@ use super::*;
 
 impl App {
     const MAX_PENDING_NETWORK_APPROVALS: usize = 64;
+    /// Per-source ceiling: a single workspace / source container cannot occupy
+    /// more than this many slots in `pending_net`. Without this, one rogue
+    /// session-token holder can hold every global slot for the full prompt
+    /// timeout (M3). 8 is small enough that other sources still get queued
+    /// before the global cap; large enough to absorb a normal burst of
+    /// concurrent fetches.
+    const MAX_PENDING_NETWORK_APPROVALS_PER_SOURCE: usize = 8;
 
     pub(crate) fn drain_channels(&mut self) {
         let activity_selected_before = {
@@ -77,14 +84,26 @@ impl App {
                     error,
                     diagnostic,
                 }) => {
-                    self.build_task = None;
+                    let command = self
+                        .build_task
+                        .take()
+                        .map(|task| task.shell_command)
+                        .unwrap_or_default();
                     if let Some(error) = error {
                         self.build_project_idx = None;
                         self.build_session_group = None;
                         self.push_log(format!("{label} failed: {error}"), true);
-                        if let Some(diagnostic) = diagnostic {
+                        if let Some(diagnostic) = &diagnostic {
                             self.push_log(format!("  build detail: {diagnostic}"), true);
                         }
+                        // Prefer the spawn error as the headline diagnostic.
+                        let diagnostic = Some(error);
+                        self.build_finished = Some(BuildFinished {
+                            command,
+                            cancelled: false,
+                            exit_code,
+                            diagnostic,
+                        });
                         self.focus = Focus::ImageBuild;
                         continue;
                     }
@@ -92,12 +111,19 @@ impl App {
                         self.build_project_idx = None;
                         self.build_session_group = None;
                         self.push_log(format!("{label} cancelled"), true);
+                        self.build_finished = Some(BuildFinished {
+                            command,
+                            cancelled: true,
+                            exit_code,
+                            diagnostic,
+                        });
                         self.focus = Focus::ImageBuild;
                         continue;
                     }
                     if success {
                         self.build_project_idx = None;
                         self.build_session_group = None;
+                        self.build_finished = None;
                         self.push_log(format!("{label} finished successfully"), false);
                         self.build_container_idx = None;
                         self.do_launch_container_on_project_with_priority(
@@ -113,9 +139,15 @@ impl App {
                             .map(|code| format!(" (exit code {code})"))
                             .unwrap_or_default();
                         self.push_log(format!("{label} failed{suffix}"), true);
-                        if let Some(diagnostic) = diagnostic {
+                        if let Some(diagnostic) = &diagnostic {
                             self.push_log(format!("  build detail: {diagnostic}"), true);
                         }
+                        self.build_finished = Some(BuildFinished {
+                            command,
+                            cancelled: false,
+                            exit_code,
+                            diagnostic,
+                        });
                         self.focus = Focus::ImageBuild;
                     }
                 }
@@ -212,20 +244,45 @@ impl App {
             return;
         }
 
+        // Per-source quota check (M3). "Source" = `source_project` when set,
+        // otherwise the source container's identity — that's the strongest
+        // attribution we have for unauthenticated proxy clients. Items with no
+        // source at all share a single bucket so an attacker can't bypass the
+        // cap by simply omitting attribution.
+        let source_key = pending_network_source_key(&item);
+        let per_source_count = self
+            .pending_net
+            .iter()
+            .filter(|pending| pending_network_source_key(pending) == source_key)
+            .count();
+        if per_source_count >= Self::MAX_PENDING_NETWORK_APPROVALS_PER_SOURCE {
+            return self.reject_pending_network_overflow(
+                item,
+                "too many pending network approvals from this source",
+            );
+        }
+
         if self.pending_net.len() < Self::MAX_PENDING_NETWORK_APPROVALS {
             self.pending_net.push(item);
             return;
         }
 
+        self.reject_pending_network_overflow(item, "too many pending network approvals");
+    }
+
+    fn reject_pending_network_overflow(
+        &mut self,
+        item: crate::proxy::PendingNetworkItem,
+        reason: &'static str,
+    ) {
         let activity_id = item.activity_id.clone();
-        let mut item = item;
-        crate::tui::app::approvals::send_pending_network_decision(
-            &mut item,
+        crate::tui::app::approvals::send_pending_network_decision_owned(
+            item,
             crate::proxy::NetworkDecision::Deny,
         );
         if let Some(activity) = self.activity_by_id_mut(&activity_id) {
             activity.state = crate::activity::ActivityState::Denied;
-            activity.status = Some("too many pending network approvals".to_string());
+            activity.status = Some(reason.to_string());
             activity.updated_at = std::time::Instant::now();
             activity.finished_at = Some(activity.updated_at);
             activity.terminal_unselected_at = None;
@@ -246,4 +303,18 @@ fn pending_network_merge_key_matches(
         && left.host.eq_ignore_ascii_case(&right.host)
         && left.port == right.port
         && left.path == right.path
+}
+
+/// Stable key used to count "how many pending approvals does this source
+/// already hold." Prefers an explicit `source_project`; falls back to the
+/// source container identity, then to a shared "unknown" bucket so requests
+/// with no attribution can't dodge the quota by being anonymous (M3).
+fn pending_network_source_key(item: &crate::proxy::PendingNetworkItem) -> String {
+    if let Some(project) = item.source_project.as_deref() {
+        return format!("project:{project}");
+    }
+    if let Some(container) = item.source_container.as_deref() {
+        return format!("container:{container}");
+    }
+    "unknown".to_string()
 }

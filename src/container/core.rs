@@ -20,7 +20,7 @@ use tempfile::NamedTempFile;
 
 use crate::config::MountMode;
 use crate::container::helpers::{blend_toward_bg, luma_u8, xterm_256_index_to_rgb};
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 const INPUT_ECHO_GRACE: Duration = Duration::from_millis(350);
 
@@ -36,6 +36,17 @@ pub const LABEL_SESSION: &str = "harness-hat.session";
 pub const SHELL_USER: &str = "1000:1000";
 pub const SHELL_HOME: &str = "/home/coder";
 
+/// Build a [`WindowSize`] for a character grid. Cell pixel dimensions are left
+/// at zero since the PTY is driven purely by row/column counts.
+pub(crate) fn window_size(num_lines: u16, num_cols: u16) -> WindowSize {
+    WindowSize {
+        num_lines,
+        num_cols,
+        cell_width: 0,
+        cell_height: 0,
+    }
+}
+
 /// Extract a single label value from a docker `{{.Labels}}` line, which is a
 /// comma-separated list of `key=value` pairs.
 pub fn parse_docker_label(labels: &str, key: &str) -> Option<String> {
@@ -48,7 +59,6 @@ pub fn parse_docker_label(labels: &str, key: &str) -> Option<String> {
 /// Live container session state and PTY plumbing for a launched container.
 pub struct ContainerSession {
     pub container_name: String,
-    pub mouse_scroll: crate::config::MouseScrollMode,
     pub container_id: String,
     pub docker_name: String,
     /// Short random id (zero-padded 4 digits) used by `hh shell <alias>`.
@@ -104,12 +114,11 @@ impl EventListener for SessionEventProxy {
             }
             Event::TextAreaSizeRequest(formatter) => {
                 if let Some(tx) = sender {
-                    let size = self.window_size.lock().map(|s| *s).unwrap_or(WindowSize {
-                        num_lines: 24,
-                        num_cols: 80,
-                        cell_width: 0,
-                        cell_height: 0,
-                    });
+                    let size = self
+                        .window_size
+                        .lock()
+                        .map(|s| *s)
+                        .unwrap_or_else(|_| window_size(24, 80));
                     let _ = tx.send(Msg::Input(formatter(size).into_bytes().into()));
                 }
             }
@@ -255,22 +264,47 @@ impl ContainerSession {
 
     /// Forcibly terminates the Docker container associated with this session.
     ///
-    /// Uses `docker rm -f` to stop and remove the container. The command's output
-    /// is discarded, and any errors during `docker rm` are suppressed.
-    pub fn terminate(&self) {
+    /// Uses `docker rm -f` to stop and remove the container. Non-zero exits and
+    /// spawn failures are surfaced as `Err` and additionally logged at `warn!`
+    /// level so an orphaned container is visible in operator logs.
+    pub fn terminate(&self) -> anyhow::Result<()> {
         let target = if !self.container_id.is_empty() {
             &self.container_id
         } else {
             &self.docker_name
         };
         if target.is_empty() || target == "unknown" {
-            return;
+            return Ok(());
         }
-        let _ = std::process::Command::new("docker")
+        let output = std::process::Command::new("docker")
             .args(["rm", "-f", target])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output();
+        match output {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                warn!(
+                    target = %target,
+                    status = ?out.status.code(),
+                    stdout = %stdout.trim(),
+                    stderr = %stderr.trim(),
+                    "docker rm -f failed; container may be orphaned"
+                );
+                anyhow::bail!(
+                    "docker rm -f {} exited with {:?}: {}",
+                    target,
+                    out.status.code(),
+                    stderr.trim()
+                );
+            }
+            Err(e) => {
+                warn!(target = %target, error = %e, "failed to spawn docker rm");
+                Err(anyhow::anyhow!("failed to spawn docker rm for {}: {}", target, e))
+            }
+        }
     }
 
     /// Resizes the terminal window within the container.
@@ -283,12 +317,7 @@ impl ContainerSession {
                 return Ok(());
             }
         }
-        let ws = WindowSize {
-            num_lines: rows,
-            num_cols: cols,
-            cell_width: 0,
-            cell_height: 0,
-        };
+        let ws = window_size(rows, cols);
         if let Ok(mut s) = self.window_size.lock() {
             *s = ws;
         }
@@ -352,13 +381,34 @@ fn terminal_bottom_lines<T: EventListener>(term: &Term<T>, rows: usize) -> Vec<S
         .collect()
 }
 
-/// Rewrites loopback addresses (127.0.0.1, localhost, 0.0.0.0) to `host.docker.internal`
-/// for reliable container-to-host communication.
-#[instrument(level = "trace", skip(url))]
-pub(crate) fn loopback_to_host_docker(url: &str) -> String {
-    url.replace("127.0.0.1", "host.docker.internal")
-        .replace("localhost", "host.docker.internal")
-        .replace("0.0.0.0", "host.docker.internal")
+/// Rewrites loopback addresses (`127.0.0.1`, `localhost`, `0.0.0.0`) to
+/// `host.docker.internal` for reliable container-to-host communication.
+///
+/// Parses the URL with `url::Url` and rewrites only the **host** component —
+/// the naive string `replace()` this superseded would clobber any path/query
+/// segment containing `localhost` (e.g. `http://api/?host=localhost`). When
+/// parsing fails we fall back to the original string unchanged so we don't
+/// silently corrupt non-URL inputs.
+#[instrument(level = "trace", skip(input))]
+pub(crate) fn loopback_to_host_docker(input: &str) -> String {
+    let Ok(parsed) = url::Url::parse(input) else {
+        return input.to_string();
+    };
+    let host = match parsed.host_str() {
+        Some(h @ ("localhost" | "127.0.0.1" | "0.0.0.0")) => h,
+        _ => return input.to_string(),
+    };
+    // Replace only the host token in the original string, preserving the rest
+    // (scheme, userinfo, port, path) byte-for-byte. We deliberately do NOT use
+    // `parsed.set_host(...).to_string()`: `url::Url` normalizes an authority-only
+    // URL like `http://127.0.0.1:7878` into `http://127.0.0.1:7878/`, adding a
+    // trailing slash. The container's strict-mode init parses the port out of
+    // `HARNESS_HAT_URL` with naive shell (`${hostport##*:}`), so that slash
+    // becomes part of the port (`7878/`), iptables rejects it, and the
+    // container exits 2. `url::Url` confirms `host` is the authority host, and
+    // our userinfo (a hex token) never equals a loopback literal, so replacing
+    // the first occurrence targets the authority.
+    input.replacen(host, "host.docker.internal", 1)
 }
 
 /// Convert an arbitrary project or container name into a Docker-safe name.
@@ -388,7 +438,7 @@ pub(crate) fn mount_mode_arg(mode: &MountMode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use alacritty_terminal::event::{Event, EventListener, WindowSize};
+    use alacritty_terminal::event::{Event, EventListener};
     use alacritty_terminal::vte::ansi::Rgb;
     use std::sync::{
         Arc, Mutex,
@@ -412,6 +462,42 @@ mod tests {
         // "localhost" was already there, "  " should be ignored
         assert_eq!(out.split(',').filter(|&s| s == "localhost").count(), 1);
         assert!(!out.contains("  "));
+    }
+
+    #[test]
+    fn loopback_to_host_docker_rewrites_host_without_adding_slash() {
+        use crate::container::core::loopback_to_host_docker;
+        // Regression: must NOT add a trailing slash. The container's strict-mode
+        // init parses the port out of HARNESS_HAT_URL with naive shell, so a
+        // normalized `http://host:7878/` would yield port `7878/` and break
+        // iptables (container exits 2).
+        assert_eq!(
+            loopback_to_host_docker("http://127.0.0.1:7878"),
+            "http://host.docker.internal:7878"
+        );
+        assert_eq!(
+            loopback_to_host_docker("http://0.0.0.0:7878"),
+            "http://host.docker.internal:7878"
+        );
+        assert_eq!(
+            loopback_to_host_docker("http://localhost:28781"),
+            "http://host.docker.internal:28781"
+        );
+        // Preserves userinfo and port (proxy URL shape).
+        assert_eq!(
+            loopback_to_host_docker("http://harness-hat:deadbeef@127.0.0.1:50419"),
+            "http://harness-hat:deadbeef@host.docker.internal:50419"
+        );
+        // A genuine trailing slash / path is preserved as-is.
+        assert_eq!(
+            loopback_to_host_docker("http://127.0.0.1:7878/"),
+            "http://host.docker.internal:7878/"
+        );
+        // Non-loopback hosts are untouched, even if a query mentions localhost.
+        assert_eq!(
+            loopback_to_host_docker("http://api.example.com/?h=localhost"),
+            "http://api.example.com/?h=localhost"
+        );
     }
 
     #[test]
@@ -441,12 +527,7 @@ mod tests {
         let has_bell = Arc::new(AtomicBool::new(false));
         let proxy = super::SessionEventProxy {
             sender: Arc::new(Mutex::new(None)),
-            window_size: Arc::new(Mutex::new(WindowSize {
-                num_lines: 24,
-                num_cols: 80,
-                cell_width: 0,
-                cell_height: 0,
-            })),
+            window_size: Arc::new(Mutex::new(super::window_size(24, 80))),
             exited: Arc::new(AtomicBool::new(false)),
             has_bell: has_bell.clone(),
             default_fg: Rgb { r: 0, g: 0, b: 0 },

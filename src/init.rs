@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, bail};
-use reqwest::blocking::Client;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -13,14 +12,18 @@ const TYPESCRIPT_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/typescript.
 const GO_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/go.dockerfile");
 const RUST_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/rust.dockerfile");
 const PHP_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/php.dockerfile");
-const GITHUB_DOCKER_BASE_URL: &str =
-    "https://raw.githubusercontent.com/only-cliches/harness-hat/refs/heads/main/docker";
-const BUILTIN_DOCKERFILES: &[&str] = &[
-    "harness-hat-base.dockerfile",
-    "typescript.dockerfile",
-    "go.dockerfile",
-    "rust.dockerfile",
-    "php.dockerfile",
+
+/// Built-in dockerfile templates compiled into the binary.
+///
+/// The `default.dockerfile` is intentionally omitted because it is meant to be
+/// user-editable and is treated as a regenerable template (only created when
+/// missing — see [`ensure_default_dockerfile`]).
+const BUILTIN_DOCKERFILES: &[(&str, &str)] = &[
+    ("harness-hat-base.dockerfile", BASE_DOCKERFILE_TEMPLATE),
+    ("typescript.dockerfile", TYPESCRIPT_DOCKERFILE_TEMPLATE),
+    ("go.dockerfile", GO_DOCKERFILE_TEMPLATE),
+    ("rust.dockerfile", RUST_DOCKERFILE_TEMPLATE),
+    ("php.dockerfile", PHP_DOCKERFILE_TEMPLATE),
 ];
 
 const KILLME_SCRIPT: &str = include_str!("../docker/scripts/killme.py");
@@ -62,9 +65,7 @@ fn resolve_init_docker_dir(cwd: &Path, home_config_root: &Path) -> PathBuf {
 
 #[instrument(skip(docker_dir))]
 pub fn ensure_docker_assets(docker_dir: &Path) -> Result<()> {
-    ensure_base_dockerfile(docker_dir)?;
-    ensure_default_dockerfile(docker_dir)?;
-    ensure_language_dockerfiles(docker_dir)?;
+    ensure_builtin_dockerfiles(docker_dir)?;
     ensure_helper_scripts(docker_dir)?;
 
     let missing_dockerfiles = missing_builtin_dockerfiles(docker_dir);
@@ -83,7 +84,7 @@ pub fn ensure_docker_assets(docker_dir: &Path) -> Result<()> {
         for file in &missing_dockerfiles {
             println!("    - {}", file.display());
         }
-        println!("  These can be fetched from GitHub automatically.");
+        println!("  These will be written from the installed binary.");
     }
     if !missing_helper_scripts.is_empty() {
         println!("  Missing helper scripts:");
@@ -98,30 +99,23 @@ pub fn ensure_docker_assets(docker_dir: &Path) -> Result<()> {
     }
 
     fs::create_dir_all(docker_dir)?;
-    ensure_base_dockerfile(docker_dir)?;
-    ensure_default_dockerfile(docker_dir)?;
-    ensure_language_dockerfiles(docker_dir)?;
+    ensure_builtin_dockerfiles(docker_dir)?;
     ensure_helper_scripts(docker_dir)?;
-    download_missing_dockerfiles(docker_dir, &missing_dockerfiles)?;
     Ok(())
 }
 
 #[instrument(skip(docker_dir))]
-pub fn ensure_default_dockerfile(docker_dir: &Path) -> Result<()> {
-    let path = docker_dir.join("default.dockerfile");
-    if path.exists() {
-        return Ok(());
-    }
-    write_text_file(&path, DEFAULT_DOCKERFILE_TEMPLATE)
+pub(crate) fn ensure_default_dockerfile(docker_dir: &Path) -> Result<()> {
+    ensure_template_dockerfile(docker_dir, "default.dockerfile", DEFAULT_DOCKERFILE_TEMPLATE)
 }
 
 #[instrument(skip(docker_dir))]
-pub fn ensure_base_dockerfile(docker_dir: &Path) -> Result<()> {
-    let path = docker_dir.join("harness-hat-base.dockerfile");
-    if path.exists() {
-        return Ok(());
-    }
-    write_text_file(&path, BASE_DOCKERFILE_TEMPLATE)
+pub(crate) fn ensure_base_dockerfile(docker_dir: &Path) -> Result<()> {
+    ensure_template_dockerfile(
+        docker_dir,
+        "harness-hat-base.dockerfile",
+        BASE_DOCKERFILE_TEMPLATE,
+    )
 }
 
 #[instrument(skip(docker_dir))]
@@ -152,14 +146,14 @@ fn ensure_template_dockerfile(docker_dir: &Path, name: &str, contents: &str) -> 
 }
 
 #[cfg(test)]
-pub fn builtin_dockerfile_paths() -> &'static [&'static str] {
-    BUILTIN_DOCKERFILES
+pub fn builtin_dockerfile_paths() -> Vec<&'static str> {
+    BUILTIN_DOCKERFILES.iter().map(|(name, _)| *name).collect()
 }
 
 fn missing_builtin_dockerfiles(docker_dir: &Path) -> Vec<PathBuf> {
     BUILTIN_DOCKERFILES
         .iter()
-        .map(|rel| docker_dir.join(rel))
+        .map(|(rel, _)| docker_dir.join(rel))
         .filter(|path| !path.exists())
         .collect()
 }
@@ -188,36 +182,6 @@ pub fn ensure_helper_scripts(docker_dir: &Path) -> Result<()> {
     let scripts_dir = docker_dir.join("scripts");
     fs::create_dir_all(&scripts_dir)?;
     write_text_file(&scripts_dir.join("killme.py"), KILLME_SCRIPT)?;
-    Ok(())
-}
-
-fn download_missing_dockerfiles(docker_dir: &Path, missing: &[PathBuf]) -> Result<()> {
-    if missing.is_empty() {
-        return Ok(());
-    }
-
-    let client = Client::builder()
-        .build()
-        .context("creating HTTP client for docker asset download")?;
-
-    for path in missing {
-        let rel = path
-            .strip_prefix(docker_dir)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let url = format!("{GITHUB_DOCKER_BASE_URL}/{rel}");
-        let response = client
-            .get(&url)
-            .send()
-            .and_then(|resp| resp.error_for_status())
-            .with_context(|| format!("downloading {rel} from GitHub"))?;
-        let text = response
-            .text()
-            .with_context(|| format!("reading {rel} from GitHub"))?;
-        write_text_file(path, &text)?;
-    }
-
     Ok(())
 }
 
@@ -252,7 +216,7 @@ mod tests {
         assert_eq!(parsed.docker_dir, cwd.join("docker"));
 
         assert_eq!(parsed.defaults.control.server_port, 7878);
-        assert_eq!(parsed.defaults.control.server_host, "0.0.0.0");
+        assert_eq!(parsed.defaults.control.server_host, "127.0.0.1");
         for host in [
             "api.anthropic.com",
             "claude.ai",

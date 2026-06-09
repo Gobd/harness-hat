@@ -143,7 +143,6 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
     }
 
     if matches!(picker, ContainerPickerState::NewSessionTemplate { .. }) {
-        let workspace_path = workspace_path;
         lines.push(Line::from(Span::styled(
             format!(
                 "      The host dir {} will be mounted as /workspace.",
@@ -352,6 +351,36 @@ pub(crate) fn render_build_output(frame: &mut Frame, app: &App, area: Rect, dimm
             Span::styled("$ ", Style::default().fg(tone(Color::Green))),
             Span::styled(cmd, Style::default().fg(tone(Color::DarkGray))),
         ]));
+        header_lines.push(Line::from(""));
+    }
+
+    if let Some(finished) = app.build_finished.as_ref() {
+        let (label, color) = if finished.cancelled {
+            ("BUILD CANCELLED".to_string(), Color::Yellow)
+        } else {
+            let suffix = finished
+                .exit_code
+                .map(|code| format!(" (exit code {code})"))
+                .unwrap_or_default();
+            (format!("BUILD FAILED{suffix}"), Color::Red)
+        };
+        header_lines.push(Line::from(Span::styled(
+            label,
+            Style::default()
+                .fg(tone(color))
+                .add_modifier(Modifier::BOLD),
+        )));
+        if let Some(diagnostic) = finished.diagnostic.as_ref() {
+            let detail = clamp_for_width(&strip_ansi_and_control(diagnostic), max_cols);
+            header_lines.push(Line::from(Span::styled(
+                detail,
+                Style::default().fg(tone(color)),
+            )));
+        }
+        header_lines.push(Line::from(Span::styled(
+            "[r] Rebuild   [^B/Esc] Back to sidebar",
+            Style::default().fg(tone(Color::DarkGray)),
+        )));
         header_lines.push(Line::from(""));
     }
 

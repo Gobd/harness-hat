@@ -1,60 +1,47 @@
 use super::*;
 
+/// Type-safe selector for `persist_network_rule_forever`. Constraining the
+/// helper to exactly two variants — instead of accepting `NetworkPolicy` —
+/// removes the silent "any non-`Deny` policy is allow" hazard flagged in M22.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PersistKind {
+    Allow,
+    Deny,
+}
+
 impl App {
     pub(crate) fn approve_net(&mut self, idx: usize) {
         if idx >= self.pending_net.len() {
             return;
         }
-        send_pending_network_decision(&mut self.pending_net[idx], NetworkDecision::Allow);
-        self.pending_net.remove(idx);
+        let item = self.pending_net.remove(idx);
+        send_pending_network_decision_owned(item, NetworkDecision::Allow);
     }
 
     pub(crate) fn deny_net(&mut self, idx: usize) {
         if idx >= self.pending_net.len() {
             return;
         }
-        send_pending_network_decision(&mut self.pending_net[idx], NetworkDecision::Deny);
-        self.pending_net.remove(idx);
+        let item = self.pending_net.remove(idx);
+        send_pending_network_decision_owned(item, NetworkDecision::Deny);
     }
 
     pub(crate) fn approve_net_forever(&mut self, idx: usize) {
         if idx >= self.pending_net.len() {
             return;
         }
-        let entry = pending_network_rule_entry(&self.pending_net[idx], NetworkPolicy::Auto);
-        let project_name = self.pending_net[idx].source_project.clone();
-        if project_name.is_none() {
-            self.log_missing_network_project_context(idx, "allow");
-        }
-        match self.persist_network_rule_entry(&entry, NetworkPolicy::Auto, project_name.as_deref())
-        {
-            Ok(updated_path) => {
-                if let Some(path) = &updated_path {
-                    self.push_log(
-                        format!(
-                            "added permanent allow rule for '{}' in {}",
-                            entry,
-                            path.display()
-                        ),
-                        false,
-                    );
-                } else {
-                    self.push_log(
-                        format!("network rule '{}' already permanently allowed", entry),
-                        false,
-                    );
-                }
+        // Persisting "allow forever" MUST be attributed to an unambiguous source
+        // workspace, otherwise we'd weaken whichever workspace the user happens
+        // to be looking at. Per-request (one-shot) decisions are still safe
+        // because they never touch on-disk rules.
+        let project_name = match self.unambiguous_pending_network_project(idx) {
+            Some(name) => name,
+            None => {
+                self.log_ambiguous_network_project_context(idx, "allow");
+                return;
             }
-            Err(e) => {
-                self.push_log(
-                    format!(
-                        "failed to persist permanent allow rule for '{}': {}",
-                        entry, e
-                    ),
-                    true,
-                );
-            }
-        }
+        };
+        self.persist_network_rule_forever(idx, PersistKind::Allow, &project_name);
         self.approve_net(idx);
     }
 
@@ -62,57 +49,87 @@ impl App {
         if idx >= self.pending_net.len() {
             return;
         }
-        let entry = pending_network_rule_entry(&self.pending_net[idx], NetworkPolicy::Deny);
-        let project_name = self.resolve_pending_network_project(idx);
-        match self.persist_network_rule_entry(&entry, NetworkPolicy::Deny, project_name.as_deref())
-        {
-            Ok(updated_path) => {
-                if let Some(path) = &updated_path {
-                    self.push_log(
-                        format!(
-                            "added permanent deny rule for '{}' in {}",
-                            entry,
-                            path.display()
-                        ),
-                        false,
-                    );
-                } else {
-                    self.push_log(
-                        format!("network rule '{}' already permanently denied", entry),
-                        false,
-                    );
-                }
+        let project_name = match self.unambiguous_pending_network_project(idx) {
+            Some(name) => name,
+            None => {
+                self.log_ambiguous_network_project_context(idx, "deny");
+                return;
             }
-            Err(e) => {
-                self.push_log(
-                    format!(
-                        "failed to persist permanent deny rule for '{}': {}",
-                        entry, e
-                    ),
-                    true,
-                );
-            }
-        }
+        };
+        self.persist_network_rule_forever(idx, PersistKind::Deny, &project_name);
         self.deny_net(idx);
     }
 
-    pub(crate) fn resolve_pending_network_project(&self, idx: usize) -> Option<String> {
+    /// Persist a permanent allow/deny rule for `pending_net[idx]` and log the
+    /// outcome. Shared by `approve_net_forever`/`deny_net_forever`, which differ
+    /// only in how they resolve `project_name` and the final approve/deny call.
+    /// `kind` (a strict two-variant enum, not the open-ended `NetworkPolicy`)
+    /// keeps the call sites type-safe — there is no "what if it's `Prompt`?"
+    /// branch to get wrong.
+    fn persist_network_rule_forever(
+        &mut self,
+        idx: usize,
+        kind: PersistKind,
+        project_name: &str,
+    ) {
+        let (verb, past, policy) = match kind {
+            PersistKind::Allow => ("allow", "allowed", NetworkPolicy::Auto),
+            PersistKind::Deny => ("deny", "denied", NetworkPolicy::Deny),
+        };
+        let entry = pending_network_rule_entry(&self.pending_net[idx], policy);
+        match self.persist_network_rule_entry(&entry, policy, Some(project_name)) {
+            Ok(Some(path)) => self.push_log(
+                format!("added permanent {verb} rule for '{entry}' in {}", path.display()),
+                false,
+            ),
+            Ok(None) => self.push_log(
+                format!("network rule '{entry}' already permanently {past}"),
+                false,
+            ),
+            Err(e) => self.push_log(
+                format!("failed to persist permanent {verb} rule for '{entry}': {e}"),
+                true,
+            ),
+        }
+    }
+
+    /// Resolve the source workspace for `pending_net[idx]` **only if it can be
+    /// determined unambiguously** from the request itself. Used by the "forever"
+    /// approve/deny paths, which write to disk and therefore must never fall
+    /// back to whichever workspace the user happens to have selected in the
+    /// sidebar (see CR7).
+    pub(crate) fn unambiguous_pending_network_project(&self, idx: usize) -> Option<String> {
         let item = self.pending_net.get(idx)?;
         if let Some(project) = item.source_project.clone() {
             return Some(project);
         }
-        if let Some(container_name) = item.source_container.as_deref() {
-            let mut workspaces = self
-                .sessions
-                .iter()
-                .filter(|s| !s.is_exited() && s.container_name == container_name)
-                .map(|s| s.project.clone())
-                .collect::<Vec<_>>();
-            workspaces.sort();
-            workspaces.dedup();
-            if workspaces.len() == 1 {
-                return workspaces.into_iter().next();
-            }
+        // No `source_project` attribution on the request. Accept the resolution
+        // only if every running container that matches `source_container` maps
+        // to the same workspace.
+        let container_name = item.source_container.as_deref()?;
+        let mut workspaces = self
+            .sessions
+            .iter()
+            .filter(|s| !s.is_exited() && s.container_name == container_name)
+            .map(|s| s.project.clone())
+            .collect::<Vec<_>>();
+        workspaces.sort();
+        workspaces.dedup();
+        if workspaces.len() == 1 {
+            workspaces.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    /// Resolve the source workspace for `pending_net[idx]`, allowing the
+    /// sidebar selection as a last-resort fallback. Safe for display-only uses;
+    /// **never** call this for persistence — use
+    /// `unambiguous_pending_network_project` instead (CR7).
+    #[allow(dead_code)]
+    pub(crate) fn resolve_pending_network_project(&self, idx: usize) -> Option<String> {
+        if let Some(unambiguous) = self.unambiguous_pending_network_project(idx) {
+            return Some(unambiguous);
         }
         let cfg = self.config.get();
         self.selected_project_idx()
@@ -174,7 +191,18 @@ impl App {
                 changed |= rules.network.allowlist.len() != original_len;
                 &mut rules.network.denylist
             }
-            NetworkPolicy::Prompt => return Ok(None),
+            NetworkPolicy::Prompt => {
+                // `Prompt` means "ask the user every time", so there is nothing
+                // to persist. Reaching here from the "forever" code paths would
+                // be a programmer error — those funnel through `PersistKind`
+                // (M22). Kept as an explicit, exhaustive arm rather than `_ =>`
+                // so future `NetworkPolicy` variants force a compile error.
+                debug_assert!(
+                    false,
+                    "persist_network_rule_entry called with NetworkPolicy::Prompt"
+                );
+                return Ok(None);
+            }
         };
 
         let exists = entries
@@ -196,13 +224,16 @@ impl App {
         Ok(Some(rules_path))
     }
 
-    pub(crate) fn log_missing_network_project_context(&mut self, idx: usize, action: &str) {
+    pub(crate) fn log_ambiguous_network_project_context(&mut self, idx: usize, action: &str) {
         if idx >= self.pending_net.len() {
             return;
         }
         let host = self.pending_net[idx].host.clone();
         self.push_log(
-            format!("cannot persist permanent {action} rule for '{}' because the network request had no source workspace metadata", host),
+            format!(
+                "refusing to persist permanent {action} rule for '{}': source workspace is unknown or ambiguous (decide per-request instead)",
+                host
+            ),
             true,
         );
     }
@@ -258,6 +289,24 @@ pub(crate) fn pending_network_request_count(item: &crate::proxy::PendingNetworkI
     1 + item.merged_response_txs.len()
 }
 
+/// Owning variant: consumes the item and forwards the decision to every
+/// merged response channel. Preferred over the borrowing form below because it
+/// moves the sender out instead of swapping in a freshly allocated dummy
+/// channel on each call (L10).
+pub(crate) fn send_pending_network_decision_owned(
+    item: crate::proxy::PendingNetworkItem,
+    decision: NetworkDecision,
+) {
+    let _ = item.response_tx.send(decision);
+    for tx in item.merged_response_txs {
+        let _ = tx.send(decision);
+    }
+}
+
+/// Borrowing variant kept for call sites that still need `&mut` access to the
+/// item afterwards. Avoid in new code — prefer the owning form, which skips
+/// the dummy-channel allocation.
+#[allow(dead_code)]
 pub(crate) fn send_pending_network_decision(
     item: &mut crate::proxy::PendingNetworkItem,
     decision: NetworkDecision,

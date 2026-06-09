@@ -32,6 +32,12 @@ RUN set -eu; \
       direnv; \
     rm -rf /var/lib/apt/lists/*
 
+# Rust installs as root into the shared RUSTUP_HOME/CARGO_HOME. The container
+# runs as `coder` (uid 1000), so hand ownership of both trees to that user in
+# this same layer — otherwise `cargo build` (registry/cache writes), `cargo
+# install` (writes to cargo/bin), and `rustup` updates all fail on root-owned
+# paths. Doing the chown here (not a later layer) avoids duplicating the large
+# toolchain with new ownership. a+rX keeps it readable if run under another uid.
 RUN set -eu; \
     curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
       | sh -s -- -y --profile default --default-toolchain stable; \
@@ -42,7 +48,8 @@ RUN set -eu; \
       cargo-nextest \
       cargo-audit \
       cargo-deny; \
-    chmod -R a+rX "${RUSTUP_HOME}" "${CARGO_HOME}"
+    chmod -R a+rX "${RUSTUP_HOME}" "${CARGO_HOME}"; \
+    chown -R coder:coder "${RUSTUP_HOME}" "${CARGO_HOME}"
 
 USER coder
 

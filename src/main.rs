@@ -14,7 +14,7 @@ async fn main() -> Result<()> {
             harness_hat::init::write_sample_config(&path)?;
             println!("config written to: {}", path.display());
             println!(
-                "edit it, then run: harness-hat --config {}",
+                "edit it, then run: hh --config {}",
                 path.display()
             );
         }

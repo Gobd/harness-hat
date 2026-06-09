@@ -1,9 +1,16 @@
 //! `hh shell` — open an interactive shell in a running session.
 //!
 //! This is a pure-Docker passthrough: it discovers sessions purely from the
-//! discovery labels stamped at launch (`harness-hat.alias` etc.), so it works
-//! whether or not the manager UI is running, and never touches the proxy,
-//! control server, or config loading.
+//! discovery labels stamped at launch (`harness-hat.alias` etc.) and attaches
+//! with `docker exec`, never touching the proxy, control server, or config
+//! loading.
+//!
+//! Sessions only exist while the manager is running. Each session container is
+//! launched as `docker run --rm -it` owned by the manager's PTY, so quitting
+//! the manager (or that session's terminal) tears the container down and
+//! `--rm` removes it. `hh shell` therefore only finds a session while the
+//! manager that launched it is still running — run it from a second terminal
+//! alongside the live manager.
 
 use anyhow::{Context, Result, bail};
 use std::process::Command;
@@ -89,7 +96,10 @@ fn attach(id: &str) -> Result<i32> {
     let matches: Vec<&Session> = sessions.iter().filter(|s| s.alias == wanted).collect();
 
     let name = match matches.as_slice() {
-        [] => bail!("no running session with id '{wanted}'. Run `hh shell` to list sessions."),
+        [] => bail!(
+            "no running session with id '{wanted}'. Run `hh shell` to list sessions. \
+             (Sessions only exist while the manager is running — is it still open?)"
+        ),
         [session] => session.name.clone(),
         many => {
             // Aliases are deduped at launch, so this should not happen; pick the
@@ -132,7 +142,10 @@ fn attach(id: &str) -> Result<i32> {
 fn list() -> Result<()> {
     let sessions = running_sessions()?;
     if sessions.is_empty() {
-        println!("No running harness-hat sessions.");
+        println!(
+            "No running harness-hat sessions. Sessions only exist while the manager is \
+             running — launch one in the manager, then run `hh shell` from another terminal."
+        );
         return Ok(());
     }
 

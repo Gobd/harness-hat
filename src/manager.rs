@@ -1,7 +1,9 @@
 use anyhow::Result;
 use crossterm::style::Stylize;
 use std::io::{self, Write};
+use std::net::IpAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info};
@@ -16,8 +18,7 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
     };
 
     let config = crate::config::load(&config_path)?;
-    crate::init::ensure_base_dockerfile(&config.docker_dir)?;
-    crate::init::ensure_default_dockerfile(&config.docker_dir)?;
+    // ensure_docker_assets covers the base and default dockerfiles too.
     crate::init::ensure_docker_assets(&config.docker_dir)?;
 
     let telemetry_handle = crate::telemetry::init(&config)?;
@@ -40,13 +41,28 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
 
     let (stop_pending_tx, stop_pending_rx) = mpsc::channel::<crate::server::ContainerStopItem>(64);
     let (net_pending_tx, net_pending_rx) = mpsc::channel::<crate::proxy::PendingNetworkItem>(64);
-    let (activity_tx, activity_rx) = mpsc::unbounded_channel::<crate::activity::ActivityEvent>();
+    // Bounded (H12): see comments in tui::App and ProxyState/ServerState.
+    // 4096 is a few seconds of normal traffic; bursts beyond that are dropped
+    // by `try_send` on the producer side rather than backing into memory.
+    let (activity_tx, activity_rx) = mpsc::channel::<crate::activity::ActivityEvent>(4096);
     let (audit_tx, audit_rx) = mpsc::channel(256);
 
     let session_registry = crate::server::SessionRegistry::default();
 
     let control_port = config.defaults.control.server_port;
     let control_host = config.defaults.control.server_host.clone();
+    let allow_remote_control = config.defaults.control.allow_remote_control;
+    let control_ip = parse_bind_host(&control_host).map_err(|e| {
+        anyhow::anyhow!(
+            "config defaults.control.server_host {control_host:?} is not a valid IP address or 'localhost': {e}"
+        )
+    })?;
+    if !is_loopback_bind(&control_ip) && !allow_remote_control {
+        anyhow::bail!(
+            "refusing to bind control server to non-loopback address {control_host}; \
+             set defaults.control.allow_remote_control = true to opt in to remote control"
+        );
+    }
     let control_addr = format!("{control_host}:{control_port}");
     let server_state = crate::server::ServerState {
         config: shared_config.clone(),
@@ -61,14 +77,26 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("binding control server to {control_addr}: {e}"))?;
     info!("control server listening on {}", control_addr);
-    tokio::spawn(async move {
+    let control_handle = tokio::spawn(async move {
         if let Err(e) = crate::server::run_with_listener(server_state, control_listener).await {
             error!("control server error: {e}");
         }
     });
 
     let proxy_port = config.defaults.proxy.proxy_port;
-    let proxy_addr = format!("127.0.0.1:{proxy_port}");
+    let proxy_host = config.defaults.proxy.proxy_host.clone();
+    let proxy_ip = parse_bind_host(&proxy_host).map_err(|e| {
+        anyhow::anyhow!(
+            "config defaults.proxy.proxy_host {proxy_host:?} is not a valid IP address or 'localhost': {e}"
+        )
+    })?;
+    if !is_loopback_bind(&proxy_ip) && !allow_remote_control {
+        anyhow::bail!(
+            "refusing to bind proxy to non-loopback address {proxy_host}; \
+             set defaults.control.allow_remote_control = true to opt in to remote-reachable bindings"
+        );
+    }
+    let proxy_addr = format!("{proxy_host}:{proxy_port}");
     let proxy_state = crate::proxy::ProxyState::new(
         ca.clone(),
         shared_config.clone(),
@@ -77,7 +105,7 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
     )?;
     let proxy_addr_display = proxy_addr.clone();
     let proxy_state_for_server = proxy_state.clone();
-    tokio::spawn(async move {
+    let proxy_handle = tokio::spawn(async move {
         if let Err(e) = crate::proxy::run(proxy_state_for_server, proxy_addr).await {
             error!("proxy error: {e}");
         }
@@ -100,6 +128,14 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
     )?;
     crate::tui::run(app).await?;
 
+    // The TUI loop has exited (user quit). Stop the background listeners so
+    // they don't keep accepting connections (or hold an in-flight
+    // `/container/stop` against a now-closed oneshot) while we tear down
+    // telemetry. Aborting is sufficient: the process is exiting and both tasks
+    // only own their listener + ephemeral per-connection state.
+    control_handle.abort();
+    proxy_handle.abort();
+
     telemetry_handle.shutdown()?;
     Ok(())
 }
@@ -117,13 +153,46 @@ pub fn resolve_or_prompt_config_path(explicit: Option<PathBuf>) -> Result<Option
 pub fn discover_default_config_path() -> Option<PathBuf> {
     let cwd_candidate = PathBuf::from("harness-hat.toml");
     if cwd_candidate.exists() {
-        return Some(cwd_candidate);
+        // Canonicalize immediately so downstream callers (logging, watches,
+        // tmp-file siblings) always see an absolute path that does not depend
+        // on later cwd changes.
+        return Some(
+            cwd_candidate
+                .canonicalize()
+                .unwrap_or_else(|_| match std::env::current_dir() {
+                    Ok(cwd) => cwd.join(&cwd_candidate),
+                    Err(_) => cwd_candidate,
+                }),
+        );
     }
     let home_candidate = default_home_config_path().ok()?;
     if home_candidate.exists() {
-        return Some(home_candidate);
+        return Some(
+            home_candidate
+                .canonicalize()
+                .unwrap_or_else(|_| home_candidate),
+        );
     }
     None
+}
+
+/// Parse a config-supplied bind host (either an `IpAddr` literal or the
+/// special string `"localhost"`) into an `IpAddr` for the purpose of deciding
+/// whether the bind is loopback. Returns an error on anything else (hostnames
+/// would otherwise format-as-string into `bind()`, hiding the policy intent).
+fn parse_bind_host(host: &str) -> Result<IpAddr> {
+    let trimmed = host.trim();
+    if trimmed.eq_ignore_ascii_case("localhost") {
+        return Ok(IpAddr::from([127u8, 0, 0, 1]));
+    }
+    IpAddr::from_str(trimmed)
+        .map_err(|e| anyhow::anyhow!("expected an IPv4/IPv6 literal or 'localhost': {e}"))
+}
+
+/// Loopback (127.0.0.0/8, ::1). Mirror the host's loopback set — `0.0.0.0` and
+/// `::` are explicitly not loopback even though they include it.
+fn is_loopback_bind(ip: &IpAddr) -> bool {
+    ip.is_loopback()
 }
 
 pub fn default_home_config_path() -> Result<PathBuf> {

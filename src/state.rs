@@ -6,9 +6,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::fs_util::{
-    set_private_dir_permissions, set_private_file_permissions, write_private_file,
-};
+use crate::fs_util::{set_private_file_permissions, write_private_file};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
@@ -53,9 +51,8 @@ pub struct StateManager {
 
 impl StateManager {
     pub fn open(log_dir: &Path) -> Result<Self> {
-        fs::create_dir_all(log_dir)
+        create_private_dir_all(log_dir)
             .with_context(|| format!("creating log dir: {}", log_dir.display()))?;
-        set_private_dir_permissions(log_dir)?;
         Ok(Self {
             log_dir: log_dir.to_path_buf(),
             lock: Arc::new(Mutex::new(())),
@@ -66,12 +63,27 @@ impl StateManager {
         let _guard = self.lock.lock().unwrap();
         let path = self.token_path();
         if path.exists() {
-            set_private_file_permissions(&path)?;
-            let token = fs::read_to_string(&path)
-                .with_context(|| format!("reading token file: {}", path.display()))?;
-            let token = token.trim().to_string();
-            if !token.is_empty() {
-                return Ok(token);
+            // Open with O_NOFOLLOW so a planted symlink (e.g. log_dir/token ->
+            // /etc/shadow) cannot trick us into reading arbitrary host files
+            // and emitting their contents as Authorization tokens. Then check
+            // the file type before reading so we cannot be tricked into reading
+            // a fifo / device. Read first, then set perms — `set_permissions`
+            // can fail on a read-only FS, but a successful read still produces
+            // a usable token.
+            let opened = open_no_follow_regular(&path)?;
+            if let Some(mut file) = opened {
+                use std::io::Read;
+                let mut buf = String::new();
+                file.read_to_string(&mut buf)
+                    .with_context(|| format!("reading token file: {}", path.display()))?;
+                drop(file);
+                // Best-effort chmod after a successful read; do not fail token
+                // retrieval if the FS is read-only.
+                let _ = set_private_file_permissions(&path);
+                let token = buf.trim().to_string();
+                if !token.is_empty() {
+                    return Ok(token);
+                }
             }
         }
 
@@ -85,12 +97,7 @@ impl StateManager {
     pub fn log_audit(&self, entry: &AuditEntry) -> Result<()> {
         let _guard = self.lock.lock().unwrap();
         let path = self.audit_path_for(entry.timestamp.date_naive());
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("opening audit log: {}", path.display()))?;
-        set_private_file_permissions(&path)?;
+        let mut f = open_audit_log_append(&path)?;
         let line = serde_json::to_string(entry).context("serializing audit entry")?;
         f.write_all(line.as_bytes())
             .with_context(|| format!("writing audit log: {}", path.display()))?;
@@ -125,15 +132,21 @@ impl StateManager {
             };
             let reader = BufReader::new(f);
             let mut day_entries = Vec::new();
-            for line in reader.lines() {
+            for (lineno, line) in reader.lines().enumerate() {
                 let Ok(line) = line else {
                     continue;
                 };
                 if line.trim().is_empty() {
                     continue;
                 }
-                if let Ok(entry) = serde_json::from_str::<AuditEntry>(&line) {
-                    day_entries.push(entry);
+                match serde_json::from_str::<AuditEntry>(&line) {
+                    Ok(entry) => day_entries.push(entry),
+                    Err(e) => tracing::warn!(
+                        path = %path.display(),
+                        line = lineno + 1,
+                        error = %e,
+                        "audit log entry failed to parse"
+                    ),
                 }
             }
             day_entries.sort_by_key(|e| e.timestamp);
@@ -156,6 +169,85 @@ impl StateManager {
         self.log_dir
             .join(format!("audit-{}.log", day.format("%Y-%m-%d")))
     }
+}
+
+/// Create `path` (and parents) with restrictive directory permissions on Unix.
+/// Mirrors `fs::create_dir_all` but applies `mode = 0o700` to newly-created
+/// directories via `DirBuilderExt`; on non-Unix this is just `create_dir_all`.
+fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut b = std::fs::DirBuilder::new();
+        b.recursive(true);
+        b.mode(0o700);
+        b.create(path)?;
+        // `DirBuilder` won't tighten an already-loose existing directory; do
+        // that explicitly for the leaf so the invariant holds either way.
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.is_dir() {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
+/// Open `path` for reading with `O_NOFOLLOW` (Unix) and verify it is a regular
+/// file. Returns `Ok(None)` if the file does not exist; `Err` on any other I/O
+/// failure or if a symlink/non-regular path is encountered.
+fn open_no_follow_regular(path: &Path) -> Result<Option<std::fs::File>> {
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = match opts.open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::Error::from(e))
+                .with_context(|| format!("opening (O_NOFOLLOW) {}", path.display()));
+        }
+    };
+    let meta = file
+        .metadata()
+        .with_context(|| format!("statting {}", path.display()))?;
+    anyhow::ensure!(
+        meta.file_type().is_file(),
+        "refusing to read non-regular file at {}",
+        path.display()
+    );
+    Ok(Some(file))
+}
+
+/// Open the audit-log file for append with `mode = 0o600` at create time and
+/// `O_NOFOLLOW` so a symlink planted at `log_dir/audit-YYYY-MM-DD.log` cannot
+/// redirect appends out of the log directory.
+fn open_audit_log_append(path: &Path) -> Result<std::fs::File> {
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let f = opts
+        .open(path)
+        .with_context(|| format!("opening audit log: {}", path.display()))?;
+    // Belt-and-suspenders: on existing files our `mode(0o600)` is ignored, so
+    // tighten perms after open. The chmod here is safe (target is already an
+    // open fd we just confirmed via O_NOFOLLOW is not a symlink).
+    let _ = set_private_file_permissions(path);
+    Ok(f)
 }
 
 #[cfg(test)]

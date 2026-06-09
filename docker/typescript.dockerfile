@@ -26,8 +26,6 @@ RUN set -eu; \
 RUN set -eu; \
     corepack enable; \
     npm install -g \
-      npm@latest \
-      pnpm@latest \
       typescript \
       tsx \
       vite \
