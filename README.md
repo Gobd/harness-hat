@@ -8,7 +8,7 @@ It's the harness; your container is the hat.
 
 ## Why
 
-Modern coding agents (`claude`, `codex`, `gemini`, `pi`, …) want to read your home directory, install random packages, hit unknown endpoints, and execute arbitrary shell. Giving them an unrestricted shell on your laptop is a bad time.
+Modern coding agents (`claude`, `codex`, `antigravity`, `pi`, …) want to read your home directory, install random packages, hit unknown endpoints, and execute arbitrary shell. Giving them an unrestricted shell on your laptop is a bad time.
 
 Harness Hat boxes each session in a container with:
 
@@ -50,7 +50,7 @@ hh shell <ID>      # attaches via `docker exec -it`
 
 ## Built-in templates
 
-The base image is Ubuntu 24.04 with Node 22 and the Claude Code apt package. Stacked on top:
+The base image is Ubuntu 24.04 with Node 22, bundled agent CLIs (`claude`, `codex`, `agy`, `pi`), and the shared proxy/CA plumbing. Stacked on top:
 
 | Stem         | Toolchain                                                          |
 |--------------|--------------------------------------------------------------------|
@@ -134,7 +134,7 @@ proxy_host = "127.0.0.1"
 strict_network = true
 
 [defaults.containers]
-env_passthrough = ["TERM", "COLORTERM"]
+env_passthrough = ["TERM", "COLORTERM", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]
 bypass_proxy = ["api.anthropic.com", "claude.ai", "..."]
 
 [[defaults.containers.mounts]]           # shared across all templates
@@ -166,6 +166,37 @@ canonical_path = "~/src/my-project"
 
 Full example: [`harness-hat.example.toml`](harness-hat.example.toml).
 
+## Claude CLI authentication
+
+Each container session runs Claude Code in a fresh environment. Two env vars control how it authenticates — set whichever one you use on the host and they pass through automatically via `env_passthrough` in the default config above.
+
+**API key** (recommended for most setups):
+
+1. Generate a key at [console.anthropic.com](https://console.anthropic.com) → API Keys.
+2. Export it in your shell profile:
+   ```bash
+   export ANTHROPIC_API_KEY="sk-ant-api03-..."
+   ```
+
+**OAuth token** (alternative — stays tied to your Claude account):
+
+1. Run once on the host to generate a long-lived token:
+   ```bash
+   claude setup-token
+   ```
+2. Export the printed value in your shell profile:
+   ```bash
+   export CLAUDE_CODE_OAUTH_TOKEN="<token>"
+   ```
+
+Either var bypasses the interactive browser login flow, so new sessions start authenticated immediately. Run `/status` inside a session to confirm which method is active.
+
+## Antigravity CLI authentication
+
+Antigravity CLI (`agy`) stores settings and history under `~/.gemini/antigravity-cli`, but its login tokens live in the OS secure keyring. Harness Hat mounts `.gemini` for settings and starts a headless Linux Secret Service in each session, backed by `~/.local/share/harness-hat/container-keyrings` on the host.
+
+The first `agy` login should be done inside a Harness Hat session. After that, new sessions reuse the persisted container keyring. A host desktop login is not copied by the `.gemini` mount alone.
+
 ## CLI
 
 ```
@@ -175,10 +206,6 @@ hh init [PATH]           # write a starter config (default: ./harness-hat.toml)
 hh shell                 # list running sessions
 hh shell <ID>            # docker exec into a running session
 ```
-
-## Status
-
-Harness Hat is pre-1.0 and the config schema is still iterating — see [`CHANGELOG.md`](CHANGELOG.md) for the breaking-change log. The 0.8.0 line is a major rewrite around the workspace+template+shell model; the previous `hostdo`/`agentctl` host-command bridges are gone.
 
 ## License
 

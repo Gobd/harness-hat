@@ -101,6 +101,9 @@ RUN apt-get update -o APT::Update::Error-Mode=any && apt-get install -y --no-ins
       iproute2 \
       iptables \
       gosu \
+      dbus-user-session \
+      gnome-keyring \
+      libsecret-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Match Coder's conventional non-root user while keeping uid/gid 1000 for
@@ -133,6 +136,28 @@ RUN set -eu; \
 COPY scripts/killme.py /usr/local/bin/killme
 RUN chmod 755 /usr/local/bin/killme
 COPY --from=tun2proxy-build /usr/local/cargo/bin/tun2proxy-bin /usr/local/bin/tun2proxy-bin
+
+RUN cat > /usr/local/bin/harness-hat-user-session.sh << 'SCRIPT'
+#!/bin/sh
+set -e
+
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    export XDG_RUNTIME_DIR="/tmp/harness-hat-runtime-$(id -u)"
+fi
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+
+if command -v gnome-keyring-daemon >/dev/null 2>&1; then
+    # Antigravity CLI stores auth tokens in the Linux Secret Service. In this
+    # headless container there is no desktop login manager to start/unlock it.
+    # An empty-password keyring is acceptable here because its files live in the
+    # user's Harness Hat state directory on the host, not in the host OS keyring.
+    eval "$(printf '\n' | gnome-keyring-daemon --unlock --components=secrets 2>/dev/null || true)"
+fi
+
+exec "$@"
+SCRIPT
+RUN chmod 755 /usr/local/bin/harness-hat-user-session.sh
 
 # Trusts the harness-hat MITM CA cert bind-mounted at run time (root only).
 RUN cat > /usr/local/bin/harness-hat-init.sh << 'SCRIPT'
@@ -459,16 +484,34 @@ fi
 clear 2>/dev/null || true
 
 if [ "$(id -u)" = "0" ]; then
-    exec gosu 1000:1000 "$@"
+    exec gosu 1000:1000 dbus-run-session -- /usr/local/bin/harness-hat-user-session.sh "$@"
 fi
-exec "$@"
+exec dbus-run-session -- /usr/local/bin/harness-hat-user-session.sh "$@"
 SCRIPT
 RUN chmod 755 /usr/local/bin/harness-hat-init.sh
 
 RUN npm install -g \
     @openai/codex \
-    @google/gemini-cli \
     @earendil-works/pi-coding-agent
+
+ARG TARGETARCH
+ARG ANTIGRAVITY_CLI_VERSION=1.0.6
+RUN set -eu; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      amd64|x86_64) agy_arch="x64"; agy_sha="3eae552781d3054b782142e3cfe7be73e3bd068c736a432ca6f1adaa40f19e07" ;; \
+      arm64|aarch64) agy_arch="arm64"; agy_sha="be6303d4b891a79457ca6ed169aff2efd3ceb694354634e85ef58c883bae6739" ;; \
+      *) echo "unsupported Antigravity CLI architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL \
+      -o /tmp/agy_cli_linux.tar.gz \
+      "https://github.com/google-antigravity/antigravity-cli/releases/download/${ANTIGRAVITY_CLI_VERSION}/agy_cli_linux_${agy_arch}.tar.gz"; \
+    echo "${agy_sha}  /tmp/agy_cli_linux.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/agy_cli_linux.tar.gz -C /usr/local/bin antigravity; \
+    ln -sf /usr/local/bin/antigravity /usr/local/bin/agy; \
+    chmod 755 /usr/local/bin/antigravity; \
+    rm -f /tmp/agy_cli_linux.tar.gz; \
+    test -x /usr/local/bin/antigravity; \
+    test -x /usr/local/bin/agy
 
 # Claude Code: install the native standalone binary from Anthropic's signed apt
 # repository rather than npm. This lands a system-wide /usr/bin/claude (on PATH
@@ -488,6 +531,16 @@ RUN set -eu; \
 
 # Coder-compatible user at uid/gid 1000.
 USER coder
+RUN mkdir -p /home/coder/.local/bin \
+    && printf '#!/bin/sh\nexec claude --dangerously-skip-permissions "$@"\n' \
+       > /home/coder/.local/bin/claude-yolo \
+    && printf '#!/bin/sh\nexec codex --yolo "$@"\n' \
+       > /home/coder/.local/bin/codex-yolo \
+    && printf '#!/bin/sh\nexec agy --dangerously-skip-permissions "$@"\n' \
+       > /home/coder/.local/bin/agy-yolo \
+    && chmod 755 /home/coder/.local/bin/claude-yolo \
+                 /home/coder/.local/bin/codex-yolo \
+                 /home/coder/.local/bin/agy-yolo
 WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/harness-hat-init.sh"]

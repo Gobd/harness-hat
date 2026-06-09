@@ -162,7 +162,14 @@ fn list() -> Result<()> {
         .max()
         .unwrap_or(0);
 
-    println!("{:<6}{:<ws$}  {:<tpl$}", "ID", "WORKSPACE", "TEMPLATE", ws = ws_width + 2, tpl = tpl_width);
+    println!(
+        "{:<6}{:<ws$}  {:<tpl$}",
+        "ID",
+        "WORKSPACE",
+        "TEMPLATE",
+        ws = ws_width + 2,
+        tpl = tpl_width
+    );
     for session in &sessions {
         println!(
             "{:<6}{:<ws$}  {:<tpl$}",

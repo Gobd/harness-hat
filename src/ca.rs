@@ -191,10 +191,7 @@ impl CaStore {
     /// host coalesce so the work is only done once per cache slot.
     pub async fn leaf_server_config(&self, domain: &str) -> Result<Arc<ServerConfig>> {
         let cell = {
-            let mut cache = self
-                .cert_cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut cache = self.cert_cache.lock().unwrap_or_else(|e| e.into_inner());
             cache
                 .get_or_insert(domain.to_string(), || Arc::new(OnceCell::new()))
                 .clone()

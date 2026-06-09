@@ -269,8 +269,8 @@ pub(super) fn require_session_context(
     // `ct_eq` requires equal-length inputs to make sense.
     let auth_bytes = auth.as_bytes();
     let expected_bytes = expected.as_bytes();
-    let auth_ok = auth_bytes.len() == expected_bytes.len()
-        && bool::from(auth_bytes.ct_eq(expected_bytes));
+    let auth_ok =
+        auth_bytes.len() == expected_bytes.len() && bool::from(auth_bytes.ct_eq(expected_bytes));
     if !auth_ok {
         return Err((
             StatusCode::UNAUTHORIZED,

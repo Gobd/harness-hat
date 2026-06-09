@@ -236,6 +236,7 @@ mod tests {
             "*.googleapis.com",
             "generativelanguage.googleapis.com",
             "aistudio.google.com",
+            "antigravity.google",
             "accounts.google.com",
             "oauth2.googleapis.com",
             "www.googleapis.com",
@@ -258,6 +259,9 @@ mod tests {
             ("~/.claude", "/home/coder/.claude"),
             ("~/.codex", "/home/coder/.codex"),
             ("~/.config/codex", "/home/coder/.config/codex"),
+            // Antigravity CLI stores auth, settings, and conversations under
+            // ~/.gemini/antigravity-cli, so the broader Gemini state root is
+            // still the correct passthrough mount after migrating from Gemini CLI.
             ("~/.gemini", "/home/coder/.gemini"),
             ("~/.pi", "/home/coder/.pi"),
         ] {

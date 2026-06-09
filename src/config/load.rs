@@ -438,6 +438,8 @@ fn shared_session_state_mounts() -> Result<Vec<ContainerMount>> {
         ("~/.claude", "/home/coder/.claude"),
         ("~/.codex", "/home/coder/.codex"),
         ("~/.config/codex", "/home/coder/.config/codex"),
+        // Antigravity CLI keeps session/config data in ~/.gemini/antigravity-cli.
+        // Mount the root so migrated Gemini CLI state remains available too.
         ("~/.gemini", "/home/coder/.gemini"),
         ("~/.pi", "/home/coder/.pi"),
     ] {
@@ -448,6 +450,7 @@ fn shared_session_state_mounts() -> Result<Vec<ContainerMount>> {
             mounts.push(mount);
         }
     }
+    mounts.push(shared_container_keyring_mount()?);
     Ok(mounts)
 }
 
@@ -464,6 +467,27 @@ fn shared_session_mount(host: &str, container: &str) -> Result<Option<ContainerM
         // in container::spawn; the directory mounts (.claude, .codex, …) don't.
         seed: None,
     }))
+}
+
+fn shared_container_keyring_mount() -> Result<ContainerMount> {
+    let host = dirs::home_dir()
+        .context("cannot determine home directory")?
+        .join(".local/share/harness-hat/container-keyrings");
+    std::fs::create_dir_all(&host)
+        .with_context(|| format!("creating container keyring state dir {}", host.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o700)).with_context(
+            || format!("restricting container keyring state dir {}", host.display()),
+        )?;
+    }
+    Ok(ContainerMount {
+        host,
+        container: PathBuf::from("/home/coder/.local/share/keyrings"),
+        mode: Default::default(),
+        seed: None,
+    })
 }
 
 pub fn image_tag_for_stem(stem: &str) -> String {

@@ -59,6 +59,7 @@ bypass_proxy = [
   "*.googleapis.com",
   "generativelanguage.googleapis.com",
   "aistudio.google.com",
+  "antigravity.google",
   "accounts.google.com",
   "oauth2.googleapis.com",
   "www.googleapis.com",
@@ -83,7 +84,7 @@ image = "default"
     assert_eq!(template.cpus.as_deref(), Some("1.5"));
     assert_eq!(template.shm_size.as_deref(), Some("512m"));
     let home = dirs::home_dir().expect("home dir");
-    for (host, container) in [
+    let expected_session_mounts = [
         (home.join(".claude.json"), "/home/coder/.claude.json"),
         (
             home.join(".claude/.claude.json"),
@@ -94,29 +95,30 @@ image = "default"
         (home.join(".config/codex"), "/home/coder/.config/codex"),
         (home.join(".gemini"), "/home/coder/.gemini"),
         (home.join(".pi"), "/home/coder/.pi"),
-    ] {
+        (
+            home.join(".local/share/harness-hat/container-keyrings"),
+            "/home/coder/.local/share/keyrings",
+        ),
+    ];
+    for (host, container) in &expected_session_mounts {
         assert!(
             template.mounts.iter().any(|mount| {
-                mount.host == host && mount.container == std::path::PathBuf::from(container)
+                mount.host == *host && mount.container == std::path::PathBuf::from(container)
             }),
             "missing shared session mount {:?} -> {container}",
             host
         );
     }
-    for host in [
-        home.join(".claude.json"),
-        home.join(".claude/.claude.json"),
-        home.join(".claude"),
-        home.join(".codex"),
-        home.join(".config/codex"),
-        home.join(".gemini"),
-        home.join(".pi"),
-    ] {
+    for (host, container) in &expected_session_mounts {
+        let expected_container = std::path::PathBuf::from(container);
+        if *host == expected_container {
+            continue;
+        }
         assert!(
             !template
                 .mounts
                 .iter()
-                .any(|mount| mount.host == host && mount.container == host),
+                .any(|mount| mount.host == *host && mount.container == *host),
             "unexpected host-absolute shared session mount {:?}",
             host
         );
@@ -136,6 +138,7 @@ image = "default"
         "*.googleapis.com",
         "generativelanguage.googleapis.com",
         "aistudio.google.com",
+        "antigravity.google",
         "accounts.google.com",
         "oauth2.googleapis.com",
         "www.googleapis.com",

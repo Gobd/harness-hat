@@ -269,41 +269,79 @@ pub(crate) fn render_session_detail(
                 .fg(tone(Color::Cyan))
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(vec![
-            Span::styled("  rw ", Style::default().fg(tone(Color::Green))),
-            Span::styled(workspace_path, Style::default().fg(tone(Color::White))),
-            Span::styled(" -> ", Style::default().fg(tone(Color::DarkGray))),
-            Span::styled(mount_target, Style::default().fg(tone(Color::White))),
-        ]),
     ]);
 
-    for mount in extra_mounts {
+    // Collect all mount rows before rendering so we can align columns.
+    let mut mount_rows: Vec<(String, Color, String, &str, String, Option<&str>)> = vec![(
+        "rw".to_string(),
+        Color::Green,
+        workspace_path,
+        "->",
+        mount_target,
+        None,
+    )];
+    for mount in &extra_mounts {
         // A seeded mount isn't a live bind: a private copy is taken at launch and
         // the container owns it, so don't render it like the rw/ro binds above.
         let seeded = mount.is_seeded();
-        let (label, label_color, arrow): (&str, Color, &str) = if seeded {
-            ("seed", Color::Yellow, " ~> ")
+        let (label, label_color, arrow) = if seeded {
+            ("seed".to_string(), Color::Yellow, "~>")
         } else {
-            (crate::container::mount_mode_arg(&mount.mode), Color::Green, " -> ")
+            (
+                crate::container::mount_mode_arg(&mount.mode).to_string(),
+                Color::Green,
+                "->",
+            )
         };
+        mount_rows.push((
+            label,
+            label_color,
+            mount.host.display().to_string(),
+            arrow,
+            mount.container.display().to_string(),
+            if seeded {
+                Some("(per-session copy)")
+            } else {
+                None
+            },
+        ));
+    }
+
+    let label_w = mount_rows.iter().map(|(l, ..)| l.len()).max().unwrap_or(2);
+    let host_w = mount_rows
+        .iter()
+        .map(|(_, _, h, ..)| h.len())
+        .max()
+        .unwrap_or(4);
+
+    let mode_hdr = format!("{:<label_w$}", "Mode", label_w = label_w);
+    let host_hdr = format!("{:<host_w$}", "Host", host_w = host_w);
+    lines.push(Line::from(Span::styled(
+        format!("  {mode_hdr}  {host_hdr}      Container"),
+        Style::default().fg(tone(Color::DarkGray)),
+    )));
+
+    for (label, label_color, host, arrow, container, note) in &mount_rows {
+        let label_col = format!("{:<label_w$}", label, label_w = label_w);
+        let host_col = format!("{:<host_w$}", host, host_w = host_w);
         let mut spans = vec![
             Span::styled(
-                format!("  {label} "),
-                Style::default().fg(tone(label_color)),
+                format!("  {label_col}"),
+                Style::default().fg(tone(*label_color)),
             ),
             Span::styled(
-                mount.host.display().to_string(),
+                format!("  {host_col}"),
                 Style::default().fg(tone(Color::White)),
             ),
-            Span::styled(arrow, Style::default().fg(tone(Color::DarkGray))),
             Span::styled(
-                mount.container.display().to_string(),
-                Style::default().fg(tone(Color::White)),
+                format!("  {arrow}  "),
+                Style::default().fg(tone(Color::DarkGray)),
             ),
+            Span::styled(container.clone(), Style::default().fg(tone(Color::White))),
         ];
-        if seeded {
+        if let Some(note) = note {
             spans.push(Span::styled(
-                "  (per-session copy)",
+                format!("  {note}"),
                 Style::default().fg(tone(Color::DarkGray)),
             ));
         }
@@ -319,7 +357,7 @@ pub(crate) fn render_session_detail(
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "  [k] stop container  [Esc/^B] sidebar  [Alt+o] log",
+            "  [k] stop container  [Esc/^B] sidebar",
             Style::default().fg(tone(Color::DarkGray)),
         )),
     ]);

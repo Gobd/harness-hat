@@ -245,7 +245,7 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                     .unwrap_or("<unknown template>");
                 let mut spans = vec![
                     Span::styled(prefix, Style::default().fg(name_color)),
-                    Span::styled(label.to_string(), Style::default().fg(name_color)),
+                    Span::styled(label.to_string(), Style::default().fg(Color::Green)),
                     Span::styled(
                         format!("  {template}"),
                         Style::default().fg(Color::DarkGray),
@@ -280,7 +280,7 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                         Span::styled(" ", Style::default().fg(name_color)),
                         Span::styled(
                             session.display_name().to_string(),
-                            Style::default().fg(name_color),
+                            Style::default().fg(Color::Green),
                         ),
                         Span::styled(format!(" {short_id}"), Style::default().fg(Color::DarkGray)),
                     ];

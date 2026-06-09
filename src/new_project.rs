@@ -121,9 +121,8 @@ pub fn append_project_block(
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
-            return Err(e).with_context(|| {
-                format!("reading config for append: {}", config_path.display())
-            });
+            return Err(e)
+                .with_context(|| format!("reading config for append: {}", config_path.display()));
         }
     };
     let mut doc = raw

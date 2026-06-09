@@ -526,7 +526,7 @@ impl ProxyState {
             .map(|source| source.auth_token.clone());
         let _ = self
             .activity_tx
-            .send(ActivityEvent::Started(Box::new(activity.clone())));
+            .try_send(ActivityEvent::Started(Box::new(activity.clone())));
         activity
     }
 
@@ -536,7 +536,7 @@ impl ProxyState {
         state: ActivityState,
         status: impl Into<Option<String>>,
     ) {
-        let _ = self.activity_tx.send(ActivityEvent::State {
+        let _ = self.activity_tx.try_send(ActivityEvent::State {
             id: id.to_string(),
             state,
             status: status.into(),
@@ -544,7 +544,7 @@ impl ProxyState {
     }
 
     pub(crate) fn activity_line(&self, id: &str, line: impl Into<String>) {
-        let _ = self.activity_tx.send(ActivityEvent::Line {
+        let _ = self.activity_tx.try_send(ActivityEvent::Line {
             id: id.to_string(),
             line: line.into(),
         });
@@ -556,7 +556,7 @@ impl ProxyState {
         state: ActivityState,
         status: impl Into<Option<String>>,
     ) {
-        let _ = self.activity_tx.send(ActivityEvent::Finished {
+        let _ = self.activity_tx.try_send(ActivityEvent::Finished {
             id: id.to_string(),
             state,
             status: status.into(),

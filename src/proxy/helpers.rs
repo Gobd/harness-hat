@@ -759,9 +759,7 @@ fn is_restricted_ipv6(ip: Ipv6Addr) -> bool {
         && segments[5] == 0xffff
         && segments[6] == 0
         && segments[7] == 0
-        || (segments[0..4].iter().all(|&s| s == 0)
-            && segments[4] == 0xffff
-            && segments[5] == 0);
+        || (segments[0..4].iter().all(|&s| s == 0) && segments[4] == 0xffff && segments[5] == 0);
     // 64:ff9b::/96 — NAT64 well-known prefix. Can reach RFC1918 IPv4 via DNS64.
     let is_nat64 = segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2..6] == [0; 4];
     // 100::/64 — discard-only address block (RFC 6666).

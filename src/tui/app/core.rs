@@ -584,17 +584,12 @@ impl App {
         activities: Vec<&Activity>,
     ) -> Vec<SidebarItem> {
         let mut items = Vec::new();
-        let mut network_group_added = false;
+        items.push(SidebarItem::NetworkGroup(session_idx));
         for activity in activities {
-            if matches!(
+            if !matches!(
                 &activity.kind,
                 crate::activity::ActivityKind::Network { .. }
             ) {
-                if !network_group_added {
-                    items.push(SidebarItem::NetworkGroup(session_idx));
-                    network_group_added = true;
-                }
-            } else {
                 items.push(SidebarItem::Activity(activity.id.clone()));
             }
         }
@@ -1060,9 +1055,11 @@ impl App {
         // stop a sibling container in the same workspace by submitting a short
         // common prefix (H19). The session-token check upstream binds the call
         // to its own container; this just enforces that here as well.
-        let Some(idx) = self.sessions.iter().position(|session| {
-            session.project == project && session.container_id == normalized
-        }) else {
+        let Some(idx) = self
+            .sessions
+            .iter()
+            .position(|session| session.project == project && session.container_id == normalized)
+        else {
             self.push_log(
                 format!(
                     "killme request for workspace '{}' could not find container {}",

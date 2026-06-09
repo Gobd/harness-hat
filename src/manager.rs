@@ -156,14 +156,12 @@ pub fn discover_default_config_path() -> Option<PathBuf> {
         // Canonicalize immediately so downstream callers (logging, watches,
         // tmp-file siblings) always see an absolute path that does not depend
         // on later cwd changes.
-        return Some(
-            cwd_candidate
-                .canonicalize()
-                .unwrap_or_else(|_| match std::env::current_dir() {
-                    Ok(cwd) => cwd.join(&cwd_candidate),
-                    Err(_) => cwd_candidate,
-                }),
-        );
+        return Some(cwd_candidate.canonicalize().unwrap_or_else(
+            |_| match std::env::current_dir() {
+                Ok(cwd) => cwd.join(&cwd_candidate),
+                Err(_) => cwd_candidate,
+            },
+        ));
     }
     let home_candidate = default_home_config_path().ok()?;
     if home_candidate.exists() {

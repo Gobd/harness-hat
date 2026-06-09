@@ -52,4 +52,10 @@ allowlist = [
     "domain=api.github.com",
     "domain=downloads.claude.ai",
     "domain=pi.dev",
+    "domain=antigravity.google",
+    "domain=antigravity-unleash.goog",
+    "domain=playwright.azureedge.net",
+    "domain=play.googleapis.com",
+    "domain=playwright-akamai.azureedge.net",
+    "domain=playwright-verizon.azureedge.net",
 ]

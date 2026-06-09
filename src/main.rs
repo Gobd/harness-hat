@@ -13,10 +13,7 @@ async fn main() -> Result<()> {
             let path = path.unwrap_or_else(|| std::path::PathBuf::from("harness-hat.toml"));
             harness_hat::init::write_sample_config(&path)?;
             println!("config written to: {}", path.display());
-            println!(
-                "edit it, then run: hh --config {}",
-                path.display()
-            );
+            println!("edit it, then run: hh --config {}", path.display());
         }
         Some(Command::Shell { id }) => {
             // Pure-Docker passthrough; intentionally bypasses manager init.

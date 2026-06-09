@@ -66,12 +66,7 @@ impl App {
     /// `kind` (a strict two-variant enum, not the open-ended `NetworkPolicy`)
     /// keeps the call sites type-safe — there is no "what if it's `Prompt`?"
     /// branch to get wrong.
-    fn persist_network_rule_forever(
-        &mut self,
-        idx: usize,
-        kind: PersistKind,
-        project_name: &str,
-    ) {
+    fn persist_network_rule_forever(&mut self, idx: usize, kind: PersistKind, project_name: &str) {
         let (verb, past, policy) = match kind {
             PersistKind::Allow => ("allow", "allowed", NetworkPolicy::Auto),
             PersistKind::Deny => ("deny", "denied", NetworkPolicy::Deny),
@@ -79,7 +74,10 @@ impl App {
         let entry = pending_network_rule_entry(&self.pending_net[idx], policy);
         match self.persist_network_rule_entry(&entry, policy, Some(project_name)) {
             Ok(Some(path)) => self.push_log(
-                format!("added permanent {verb} rule for '{entry}' in {}", path.display()),
+                format!(
+                    "added permanent {verb} rule for '{entry}' in {}",
+                    path.display()
+                ),
                 false,
             ),
             Ok(None) => self.push_log(

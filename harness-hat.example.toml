@@ -38,7 +38,7 @@ strict_network = true
 log_dir = "~/.local/share/harness-hat"
 
 [defaults.containers]
-env_passthrough = ["TERM", "COLORTERM", "COLORFGBG"]
+env_passthrough = ["TERM", "COLORTERM", "COLORFGBG", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]
 bypass_proxy = [
   "api.anthropic.com",
   "claude.ai",
@@ -54,6 +54,7 @@ bypass_proxy = [
   "*.googleapis.com",
   "generativelanguage.googleapis.com",
   "aistudio.google.com",
+  "antigravity.google",
   "accounts.google.com",
   "oauth2.googleapis.com",
   "www.googleapis.com",
@@ -106,8 +107,16 @@ container = "/home/coder/.config/codex"
 mode = "rw"
 
 [[defaults.containers.mounts]]
+# Antigravity CLI uses ~/.gemini/antigravity-cli for settings/history. Login
+# tokens live in the OS keyring, so the base image starts a Linux Secret Service
+# and persists it through the dedicated keyrings mount below.
 host = "~/.gemini"
 container = "/home/coder/.gemini"
+mode = "rw"
+
+[[defaults.containers.mounts]]
+host = "~/.local/share/harness-hat/container-keyrings"
+container = "/home/coder/.local/share/keyrings"
 mode = "rw"
 
 [[defaults.containers.mounts]]
@@ -117,7 +126,7 @@ mode = "rw"
 
 # Optional defaults applied to every template.
 # mount_target = "/workspace"
-# memory = "4g"
+# memory = "16g"
 # cpus = "2"
 # shm_size = "1g"
 

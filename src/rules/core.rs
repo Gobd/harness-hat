@@ -408,10 +408,7 @@ pub fn parse_network_allowlist_rule(raw: &str) -> Result<NetworkRule> {
                         "domain pattern '{d}' must not start with '.' in '{raw}' (use '*.{}' for subdomains, or the apex for exact)",
                         d.trim_start_matches('.')
                     );
-                    anyhow::ensure!(
-                        !d.is_empty(),
-                        "empty domain pattern in '{raw}'"
-                    );
+                    anyhow::ensure!(!d.is_empty(), "empty domain pattern in '{raw}'");
                     // Reject obviously bogus / non-ASCII patterns. Callers must
                     // pre-IDNA encode patterns to ASCII (`xn--…`) so matching
                     // is straightforward against canonicalized hosts.

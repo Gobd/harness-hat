@@ -10,159 +10,74 @@ MITM proxy. The host-side command-execution and subagent-control subsystems
 have been removed entirely.
 
 ### Added
-- New `harness-hat shell [ID]` subcommand: open an interactive shell in a
-  running session. With no ID it lists running sessions and their IDs. Works
-  as a thin Docker attach, independent of the manager TUI.
-- New `harness-hat init [PATH]` subcommand to generate a sample config
-  (replaces the old `--init` flag; defaults to `./harness-hat.toml`).
-- Built-in Docker templates for TypeScript/Bun/Node/pnpm, Go, Rust, and PHP
-  development environments (`docker/typescript.dockerfile`,
-  `docker/go.dockerfile`, `docker/rust.dockerfile`, `docker/php.dockerfile`).
+- New `hh shell [ID]` subcommand: open an interactive shell in a running session. With no ID it lists running sessions and their IDs. Works as a thin Docker attach, independent of the manager TUI.
+- New `hh init [PATH]` subcommand to generate a sample config (replaces the old `--init` flag; defaults to `./harness-hat.toml`).
+- Built-in Docker templates for TypeScript/Bun/Node/pnpm, Go, Rust, and PHP development environments (`docker/typescript.dockerfile`, `docker/go.dockerfile`, `docker/rust.dockerfile`, `docker/php.dockerfile`).
 - Per-template Docker resource controls: `memory`, `cpus`, and `shm_size`.
-- Per-session seeded mounts (`ContainerMount.seed`): files like
-  `~/.claude.json` are copied per session instead of bind-mounted, so
-  concurrent sessions don't corrupt a file the agent rewrites in place. The
-  TUI mounts view visually distinguishes seeded mounts.
-- Default container mounts for agent session state (`~/.claude.json`,
-  `~/.claude`, `~/.codex`, `~/.config/codex`, `~/.gemini`, `~/.pi`) under
-  `[defaults.containers.mounts]`; mounts whose host source is absent are
-  skipped.
-- `[defaults.control].allow_remote_control` opt-in required to bind the
-  control server or proxy to non-loopback addresses.
-- Persistent build pane: failed/cancelled builds keep their output and a
-  banner with an `[r] Rebuild` shortcut.
-- `api.github.com` and `downloads.claude.ai` added to the default network
-  allowlist to support Dockerfile template fetch and the apt-based Claude
-  Code install.
+- Per-session seeded mounts (`ContainerMount.seed`): files like `~/.claude.json` and `~/.claude/.claude.json` are copied per session instead of bind-mounted, so concurrent sessions don't corrupt a file the agent rewrites in place. The TUI mounts view visually distinguishes seeded mounts.
+- Default container mounts for agent session state (`~/.claude.json`, `~/.claude/.claude.json`, `~/.claude`, `~/.codex`, `~/.config/codex`, `~/.gemini`, `~/.local/share/harness-hat/container-keyrings`, `~/.pi`) under `[defaults.containers.mounts]`; mounts whose host source is absent are skipped. The `~/.gemini` passthrough covers Antigravity CLI's `~/.gemini/antigravity-cli` settings/history state, while the dedicated keyrings mount persists its OS-keyring auth tokens.
+- The base image now starts a headless DBus Secret Service (`gnome-keyring`) for user sessions so Antigravity CLI can store and reuse login credentials inside Harness Hat containers.
+- Automated macOS Keychain OAuth credentials injection: on macOS, reads the Claude Code OAuth credentials from the system Keychain and merges them into the seeded `.claude.json` and `~/.claude/.claude.json` container files on startup, allowing Claude Code to authenticate seamlessly without manual token config.
+- `[defaults.control].allow_remote_control` opt-in required to bind the control server or proxy to non-loopback addresses.
+- Persistent build pane: failed/cancelled builds keep their output and a banner with an `[r] Rebuild` shortcut.
+- `api.github.com` and `downloads.claude.ai` added to the default network allowlist to support Dockerfile template fetch and the apt-based Claude Code install.
 
 ### Changed
-- **Breaking:** the manager binary is renamed `harness-hat-manager` →
-  `harness-hat` (a single binary). Running `harness-hat` with no subcommand
-  launches the interactive workspace manager.
-- **Breaking:** Harness Hat now uses a workspace + Docker-template session
-  model; sessions are shell-first Docker containers. The previous
-  command-passthrough / host-command-control model is gone.
-- **Breaking:** config section `[defaults.hostdo]` is replaced by
-  `[defaults.control]` (the authenticated lifecycle/control server used by
-  `killme`). The hostdo execution-policy keys (`max_timeout_secs`,
-  `denied_executables`, `hostdo_block_common`, `denied_argument_fragments`,
-  `command_aliases`, and per-workspace `hostdo` overrides) are no longer
-  recognized.
-- **Breaking:** example container profiles are reorganized from
-  agent-centric names (`claude`, `codex`, `gemini`, `pi`) to language/size
-  templates (`typescript`, `go`, `rust`, `php`, `base`, `large`).
-- **Breaking:** the example config now ships with `server_host = "127.0.0.1"`
-  and `proxy_host = "127.0.0.1"`. The manager refuses non-loopback binds
-  unless `allow_remote_control = true` is set explicitly.
-- **Breaking:** the base Docker image now installs Claude Code from
-  Anthropic's signed apt repository (`downloads.claude.ai`) instead of npm.
-  Image rebuilds are now the only upgrade path for Claude Code.
-- The default image no longer globally installs the `codex`, `gemini`, and
-  `pi` agent CLIs; templates ship language toolchains and leave agent CLI
-  choice to the user/profile.
+- **Breaking:** the manager binary is renamed `harness-hat-manager` → `hh` (a single binary). Running `hh` with no subcommand launches the interactive workspace manager.
+- **Breaking:** Harness Hat now uses a workspace + Docker-template session model; sessions are shell-first Docker containers. The previous command-passthrough / host-command-control model is gone.
+- **Breaking:** config section `[defaults.hostdo]` is replaced by `[defaults.control]` (the authenticated lifecycle/control server used by `killme`). The hostdo execution-policy keys (`max_timeout_secs`, `denied_executables`, `hostdo_block_common`, `denied_argument_fragments`, `command_aliases`, and per-workspace `hostdo` overrides) are no longer recognized.
+- **Breaking:** example container profiles are reorganized from agent-centric names (`claude`, `codex`, `gemini`, `pi`) to language/size templates (`typescript`, `go`, `rust`, `php`, `base`, `large`).
+- **Breaking:** the example config now ships with `server_host = "127.0.0.1"` and `proxy_host = "127.0.0.1"`. The manager refuses non-loopback binds unless `allow_remote_control = true` is set explicitly.
+- **Breaking:** the base Docker image now installs Claude Code from Anthropic's signed apt repository (`downloads.claude.ai`) instead of npm. Image rebuilds are now the only upgrade path for Claude Code.
+- The base image installs Antigravity CLI (`agy`) from the official GitHub release artifacts instead of installing Gemini CLI from npm, and includes an `agy-yolo` wrapper for `agy --dangerously-skip-permissions`.
 - Containers now run as user `coder` (uid 1000) across all templates.
-- Mount-seed detection consolidated onto `ContainerMount::is_seeded()`,
-  shared by container launch and the TUI.
-- Transparent-TLS and TLS-MITM request handling consolidated into a single
-  `handle_tls_inner_request` helper, reducing duplication across the proxy.
-- Top-level config structs now reject unknown fields
-  (`#[serde(deny_unknown_fields)]`), surfacing typos and removed options
-  instead of silently defaulting.
+- Mount-seed detection consolidated onto `ContainerMount::is_seeded()`, shared by container launch and the TUI.
+- Transparent-TLS and TLS-MITM request handling consolidated into a single `handle_tls_inner_request` helper, reducing duplication across the proxy.
+- Top-level config structs now reject unknown fields (`#[serde(deny_unknown_fields)]`), surfacing typos and removed options instead of silently defaulting.
 - README rewritten around the new workspace/template/shell workflow.
 
 ### Removed
-- **Breaking:** the `hostdo` in-container host-command bridge and all its
-  subcommands (`hostdo run`/`list`/`status`/`tail`/`send`/`stop`) — the
-  headline 0.7.0 feature. The host execution server, command policy/approval
-  engine, and passthrough mode are gone (`docker/scripts/hostdo.py`,
-  `src/exec.rs`, `src/passthrough.rs`, `src/server/core.rs`).
-- **Breaking:** the `agentctl` subagent spawn/control system
-  (`agentctl spawn`/`status`/`tail`/`send`/`stop`) and its TUI integration
-  (`docker/scripts/agentctl.py`, `src/agents.rs`, `src/tui/app/agents.rs`).
+- **Breaking:** the `hostdo` in-container host-command bridge and all its subcommands (`hostdo run`/`list`/`status`/`tail`/`send`/`stop`) — the headline 0.7.0 feature. The host execution server, command policy/approval engine, and passthrough mode are gone (`docker/scripts/hostdo.py`, `src/exec.rs`, `src/passthrough.rs`, `src/server/core.rs`).
+- **Breaking:** the `agentctl` subagent spawn/control system (`agentctl spawn`/`status`/`tail`/`send`/`stop`) and its TUI integration (`docker/scripts/agentctl.py`, `src/agents.rs`, `src/tui/app/agents.rs`).
 - The legacy substring-based container-ID match in the stop endpoint.
-- Per-request `reqwest::Client` rebuild on the proxy hot path (now cached on
-  `ProxyState`).
+- Per-request `reqwest::Client` rebuild on the proxy hot path (now cached on `ProxyState`).
 
 ### Security
-- Bearer-token and proxy-authorization comparisons now use constant-time
-  equality.
-- HTTP request parsing rejects `Content-Length` + `Transfer-Encoding`
-  conflicts, duplicate `Content-Length` headers, bare-LF line terminators,
-  obs-fold continuations, and bytes past the advertised body length.
-- Incoming hostnames are now canonicalized (lowercase, trailing-dot strip,
-  IDNA) before rule matching; deny rules can no longer be bypassed via case,
-  trailing dot, or punycode.
-- Path matching now strips the query string, percent-decodes, and collapses
-  `..`/`//` before evaluation.
-- TLS MITM leaf-cert cache is now bounded (LRU 1024) with key generation
-  moved off the async runtime; concurrent first-misses are de-duplicated.
-- CONNECT MITM now replays bytes pipelined after the CONNECT head into the
-  TLS acceptor.
+- Bearer-token and proxy-authorization comparisons now use constant-time equality.
+- HTTP request parsing rejects `Content-Length` + `Transfer-Encoding` conflicts, duplicate `Content-Length` headers, bare-LF line terminators, obs-fold continuations, and bytes past the advertised body length.
+- Incoming hostnames are now canonicalized (lowercase, trailing-dot strip, IDNA) before rule matching; deny rules can no longer be bypassed via case, trailing dot, or punycode.
+- Path matching now strips the query string, percent-decodes, and collapses `..`/`//` before evaluation.
+- TLS MITM leaf-cert cache is now bounded (LRU 1024) with key generation moved off the async runtime; concurrent first-misses are de-duplicated.
+- CONNECT MITM now replays bytes pipelined after the CONNECT head into the TLS acceptor.
 - `Connection:`-listed header tokens are stripped before forwarding.
 - Plain-HTTP `Host:` validation rejects duplicate and missing Host headers.
-- Unknown HTTP methods are rejected with 400 instead of silently rewritten
-  to `GET`.
-- CA certificate now sets explicit key usages (`keyCertSign`, `cRLSign`) and
-  a bounded 10-year validity window; leaf certs carry a `serverAuth` EKU.
-- SNI host names that are non-ASCII or invalid UTF-8 are rejected instead of
-  being lossily decoded into a bogus policy key and certificate subject.
-- CONNECT/SNI hosts are syntactically validated before reaching the leaf-cert
-  signer, so attacker-controlled strings can't become cache keys or subjects.
-- Shared session-state mounts (`~/.claude`, `~/.codex`, …) are skipped when
-  the host source does not exist instead of asking Docker to bind a missing
-  path.
-- IPv6 SSRF predicate extended to cover NAT64, 6to4, IPv4-translated, and
-  discard-only prefixes.
+- Unknown HTTP methods are rejected with 400 instead of silently rewritten to `GET`.
+- CA certificate now sets explicit key usages (`keyCertSign`, `cRLSign`) and a bounded 10-year validity window; leaf certs carry a `serverAuth` EKU.
+- SNI host names that are non-ASCII or invalid UTF-8 are rejected instead of being lossily decoded into a bogus policy key and certificate subject.
+- CONNECT/SNI hosts are syntactically validated before reaching the leaf-cert signer, so attacker-controlled strings can't become cache keys or subjects.
+- Shared session-state mounts (`~/.claude`, `~/.codex`, …) are skipped when the host source does not exist instead of asking Docker to bind a missing path.
+- IPv6 SSRF predicate extended to cover NAT64, 6to4, IPv4-translated, and discard-only prefixes.
 - DNS cache bounded (LRU) and case-normalized.
-- Config `instance_id` write-back and workspace-block append are now atomic
-  (tmp + fsync + rename) under an advisory file lock.
-- Audit log file and `log_dir` are now created with `0o600` / `0o700`
-  permissions atomically (no chmod-after race) and refuse to follow
-  symlinks.
-- Workspace path canonicalization runs before validation, and canonical
-  paths under `~/.ssh`, `~/.gnupg`, and `/etc` are refused.
-- Built-in Dockerfile templates are now written from compiled-in content
-  rather than fetched at runtime over plain HTTP.
-- Mount paths and container paths reject embedded `:` and `,` characters
-  to prevent ambiguous `-v` argument parsing.
-- Approval "Allow forever" / "Deny forever" decisions now require an
-  unambiguous source workspace; the silent sidebar-fallback was removed.
-- Stop endpoint exact-matches the requesting session's container ID
-  rather than accepting substring prefixes.
-- Control endpoints now enforce body-size, request-timeout, and
-  concurrency limits.
+- Config `instance_id` write-back and workspace-block append are now atomic (tmp + fsync + rename) under an advisory file lock.
+- Audit log file and `log_dir` are now created with `0o600` / `0o700` permissions atomically (no chmod-after race) and refuse to follow symlinks.
+- Workspace path canonicalization runs before validation, and canonical paths under `~/.ssh`, `~/.gnupg`, and `/etc` are refused.
+- Built-in Dockerfile templates are now written from compiled-in content rather than fetched at runtime over plain HTTP.
+- Mount paths and container paths reject embedded `:` and `,` characters to prevent ambiguous `-v` argument parsing.
+- Approval "Allow forever" / "Deny forever" decisions now require an unambiguous source workspace; the silent sidebar-fallback was removed.
+- Stop endpoint exact-matches the requesting session's container ID rather than accepting substring prefixes.
+- Control endpoints now enforce body-size, request-timeout, and concurrency limits.
 
 ### Fixed
-- Build tasks can now be cancelled (cooperative flag + task abort) on TUI
-  quit.
-- Pressing Esc or `h` on the build pane while a build is running now returns
-  to the sidebar without canceling the build; press `C` to cancel a running
-  build.
-- Waiting sessions in the sidebar no longer show a `?` indicator to the left
-  of their title.
-- Added `localhost_forwards` for port 8081 to the `[defaults.containers]`
-  example. The 0.8.0 restructure removed the agent-centric container profiles
-  (including the pi profile that documented this forward); Pi's persistent
-  `~/.pi/agent/models.json` still points to `http://localhost:8081/v1` but
-  strict-network containers had no socat forwarder on that port, refusing
-  every model call.
-- The control server and proxy listener tasks are now aborted when the TUI
-  loop exits, before telemetry shutdown, instead of leaking until process
-  exit.
-- TUI activity queue is bounded (drop on overflow with a debug log); the
-  in-memory activity list is capped to prevent unbounded growth from
-  long-running or never-completing entries.
+- Build tasks can now be cancelled (cooperative flag + task abort) on TUI quit.
+- Pressing Esc or `h` on the build pane while a build is running now returns to the sidebar without canceling the build; press `C` to cancel a running build.
+- Waiting sessions in the sidebar no longer show a `?` indicator to the left of their title.
+- Added `localhost_forwards` for port 8081 to the `[defaults.containers]` example. The 0.8.0 restructure removed the agent-centric container profiles (including the pi profile that documented this forward); Pi's persistent `~/.pi/agent/models.json` still points to `http://localhost:8081/v1` but strict-network containers had no socat forwarder on that port, refusing every model call.
+- The control server and proxy listener tasks are now aborted when the TUI loop exits, before telemetry shutdown, instead of leaking until process exit.
+- TUI activity queue is bounded (drop on overflow with a debug log); the in-memory activity list is capped to prevent unbounded growth from long-running or never-completing entries.
 - Rules-scan worker thread now resets its in-flight flag even on panic.
-- TUI build pane error-detection heuristic no longer over-matches benign
-  output containing the substring `error`.
-- Container alias allocation now bails on docker errors rather than
-  silently risking collisions.
-- `loopback_to_host_docker` no longer appends a trailing slash when rewriting
-  `HARNESS_HAT_URL` to `host.docker.internal`. The `url::Url` round-trip
-  introduced during the hardening normalized `http://host:7878` to
-  `http://host:7878/`; the container's strict-network init parses the port
-  with naive shell, so the stray slash produced port `7878/`, failed
-  `iptables`, and killed the container at startup (exit 2).
+- TUI build pane error-detection heuristic no longer over-matches benign output containing the substring `error`.
+- Container alias allocation now bails on docker errors rather than silently risking collisions.
+- `loopback_to_host_docker` no longer appends a trailing slash when rewriting `HARNESS_HAT_URL` to `host.docker.internal`. The `url::Url` round-trip introduced during the hardening normalized `http://host:7878` to `http://host:7878/`; the container's strict-network init parses the port with naive shell, so the stray slash produced port `7878/`, failed `iptables`, and killed the container at startup (exit 2).
 
 
 ## 0.7.0 Jun 1, 2026

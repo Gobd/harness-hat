@@ -302,7 +302,11 @@ impl ContainerSession {
             }
             Err(e) => {
                 warn!(target = %target, error = %e, "failed to spawn docker rm");
-                Err(anyhow::anyhow!("failed to spawn docker rm for {}: {}", target, e))
+                Err(anyhow::anyhow!(
+                    "failed to spawn docker rm for {}: {}",
+                    target,
+                    e
+                ))
             }
         }
     }
