@@ -86,8 +86,8 @@ pub fn load(path: &Path) -> Result<Config> {
 
 fn read_config_to_string(path: &Path) -> Result<String> {
     use std::io::Read;
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("opening config: {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("opening config: {}", path.display()))?;
     let meta = file
         .metadata()
         .with_context(|| format!("statting config: {}", path.display()))?;
@@ -434,6 +434,7 @@ fn shared_session_state_mounts() -> Result<Vec<ContainerMount>> {
     let mut mounts = Vec::new();
     for (host, container) in [
         ("~/.claude.json", "/home/coder/.claude.json"),
+        ("~/.claude/.claude.json", "/home/coder/.claude/.claude.json"),
         ("~/.claude", "/home/coder/.claude"),
         ("~/.codex", "/home/coder/.codex"),
         ("~/.config/codex", "/home/coder/.config/codex"),

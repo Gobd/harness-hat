@@ -130,10 +130,18 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
             return Ok(());
         }
     };
-    let policy = rules.match_network_for_port(&method, &host, &path, Some(port));
+    let policy = match rules.match_network_for_port(&method, &host, &path, Some(port)) {
+        NetworkPolicy::Deny => NetworkPolicy::Deny,
+        _policy if state.has_configured_localhost_forward(&host, port) => {
+            let note = format!("configured localhost_forward for {host}:{port}");
+            state.activity_line(&activity.id, note);
+            NetworkPolicy::Auto
+        }
+        policy => policy,
+    };
 
     if policy != NetworkPolicy::Deny {
-        if let Err(e) = state.resolve_public_addrs(&host, port).await {
+        if let Err(e) = state.resolve_request_addrs(&host, port).await {
             state.activity_finished(&activity.id, ActivityState::Denied, Some(e.to_string()));
             write_error_any(&mut stream, 403, "Forbidden by harness-hat policy").await?;
             return Ok(());
@@ -394,16 +402,7 @@ where
         return Ok(());
     }
     forward_request_with_activity(
-        state,
-        tls_stream,
-        &activity,
-        "https",
-        host,
-        port,
-        &path,
-        &method,
-        &headers,
-        body,
+        state, tls_stream, &activity, "https", host, port, &path, &method, &headers, body,
     )
     .await
 }
@@ -492,10 +491,10 @@ pub(crate) async fn forward_request(
     // not silently rewritten to GET.
     let method = reqwest::Method::from_bytes(method.as_bytes())
         .map_err(|e| anyhow::anyhow!("invalid HTTP method: {e}"))?;
-    let addrs = state.resolve_public_addrs(host, port).await?;
+    let addrs = state.resolve_request_addrs(host, port).await?;
     // M1: reuse a cached reqwest client across requests instead of rebuilding
     // (and re-doing TLS bootstrap) per call.
-    let client = state.http_client(host, &addrs)?;
+    let client = state.http_client(host, port, &addrs)?;
     let url = build_url(scheme, host, port, path);
 
     let mut req = client.request(method, url);

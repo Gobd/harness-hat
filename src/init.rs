@@ -106,7 +106,11 @@ pub fn ensure_docker_assets(docker_dir: &Path) -> Result<()> {
 
 #[instrument(skip(docker_dir))]
 pub(crate) fn ensure_default_dockerfile(docker_dir: &Path) -> Result<()> {
-    ensure_template_dockerfile(docker_dir, "default.dockerfile", DEFAULT_DOCKERFILE_TEMPLATE)
+    ensure_template_dockerfile(
+        docker_dir,
+        "default.dockerfile",
+        DEFAULT_DOCKERFILE_TEMPLATE,
+    )
 }
 
 #[instrument(skip(docker_dir))]
@@ -250,6 +254,7 @@ mod tests {
         }
         for (host, container) in [
             ("~/.claude.json", "/home/coder/.claude.json"),
+            ("~/.claude/.claude.json", "/home/coder/.claude/.claude.json"),
             ("~/.claude", "/home/coder/.claude"),
             ("~/.codex", "/home/coder/.codex"),
             ("~/.config/codex", "/home/coder/.config/codex"),

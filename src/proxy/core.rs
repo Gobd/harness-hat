@@ -11,6 +11,7 @@
 use anyhow::Result;
 use lru::LruCache;
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -296,16 +297,42 @@ impl ProxyState {
             .is_some_and(|fixed| fixed.priority == SourcePriority::Limited)
     }
 
-    pub(crate) async fn resolve_public_addrs(
+    pub(crate) fn has_configured_localhost_forward(&self, host: &str, port: u16) -> bool {
+        self.localhost_forward_host_port(host, port).is_some()
+    }
+
+    pub(crate) async fn resolve_request_addrs(
         &self,
         host: &str,
         port: u16,
-    ) -> Result<Vec<std::net::SocketAddr>> {
+    ) -> Result<Vec<SocketAddr>> {
+        if let Some(host_port) = self.localhost_forward_host_port(host, port) {
+            return Ok(vec![
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port),
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), host_port),
+            ]);
+        }
         resolve_public_addrs_with_priority(host, port, self.is_primary_source()).await
     }
 
     pub(crate) async fn connect_public_tcp(&self, host: &str, port: u16) -> Result<TcpStream> {
         connect_public_tcp_with_priority(host, port, self.is_primary_source()).await
+    }
+
+    fn localhost_forward_host_port(&self, host: &str, port: u16) -> Option<u16> {
+        if !is_container_host_alias(host) {
+            return None;
+        }
+        let fixed = self.fixed_source.as_ref()?;
+        let cfg = self.config.get();
+        let ctr = cfg
+            .containers
+            .iter()
+            .find(|ctr| ctr.name == fixed.container)?;
+        ctr.localhost_forwards
+            .iter()
+            .find(|forward| forward.container_port == port)
+            .map(|forward| forward.effective_host_port())
     }
 
     /// Return a `reqwest::Client` keyed on `host`, with the given resolved
@@ -315,10 +342,12 @@ impl ProxyState {
     pub(crate) fn http_client(
         &self,
         host: &str,
+        port: u16,
         addrs: &[std::net::SocketAddr],
     ) -> Result<reqwest::Client> {
+        let cache_key = format!("{host}:{port}");
         if let Ok(mut cache) = self.http_client_cache.lock()
-            && let Some(client) = cache.get(host)
+            && let Some(client) = cache.get(&cache_key)
         {
             return Ok(client.clone());
         }
@@ -329,7 +358,7 @@ impl ProxyState {
             .resolve_to_addrs(host, addrs)
             .build()?;
         if let Ok(mut cache) = self.http_client_cache.lock() {
-            cache.put(host.to_string(), client.clone());
+            cache.put(cache_key, client.clone());
         }
         Ok(client)
     }
@@ -374,9 +403,7 @@ impl ProxyState {
                 if let Ok(mut cache) = self.rules_cache.lock()
                     && let Some(entry) = cache.get(&cache_key)
                 {
-                    warn!(
-                        "proxy rules reload failed ({e}); falling back to last-known-good rules"
-                    );
+                    warn!("proxy rules reload failed ({e}); falling back to last-known-good rules");
                     return Ok(entry.rules.clone());
                 }
                 Err(e)
@@ -432,6 +459,18 @@ impl ProxyState {
         }
         latest
     }
+}
+
+fn is_container_host_alias(host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if matches!(
+        host.as_str(),
+        "localhost" | "host.docker.internal" | "host.containers.internal"
+    ) {
+        return true;
+    }
+    host.parse::<IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())
 }
 
 fn source_connection_key(source_project: Option<&str>, source_container: Option<&str>) -> String {
@@ -808,7 +847,7 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
     };
     let preflight_policy = rules.match_connect(&host, 443);
     if preflight_policy != NetworkPolicy::Deny {
-        if let Err(e) = state.resolve_public_addrs(&host, 443).await {
+        if let Err(e) = state.resolve_request_addrs(&host, 443).await {
             state.activity_finished(
                 &connect_activity.id,
                 ActivityState::Denied,
@@ -872,7 +911,9 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
         state.activity_finished(
             &connect_activity.id,
             ActivityState::Failed,
-            Some(format!("refusing to sign leaf cert for invalid host {host:?}")),
+            Some(format!(
+                "refusing to sign leaf cert for invalid host {host:?}"
+            )),
         );
         return Ok(());
     }

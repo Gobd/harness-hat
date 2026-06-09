@@ -49,9 +49,7 @@ allowlist = [
     "domain=registry.npmjs.org",
     "domain=http-intake.logs.us5.datadoghq.com",
     "domain=mcp-proxy.anthropic.com",
-    # Used to fetch missing built-in Dockerfile templates from this repo.
     "domain=api.github.com",
-    # Apt repository for the signed Claude Code package installed in the
-    # base Docker image. (Build-time only; not strictly required at runtime.)
     "domain=downloads.claude.ai",
+    "domain=pi.dev",
 ]

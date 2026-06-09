@@ -218,7 +218,7 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                             let (prefix, name_color) = if session.is_exited() {
                                 ("  ✗ ".to_string(), Color::DarkGray)
                             } else if app.session_is_waiting(session_idx) {
-                                ("  ? ".to_string(), Color::Yellow)
+                                ("  ".to_string(), Color::Yellow)
                             } else {
                                 (format!("  {} ", loading_spinner_frame()), Color::Green)
                             };
@@ -270,7 +270,7 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                     let (prefix, name_color) = if session.is_exited() {
                         (format!("{indent}✗"), Color::DarkGray)
                     } else if app.session_is_waiting(session_idx) {
-                        (format!("{indent}?"), Color::Yellow)
+                        (format!("{indent}"), Color::Yellow)
                     } else {
                         (format!("{indent}{}", loading_spinner_frame()), Color::Green)
                     };

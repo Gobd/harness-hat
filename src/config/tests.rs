@@ -1,6 +1,4 @@
-use super::{
-    Config, DefaultsConfig, image_tag_for_stem, load, resolve_workspace_sidebar_hotkeys,
-};
+use super::{Config, DefaultsConfig, image_tag_for_stem, load, resolve_workspace_sidebar_hotkeys};
 
 fn temp_workspace() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
@@ -87,6 +85,10 @@ image = "default"
     let home = dirs::home_dir().expect("home dir");
     for (host, container) in [
         (home.join(".claude.json"), "/home/coder/.claude.json"),
+        (
+            home.join(".claude/.claude.json"),
+            "/home/coder/.claude/.claude.json",
+        ),
         (home.join(".claude"), "/home/coder/.claude"),
         (home.join(".codex"), "/home/coder/.codex"),
         (home.join(".config/codex"), "/home/coder/.config/codex"),
@@ -103,6 +105,7 @@ image = "default"
     }
     for host in [
         home.join(".claude.json"),
+        home.join(".claude/.claude.json"),
         home.join(".claude"),
         home.join(".codex"),
         home.join(".config/codex"),

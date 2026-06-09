@@ -68,17 +68,25 @@ bypass_proxy = [
 # Shared session-state mounts applied to every template.
 # These keep the agent CLIs' auth/session caches available across launches.
 #
-# `.claude.json` is rewritten in place by every Claude Code instance, so sharing
-# the host's live file lets the host and container(s) race and corrupt it
-# ("JSON Parse error: Unterminated string"), which resets the config and logs
-# the container out. It is therefore seeded as a private per-session copy: the
-# container reads the current session through at launch, then owns the file
-# privately and never writes back to the host. Set `seed = false` to restore the
-# shared live bind mount, or add `seed = true` to any other file mount to
-# privatize it the same way. (Unset defaults to seeding `.claude.json` only.)
+# Claude Code reads session state from both `~/.claude.json` and
+# `~/.claude/.claude.json` depending on command path/version. These files are
+# rewritten in place by every Claude Code instance, so sharing the host's live
+# file lets the host and container(s) race and corrupt it ("JSON Parse error:
+# Unterminated string"), which resets the config and logs the container out.
+# They are therefore seeded as private per-session copies: the container reads
+# the current session through at launch, then owns the files privately and never
+# writes back to the host. Set `seed = false` to restore a shared live bind
+# mount, or add `seed = true` to any other file mount to privatize it the same
+# way. (Unset defaults to seeding `.claude.json` only.)
 [[defaults.containers.mounts]]
 host = "~/.claude.json"
 container = "/home/coder/.claude.json"
+mode = "rw"
+seed = true
+
+[[defaults.containers.mounts]]
+host = "~/.claude/.claude.json"
+container = "/home/coder/.claude/.claude.json"
 mode = "rw"
 seed = true
 
@@ -112,6 +120,13 @@ mode = "rw"
 # memory = "4g"
 # cpus = "2"
 # shm_size = "1g"
+
+# Forward a host-local OpenAI-compatible model server (e.g. Ollama) into
+# every session as http://localhost:8081, so agents like pi that store
+# baseUrl = "http://localhost:8081/v1" in their config can reach it.
+[[defaults.containers.localhost_forwards]]
+container_port = 8081
+host_port = 8081
 
 # ---------------------------------------------------------------------------
 # Docker templates.

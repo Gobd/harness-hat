@@ -174,7 +174,7 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
     };
     let preflight_policy = rules.match_connect(&host, port);
     if preflight_policy != NetworkPolicy::Deny {
-        if let Err(e) = state.resolve_public_addrs(&host, port).await {
+        if let Err(e) = state.resolve_request_addrs(&host, port).await {
             state.activity_finished(
                 &connect_activity.id,
                 ActivityState::Denied,
@@ -276,7 +276,9 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
         state.activity_finished(
             &connect_activity.id,
             ActivityState::Failed,
-            Some(format!("refusing to sign leaf cert for invalid host {host:?}")),
+            Some(format!(
+                "refusing to sign leaf cert for invalid host {host:?}"
+            )),
         );
         anyhow::bail!("invalid CONNECT host for signing: {host:?}");
     }

@@ -230,6 +230,34 @@ pub fn spawn(
         }
     }
 
+    // Inject Claude Code OAuth credentials from the macOS Keychain so Claude can
+    // authenticate inside the Linux container without a Keychain of its own.
+    //
+    // CLAUDE_CODE_OAUTH_TOKEN   — access token; used by both `-p` and TUI API calls.
+    // CLAUDE_CODE_OAUTH_SCOPES  — required by `shouldUseClaudeAIAuth` (TUI auth path).
+    // CLAUDE_CODE_OAUTH_REFRESH_TOKEN — refresh token; the TUI may verify that both
+    //   tokens are present to consider the session complete, and uses it to renew
+    //   the access token when it expires without needing a Keychain.
+    // CLAUDE_CODE_HOST_AUTH_ENV_VAR — tells Claude that auth is provided by the host
+    //   via the named env var, disabling Keychain / libsecret lookups that would
+    //   fail inside a headless Linux container.
+    if let Some(creds) = read_claude_oauth_credentials_full() {
+        write_env_file_entry(
+            &mut env_file,
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            &creds.access_token,
+        )?;
+        write_env_file_entry(&mut env_file, "CLAUDE_CODE_OAUTH_SCOPES", &creds.scopes)?;
+        if let Some(ref refresh) = creds.refresh_token {
+            write_env_file_entry(&mut env_file, "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", refresh)?;
+        }
+        write_env_file_entry(
+            &mut env_file,
+            "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        )?;
+    }
+
     docker_args.push("--env-file".to_string());
     docker_args.push(env_file.path().display().to_string());
 
@@ -241,8 +269,16 @@ pub fn spawn(
     // appears logged out). Seeded mounts (see `ContainerMount::is_seeded`) get a private
     // per-session copy instead: the container reads the session through, then
     // owns the file privately. The handles live for the container's lifetime.
+    //
+    // Mounts are sorted by container path depth (shortest first) so that
+    // directory mounts are applied before any file mounts nested inside them.
+    // Docker applies bind mounts in order, so a file mount on e.g.
+    // `/home/coder/.claude/.claude.json` must come *after* the directory mount
+    // on `/home/coder/.claude` — otherwise the directory mount overwrites it.
+    let mut sorted_mounts: Vec<&crate::config::ContainerMount> = ctr.mounts.iter().collect();
+    sorted_mounts.sort_by_key(|m| m.container.components().count());
     let mut seed_tempfiles: Vec<NamedTempFile> = Vec::new();
-    for mount in &ctr.mounts {
+    for mount in &sorted_mounts {
         let host_arg = match seed_private_mount(mount)? {
             Some(tempfile) => {
                 let path = tempfile.path().display().to_string();
@@ -273,9 +309,7 @@ pub fn spawn(
         // FOO=BAR\nINJECT=evil` and shadow other vars (or, on some shells,
         // poison the container environment with metacharacters).
         if !is_valid_env_name(name) {
-            anyhow::bail!(
-                "env_passthrough entry {name:?} is not a valid POSIX env variable name"
-            );
+            anyhow::bail!("env_passthrough entry {name:?} is not a valid POSIX env variable name");
         }
         debug!(name = %name, "passing env var through from host to container");
         docker_args.push("-e".to_string());
@@ -592,6 +626,10 @@ fn should_inject_coder_home(mounts: &[crate::config::ContainerMount]) -> bool {
 /// while the container's writes land on the private copy — the host file is
 /// never touched.
 ///
+/// On macOS, `.claude.json` is additionally patched with the OAuth credentials
+/// from the system Keychain so that Claude Code can authenticate inside the
+/// Linux container (which has no Keychain access).
+///
 /// Returns `None` (mount the host path as-is) when the mount isn't flagged for
 /// seeding or the host path is not a regular file — bind-mounting a missing
 /// path would make Docker materialize a directory, and a directory can't be
@@ -602,6 +640,17 @@ fn seed_private_mount(mount: &crate::config::ContainerMount) -> Result<Option<Na
     }
     let contents = std::fs::read(&mount.host)
         .with_context(|| format!("reading {} to seed container copy", mount.host.display()))?;
+
+    // For .claude.json, merge in macOS Keychain credentials so Claude can
+    // authenticate inside the Linux container.
+    let is_claude_config =
+        mount.container.file_name() == Some(std::ffi::OsStr::new(".claude.json"));
+    let contents = if is_claude_config {
+        inject_keychain_credentials(contents)?
+    } else {
+        contents
+    };
+
     let mut tempfile = tempfile::Builder::new()
         .prefix("harness-hat-seed-")
         .tempfile()
@@ -615,11 +664,87 @@ fn seed_private_mount(mount: &crate::config::ContainerMount) -> Result<Option<Na
     Ok(Some(tempfile))
 }
 
+/// Reads the Claude Code OAuth credentials from the macOS Keychain and merges
+/// them into the given `.claude.json` bytes. Returns the original bytes
+/// unchanged if the Keychain entry is absent or the JSON can't be parsed.
+fn inject_keychain_credentials(contents: Vec<u8>) -> Result<Vec<u8>> {
+    let Some(keychain_creds) = read_keychain_claude_credentials() else {
+        return Ok(contents);
+    };
+    let mut config: serde_json::Value = match serde_json::from_slice(&contents) {
+        Ok(v) => v,
+        Err(_) => return Ok(contents),
+    };
+    if let (Some(obj), Some(kc_obj)) = (config.as_object_mut(), keychain_creds.as_object()) {
+        for (key, val) in kc_obj {
+            obj.insert(key.clone(), val.clone());
+        }
+    }
+    serde_json::to_vec(&config).context("serializing .claude.json with injected credentials")
+}
+
+/// On macOS, reads the Claude Code OAuth credentials blob from the system
+/// Keychain via the `security` CLI. Returns `None` if the entry is absent,
+/// the command fails, or the output isn't valid JSON.
+#[cfg(target_os = "macos")]
+fn read_keychain_claude_credentials() -> Option<serde_json::Value> {
+    let output = std::process::Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    serde_json::from_str(raw.trim()).ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_keychain_claude_credentials() -> Option<serde_json::Value> {
+    None
+}
+
+struct ClaudeOAuthCredentials {
+    access_token: String,
+    refresh_token: Option<String>,
+    scopes: String,
+}
+
+/// Reads the full set of Claude Code OAuth credentials from the macOS Keychain.
+/// Returns access token, optional refresh token, and space-separated scopes.
+fn read_claude_oauth_credentials_full() -> Option<ClaudeOAuthCredentials> {
+    let creds = read_keychain_claude_credentials()?;
+    let oauth = &creds["claudeAiOauth"];
+    let access_token = oauth["accessToken"].as_str()?.to_string();
+    let refresh_token = oauth["refreshToken"].as_str().map(|s| s.to_string());
+    // Scopes are stored as a JSON array; join with spaces for the env var.
+    let scopes = if let Some(arr) = oauth["scopes"].as_array() {
+        arr.iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        // Fall back to the minimum scope Claude needs for TUI auth.
+        "user:inference".to_string()
+    };
+    Some(ClaudeOAuthCredentials {
+        access_token,
+        refresh_token,
+        scopes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         HARNESS_HAT_CA_BUNDLE_PATH, HARNESS_HAT_CA_CERT_PATH, format_localhost_forwards,
-        proxy_addr_without_auth, seed_private_mount, should_inject_coder_home, write_ca_env_entries,
+        proxy_addr_without_auth, seed_private_mount, should_inject_coder_home,
+        write_ca_env_entries,
     };
     use crate::config::{ContainerMount, LocalhostForward, MountMode};
     use std::io::Write as _;
@@ -638,6 +763,14 @@ mod tests {
     fn seed_defaults_to_claude_config_and_honors_explicit_flag() {
         // Unset: `.claude.json` seeds by default, everything else does not.
         assert!(mount("/Users/me/.claude.json", "/home/coder/.claude.json", None).is_seeded());
+        assert!(
+            mount(
+                "/Users/me/.claude/.claude.json",
+                "/home/coder/.claude/.claude.json",
+                None
+            )
+            .is_seeded()
+        );
         assert!(!mount("/Users/me/.claude", "/home/coder/.claude", None).is_seeded());
 
         // Explicit flag overrides the heuristic in both directions.
@@ -669,7 +802,9 @@ mod tests {
                 .is_none()
         );
 
-        // A seeded file mount is copied into a private tempfile with identical bytes.
+        // A seeded .claude.json mount is copied into a private tempfile with the
+        // source fields preserved. On macOS, Keychain credentials are also merged
+        // in, so we assert the source fields are present rather than byte-identical.
         let mut source = tempfile::Builder::new()
             .suffix(".claude.json")
             .tempfile()
@@ -686,7 +821,13 @@ mod tests {
             .expect("seed config")
             .expect("config file should be privatized");
         assert_ne!(seeded.path(), source.path());
-        assert_eq!(std::fs::read(seeded.path()).expect("read copy"), payload);
+        let seeded_bytes = std::fs::read(seeded.path()).expect("read copy");
+        let seeded_json: serde_json::Value =
+            serde_json::from_slice(&seeded_bytes).expect("seeded file is valid JSON");
+        assert_eq!(
+            seeded_json["oauthAccount"]["emailAddress"], "a@b.c",
+            "source fields must be preserved in seeded copy"
+        );
 
         // `seed = false` forces the shared live bind mount even for `.claude.json`.
         let shared = mount(

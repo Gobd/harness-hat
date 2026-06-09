@@ -134,7 +134,18 @@ have been removed entirely.
 
 ### Fixed
 - Build tasks can now be cancelled (cooperative flag + task abort) on TUI
-  quit and when the user presses Esc on the build pane.
+  quit.
+- Pressing Esc or `h` on the build pane while a build is running now returns
+  to the sidebar without canceling the build; press `C` to cancel a running
+  build.
+- Waiting sessions in the sidebar no longer show a `?` indicator to the left
+  of their title.
+- Added `localhost_forwards` for port 8081 to the `[defaults.containers]`
+  example. The 0.8.0 restructure removed the agent-centric container profiles
+  (including the pi profile that documented this forward); Pi's persistent
+  `~/.pi/agent/models.json` still points to `http://localhost:8081/v1` but
+  strict-network containers had no socat forwarder on that port, refusing
+  every model call.
 - The control server and proxy listener tasks are now aborted when the TUI
   loop exits, before telemetry shutdown, instead of leaking until process
   exit.

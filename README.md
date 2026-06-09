@@ -143,6 +143,12 @@ container = "/home/coder/.claude.json"
 mode = "rw"
 seed = true                              # per-session copy, not a live bind
 
+[[defaults.containers.mounts]]
+host = "~/.claude/.claude.json"
+container = "/home/coder/.claude/.claude.json"
+mode = "rw"
+seed = true
+
 [container_profiles.rust]
 image = "rust"
 memory = "6g"

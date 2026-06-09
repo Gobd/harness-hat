@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use crate::ca::CaStore;
-    use crate::proxy::core::{NetworkDecision, ProxyState, SourceIdentityStatus, SourcePriority};
     use crate::proxy::connect::parse_sni_from_tls_client_hello;
+    use crate::proxy::core::{NetworkDecision, ProxyState, SourceIdentityStatus, SourcePriority};
     use crate::proxy::helpers::{
         bypass_host_matches, canonicalize_host, container_tls_passthrough_match,
         decode_source_from_proxy_authorization, ensure_host_header_matches_target,
@@ -312,6 +312,64 @@ global_rules_file = "/tmp/global.toml""#;
         );
     }
 
+    #[tokio::test]
+    async fn configured_localhost_forward_allows_scoped_proxy_loopback() {
+        let ca_dir = unique_temp_dir("proxy-test-ca");
+        let ca = Arc::new(CaStore::load_or_create(&ca_dir).unwrap());
+        let raw = r#"
+version = 1
+docker_dir = "/tmp"
+
+[manager]
+global_rules_file = "/tmp/global.toml"
+
+[container_profiles.pi]
+image = "default"
+
+[[container_profiles.pi.localhost_forwards]]
+container_port = 8081
+host_port = 18081
+"#;
+        let root = unique_temp_dir("proxy-test-config");
+        let config_path = root.join("harness-hat.toml");
+        std::fs::write(&config_path, raw).expect("write config");
+        let cfg = crate::config::load(&config_path).expect("load config");
+        let (pending_tx, _pending_rx) = mpsc::channel(1);
+        let (activity_tx, _activity_rx) = mpsc::channel(16);
+        let state = ProxyState::new(
+            ca,
+            SharedConfig::new(Arc::new(cfg)),
+            pending_tx,
+            activity_tx,
+        )
+        .unwrap()
+        .with_fixed_source("workspace", "pi", "session", SourcePriority::Primary);
+
+        assert!(state.has_configured_localhost_forward("localhost", 8081));
+        assert!(state.has_configured_localhost_forward("host.docker.internal", 8081));
+        assert!(!state.has_configured_localhost_forward("localhost", 8082));
+
+        let addrs = state
+            .resolve_request_addrs("localhost", 8081)
+            .await
+            .expect("configured loopback forward should resolve");
+        assert!(
+            addrs
+                .iter()
+                .any(|addr| addr.ip().is_loopback() && addr.port() == 18081),
+            "expected host loopback address on forwarded host port, got {addrs:?}"
+        );
+
+        let err = state
+            .resolve_request_addrs("localhost", 8082)
+            .await
+            .expect_err("unconfigured loopback should remain blocked");
+        assert!(
+            err.to_string().contains("restricted address"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[test]
     fn bypass_host_matches_wildcards() {
         assert!(bypass_host_matches("*.google.com", "api.google.com"));
@@ -478,7 +536,10 @@ global_rules_file = "/tmp/global.toml""#;
         assert_eq!(canonicalize_host("EXAMPLE.COM").unwrap(), "example.com");
         assert_eq!(canonicalize_host("example.com.").unwrap(), "example.com");
         // Unicode is IDNA-encoded to its punycode A-label.
-        assert_eq!(canonicalize_host("bücher.example").unwrap(), "xn--bcher-kva.example");
+        assert_eq!(
+            canonicalize_host("bücher.example").unwrap(),
+            "xn--bcher-kva.example"
+        );
         assert!(canonicalize_host("").is_err());
         assert!(canonicalize_host("bad host").is_err());
     }

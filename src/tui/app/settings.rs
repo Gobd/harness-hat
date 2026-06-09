@@ -408,13 +408,18 @@ impl App {
             let max_scroll = self.build_output.len();
             match key.code {
                 KeyCode::Esc | KeyCode::Char('h') => {
-                    // If a build is still in flight, Esc cancels it (cooperative
-                    // flag + task abort) rather than leaving it running detached.
+                    // Esc returns to sidebar without canceling a running build.
+                    if !self.build_is_running() {
+                        self.build_finished = None;
+                    }
+                    self.focus = Focus::Sidebar;
+                }
+                KeyCode::Char('c') | KeyCode::Char('C') => {
                     if self.build_is_running() {
                         self.cancel_docker_build();
+                        self.build_finished = None;
+                        self.focus = Focus::Sidebar;
                     }
-                    self.build_finished = None;
-                    self.focus = Focus::Sidebar;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     self.build_scroll = self.build_scroll.saturating_add(1).min(max_scroll)
