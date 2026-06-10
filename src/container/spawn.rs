@@ -235,12 +235,17 @@ pub fn spawn(
     //
     // CLAUDE_CODE_OAUTH_TOKEN   — access token; used by both `-p` and TUI API calls.
     // CLAUDE_CODE_OAUTH_SCOPES  — required by `shouldUseClaudeAIAuth` (TUI auth path).
-    // CLAUDE_CODE_OAUTH_REFRESH_TOKEN — refresh token; the TUI may verify that both
-    //   tokens are present to consider the session complete, and uses it to renew
-    //   the access token when it expires without needing a Keychain.
     // CLAUDE_CODE_HOST_AUTH_ENV_VAR — tells Claude that auth is provided by the host
     //   via the named env var, disabling Keychain / libsecret lookups that would
     //   fail inside a headless Linux container.
+    //
+    // Refresh token is intentionally NOT injected: the container cannot write
+    // a refreshed token back to the macOS Keychain, so allowing refresh inside
+    // the container rotates the host's refresh token (invalidating it) while the
+    // new token lives only in the ephemeral container. Every subsequent container
+    // launch would then start with an expired access token and an invalidated
+    // refresh token, breaking auth entirely. Sessions are instead bounded by the
+    // access token lifetime; users re-run Claude locally to keep the Keychain fresh.
     if let Some(creds) = read_claude_oauth_credentials_full() {
         write_env_file_entry(
             &mut env_file,
@@ -248,9 +253,6 @@ pub fn spawn(
             &creds.access_token,
         )?;
         write_env_file_entry(&mut env_file, "CLAUDE_CODE_OAUTH_SCOPES", &creds.scopes)?;
-        if let Some(ref refresh) = creds.refresh_token {
-            write_env_file_entry(&mut env_file, "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", refresh)?;
-        }
         write_env_file_entry(
             &mut env_file,
             "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
@@ -667,6 +669,11 @@ fn seed_private_mount(mount: &crate::config::ContainerMount) -> Result<Option<Na
 /// Reads the Claude Code OAuth credentials from the macOS Keychain and merges
 /// them into the given `.claude.json` bytes. Returns the original bytes
 /// unchanged if the Keychain entry is absent or the JSON can't be parsed.
+///
+/// The `refreshToken` inside `claudeAiOauth` is stripped before merging: the
+/// container cannot write a refreshed token back to the macOS Keychain, so
+/// leaving it in would let Claude rotate the host's refresh token (invalidating
+/// it) while the new token is lost when the container exits.
 fn inject_keychain_credentials(contents: Vec<u8>) -> Result<Vec<u8>> {
     let Some(keychain_creds) = read_keychain_claude_credentials() else {
         return Ok(contents);
@@ -677,6 +684,14 @@ fn inject_keychain_credentials(contents: Vec<u8>) -> Result<Vec<u8>> {
     };
     if let (Some(obj), Some(kc_obj)) = (config.as_object_mut(), keychain_creds.as_object()) {
         for (key, val) in kc_obj {
+            if key == "claudeAiOauth" {
+                if let Some(oauth_obj) = val.as_object() {
+                    let mut oauth = oauth_obj.clone();
+                    oauth.remove("refreshToken");
+                    obj.insert(key.clone(), serde_json::Value::Object(oauth));
+                    continue;
+                }
+            }
             obj.insert(key.clone(), val.clone());
         }
     }
@@ -711,17 +726,15 @@ fn read_keychain_claude_credentials() -> Option<serde_json::Value> {
 
 struct ClaudeOAuthCredentials {
     access_token: String,
-    refresh_token: Option<String>,
     scopes: String,
 }
 
-/// Reads the full set of Claude Code OAuth credentials from the macOS Keychain.
-/// Returns access token, optional refresh token, and space-separated scopes.
+/// Reads the Claude Code OAuth access token and scopes from the macOS Keychain.
+/// The refresh token is intentionally omitted — see `inject_keychain_credentials`.
 fn read_claude_oauth_credentials_full() -> Option<ClaudeOAuthCredentials> {
     let creds = read_keychain_claude_credentials()?;
     let oauth = &creds["claudeAiOauth"];
     let access_token = oauth["accessToken"].as_str()?.to_string();
-    let refresh_token = oauth["refreshToken"].as_str().map(|s| s.to_string());
     // Scopes are stored as a JSON array; join with spaces for the env var.
     let scopes = if let Some(arr) = oauth["scopes"].as_array() {
         arr.iter()
@@ -734,7 +747,6 @@ fn read_claude_oauth_credentials_full() -> Option<ClaudeOAuthCredentials> {
     };
     Some(ClaudeOAuthCredentials {
         access_token,
-        refresh_token,
         scopes,
     })
 }
