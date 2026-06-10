@@ -219,6 +219,15 @@ starter_network_allowlist = [
   "domain=crates.io",
   "domain=static.crates.io",
   "domain=index.crates.io",
+  "domain=antigravity-unleash.goog",
+  "domain=playwright.azureedge.net",
+  "domain=play.googleapis.com",
+  "domain=playwright-akamai.azureedge.net",
+  "domain=playwright-verizon.azureedge.net",
+  "domain=oauth2.googleapis.com",
+  "domain=www.googleapis.com",
+  "domain=daily-cloudcode-pa.googleapis.com",
+  "domain=lh3.googleusercontent.com",
 ]
 
 # Larger development environment example.
