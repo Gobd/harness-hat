@@ -13,7 +13,8 @@
 //! alongside the live manager.
 
 use anyhow::{Context, Result, bail};
-use std::io::Write;
+use std::ffi::OsString;
+use std::io::{IsTerminal, Write};
 use std::process::Command;
 
 use crate::container::{
@@ -21,13 +22,14 @@ use crate::container::{
 };
 
 /// Entry point for the `shell` subcommand. With an id, attaches to that
-/// session; without one, prints the running sessions and their ids.
-pub fn run(id: Option<String>) -> Result<i32> {
+/// session, optionally running `args` as a command instead of bash; without
+/// an id, prints the running sessions and their ids (and `args` is ignored).
+pub fn run(id: Option<String>, args: Vec<OsString>) -> Result<i32> {
     if which::which("docker").is_err() {
         bail!("docker not found in PATH — `hh shell` requires Docker");
     }
     match id {
-        Some(id) => attach(&id),
+        Some(id) => attach(&id, &args),
         None => {
             list()?;
             Ok(0)
@@ -91,7 +93,7 @@ fn normalize_id(id: &str) -> String {
     }
 }
 
-fn attach(id: &str) -> Result<i32> {
+fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
     let wanted = normalize_id(id);
     let sessions = running_sessions()?;
     let matches: Vec<&Session> = sessions.iter().filter(|s| s.alias == wanted).collect();
@@ -113,17 +115,25 @@ fn attach(id: &str) -> Result<i32> {
         }
     };
 
+    // `-it` requires a TTY on stdin; without one (e.g. piped input) docker
+    // exec refuses to start. Drop `-t` when stdin isn't a terminal so
+    // `echo ... | hh shell ID cat` works.
+    let stdin_is_tty = std::io::stdin().is_terminal();
     let mut command = Command::new("docker");
     command.args([
         "exec",
-        "-it",
+        if stdin_is_tty { "-it" } else { "-i" },
         "-u",
         SHELL_USER,
         "-e",
         &format!("HOME={SHELL_HOME}"),
         &name,
-        "/bin/bash",
     ]);
+    if extra_args.is_empty() {
+        command.arg("/bin/bash");
+    } else {
+        command.args(extra_args);
+    }
 
     // Don't `exec()` into docker exec. If the manager exits while this shell is
     // attached, the `docker run --rm` container dies and `docker exec` is ripped
@@ -140,7 +150,11 @@ fn attach(id: &str) -> Result<i32> {
     // run the cleanup.
     let _signal_guard = IgnoreTerminalSignals::install();
     let status = command.status().context("running docker exec")?;
-    restore_host_terminal_modes();
+    // Only restore terminal modes when stdout is actually a terminal — dumping
+    // CSI sequences into a pipe would pollute downstream output.
+    if std::io::stdout().is_terminal() {
+        restore_host_terminal_modes();
+    }
     Ok(status.code().unwrap_or(1))
 }
 

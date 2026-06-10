@@ -22,6 +22,7 @@ mod fs_util;
 pub mod init;
 pub mod manager;
 pub mod new_project;
+pub mod notifications;
 pub mod proxy;
 pub mod rules;
 pub mod server;

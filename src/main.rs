@@ -15,9 +15,9 @@ async fn main() -> Result<()> {
             println!("config written to: {}", path.display());
             println!("edit it, then run: hh --config {}", path.display());
         }
-        Some(Command::Shell { id }) => {
+        Some(Command::Shell { id, args }) => {
             // Pure-Docker passthrough; intentionally bypasses manager init.
-            let code = harness_hat::shell::run(id)?;
+            let code = harness_hat::shell::run(id, args)?;
             std::process::exit(code);
         }
         None => harness_hat::manager::run(cli).await?,

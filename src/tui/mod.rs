@@ -408,6 +408,7 @@ async fn event_loop(
     let tick = tokio::time::Duration::from_millis(50);
     let mut mouse_capture_enabled = false;
     let mut approval_bell_rung = false;
+    crate::notifications::init();
 
     loop {
         sync_mouse_capture(terminal.backend_mut(), app, &mut mouse_capture_enabled)?;
@@ -416,6 +417,13 @@ async fn event_loop(
         let modal_visible = app.has_pending_approval_modal();
         if modal_visible && !approval_bell_rung {
             ring_terminal_bell(terminal.backend_mut())?;
+            if let Some(item) = app.pending_net.first() {
+                crate::notifications::notify_pending_network_approval(
+                    &item.host,
+                    item.source_project.as_deref(),
+                    app.pending_net.len(),
+                );
+            }
             approval_bell_rung = true;
         } else if !modal_visible {
             approval_bell_rung = false;

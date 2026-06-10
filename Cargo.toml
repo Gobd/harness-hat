@@ -77,3 +77,4 @@ idna = "0.5"
 tokio-util = { version = "0.7", features = ["rt"] }
 sha2 = "0.10"
 hex = "0.4"
+notify-rust = "4"

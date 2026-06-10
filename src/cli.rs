@@ -24,10 +24,18 @@ pub enum Command {
         path: Option<PathBuf>,
     },
     /// Open an interactive shell in a running session. With no id, lists the
-    /// running sessions and their ids.
+    /// running sessions and their ids. Any args after the id are passed
+    /// verbatim to `docker exec` as the command to run instead of bash —
+    /// e.g. `hh shell 0042 claude --resume`.
     Shell {
         #[arg(value_name = "ID")]
         id: Option<String>,
+        #[arg(
+            value_name = "COMMAND",
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
+        args: Vec<OsString>,
     },
 }
 
@@ -99,9 +107,28 @@ mod tests {
     #[test]
     fn shell_subcommand_takes_optional_id() {
         let cli = parse_from(argv(&["hh", "shell"])).expect("parse");
-        assert!(matches!(cli.command, Some(Command::Shell { id: None })));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Shell { id: None, ref args }) if args.is_empty()
+        ));
 
         let cli = parse_from(argv(&["hh", "shell", "0042"])).expect("parse");
-        assert!(matches!(cli.command, Some(Command::Shell { id: Some(id) }) if id == "0042"));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Shell { id: Some(id), ref args }) if id == "0042" && args.is_empty()
+        ));
+    }
+
+    #[test]
+    fn shell_subcommand_collects_trailing_args_verbatim() {
+        let cli = parse_from(argv(&["hh", "shell", "0042", "claude", "--resume"])).expect("parse");
+        let Some(Command::Shell { id, args }) = cli.command else {
+            panic!("expected Shell subcommand");
+        };
+        assert_eq!(id.as_deref(), Some("0042"));
+        assert_eq!(
+            args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+            vec!["claude".to_string(), "--resume".to_string()],
+        );
     }
 }
