@@ -96,6 +96,7 @@ impl App {
         token: String,
         session_registry: SessionRegistry,
         stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
+        launch_pending_rx: mpsc::Receiver<WorkspaceLaunchItem>,
         net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
         activity_rx: mpsc::Receiver<ActivityEvent>,
         audit_rx: mpsc::Receiver<AuditEntry>,
@@ -139,6 +140,7 @@ impl App {
         });
 
         let (build_event_tx, build_event_rx) = mpsc::unbounded_channel();
+        let (native_dialog_tx, native_dialog_rx) = mpsc::unbounded_channel();
         let (container_usage_tx, container_usage_rx) = mpsc::unbounded_channel();
         let (rules_scan_tx, rules_scan_rx) = mpsc::unbounded_channel();
 
@@ -195,7 +197,12 @@ impl App {
             remove_workspace_confirm: None,
             base_rules_changed: None,
             stop_pending_rx,
+            launch_pending_rx,
+            workspace_launch_pending: None,
             net_pending_rx,
+            native_dialog_rx,
+            native_dialog_tx,
+            native_dialog_inflight: None,
             activity_rx,
             audit_rx,
             build_event_rx,
@@ -922,7 +929,12 @@ impl App {
             if let Some(session) = self.sessions.get(remove_idx) {
                 self.container_usage.remove(&session.docker_name);
                 if !session.is_exited() {
-                    let _ = session.terminate();
+                    // Fire-and-forget: `docker rm -f` blocks for the SIGTERM
+                    // grace + SIGKILL window (several seconds on busy
+                    // workloads). Running it on the UI thread would freeze
+                    // the TUI; the runtime's `is_exited` watch picks up the
+                    // shutdown asynchronously.
+                    session.terminate_in_background();
                 }
             }
             self.sessions.remove(remove_idx);
@@ -986,7 +998,8 @@ impl App {
                 continue;
             };
             if !session.is_exited() {
-                let _ = session.terminate();
+                // Fire-and-forget — see comment in `close_session`.
+                session.terminate_in_background();
             }
             session
                 .exited
@@ -1040,7 +1053,11 @@ impl App {
     pub(crate) fn terminate_all_sessions(&mut self) {
         for session in &self.sessions {
             if !session.is_exited() {
-                let _ = session.terminate();
+                // Fire-and-forget at quit too: the spawned `docker rm`
+                // process is reparented to init when we exit, so it still
+                // completes and the daemon still removes the container.
+                // This makes `q` snappy instead of waiting per-container.
+                session.terminate_in_background();
             }
         }
     }

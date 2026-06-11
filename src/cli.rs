@@ -37,6 +37,52 @@ pub enum Command {
         )]
         args: Vec<OsString>,
     },
+    /// Attach to (or start) a session for the current working directory.
+    ///
+    /// If the cwd is inside a configured workspace and a session is already
+    /// running for it, attach to the most recent. Otherwise launch a new
+    /// session against the running manager. If the cwd does not match any
+    /// configured workspace, a new `[[workspaces]]` entry is appended to the
+    /// config file using the directory's basename as the workspace name.
+    ///
+    /// Any args after the subcommand are passed verbatim to `docker exec`
+    /// (same passthrough behavior as `hh shell ID …`).
+    Workspace {
+        /// Use a specific container template instead of prompting.
+        #[arg(long, value_name = "NAME")]
+        template: Option<String>,
+        #[arg(
+            value_name = "COMMAND",
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
+        args: Vec<OsString>,
+    },
+    /// Internal: pop a native system dialog and print the result to stdout.
+    /// Invoked by the manager as a subprocess so the dialog has its own
+    /// main thread / event loop; not intended for direct end-user use.
+    #[command(name = "__dialog", hide = true, subcommand)]
+    Dialog(DialogCommand),
+}
+
+/// Dialog kinds the `__dialog` subcommand can render. Each variant maps to
+/// one concrete native dialog; output is a single machine-readable line on
+/// stdout (see `native_approval::Outcome::encode`).
+#[derive(Debug, Clone, Subcommand)]
+pub enum DialogCommand {
+    /// Network-approval prompt: Allow / Deny + a "remember" checkbox.
+    NetworkApproval {
+        #[arg(long, value_name = "HOST")]
+        host: String,
+        #[arg(long, value_name = "METHOD", default_value = "")]
+        method: String,
+        #[arg(long, value_name = "PATH", default_value = "")]
+        path: String,
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
+        #[arg(long, value_name = "WORKSPACE")]
+        workspace: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +163,31 @@ mod tests {
             cli.command,
             Some(Command::Shell { id: Some(id), ref args }) if id == "0042" && args.is_empty()
         ));
+    }
+
+    #[test]
+    fn workspace_subcommand_parses_template_and_trailing_args() {
+        let cli = parse_from(argv(&["hh", "workspace"])).expect("parse");
+        let Some(Command::Workspace { template, args }) = cli.command else {
+            panic!("expected Workspace");
+        };
+        assert!(template.is_none());
+        assert!(args.is_empty());
+
+        let cli = parse_from(argv(&[
+            "hh", "workspace", "--template", "dev", "claude", "--resume",
+        ]))
+        .expect("parse");
+        let Some(Command::Workspace { template, args }) = cli.command else {
+            panic!("expected Workspace");
+        };
+        assert_eq!(template.as_deref(), Some("dev"));
+        assert_eq!(
+            args.iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["claude".to_string(), "--resume".to_string()],
+        );
     }
 
     #[test]

@@ -1,8 +1,198 @@
 use super::*;
+use crate::server::{LaunchEvent, WorkspaceLaunchItem, WorkspaceLaunchResponse};
+use tokio::sync::mpsc as tokio_mpsc;
 
 impl App {
     fn container_command_for_profile(ctr: &crate::config::ContainerDef) -> Option<Vec<String>> {
         ctr.command.clone()
+    }
+
+    /// Rebuild `self.workspaces` (the sidebar workspace status list) from the
+    /// current `SharedConfig`. Called after a live config reload so a newly
+    /// added workspace shows up in the sidebar on the same tick.
+    pub(crate) fn refresh_workspace_statuses(&mut self) {
+        let cfg = self.config.get();
+        self.workspaces = cfg
+            .workspaces
+            .iter()
+            .zip(crate::config::resolve_workspace_sidebar_hotkeys(
+                &cfg.workspaces,
+            ))
+            .map(|(workspace, hotkey)| WorkspaceStatus {
+                name: workspace.name.clone(),
+                sidebar_hotkey: hotkey,
+            })
+            .collect();
+    }
+
+    /// Handle a `/workspace/launch` request that arrived from the control
+    /// server. Reloads config from disk so a freshly-appended `[[workspaces]]`
+    /// entry is visible, swaps it into `SharedConfig`, refreshes the sidebar,
+    /// and either launches the session straight away or kicks off a
+    /// `docker build` first — streaming progress back through `event_tx` and
+    /// mirroring the build output in the TUI's build pane.
+    pub(crate) fn handle_workspace_launch_request(&mut self, item: WorkspaceLaunchItem) {
+        let WorkspaceLaunchItem {
+            workspace_name,
+            template,
+            event_tx,
+        } = item;
+
+        let reloaded = match crate::config::load(&self.loaded_config_path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.push_log(
+                    format!(
+                        "reloading config for /workspace/launch failed: {e:?}; \
+                         keeping previous config in memory"
+                    ),
+                    true,
+                );
+                return finish_launch_stream(
+                    &event_tx,
+                    Err(format!(
+                        "manager could not reload config from {}: {e}",
+                        self.loaded_config_path.display()
+                    )),
+                );
+            }
+        };
+        self.config.set(std::sync::Arc::new(reloaded));
+        self.refresh_workspace_statuses();
+
+        let cfg = self.config.get();
+        let Some(workspace_idx) = cfg.workspaces.iter().position(|w| w.name == workspace_name)
+        else {
+            return finish_launch_stream(
+                &event_tx,
+                Err(format!(
+                    "no workspace named {workspace_name:?} in {}",
+                    self.loaded_config_path.display()
+                )),
+            );
+        };
+        let Some(template_idx) = cfg.containers.iter().position(|c| c.name == template) else {
+            return finish_launch_stream(
+                &event_tx,
+                Err(format!("no container template named {template:?}")),
+            );
+        };
+        let image = cfg.containers[template_idx].image.clone();
+        drop(cfg);
+
+        let _ = event_tx.try_send(LaunchEvent::Status {
+            message: format!("checking docker image {image}"),
+        });
+
+        match docker_image_exists(&image) {
+            Ok(false) => {
+                // Another build is already in flight: refuse rather than
+                // clobber `build_task` / `workspace_launch_pending`.
+                // `start_docker_build` would silently no-op anyway; surfacing
+                // a clear error is friendlier than waiting for a timeout.
+                if self.build_task.is_some() || self.workspace_launch_pending.is_some() {
+                    return finish_launch_stream(
+                        &event_tx,
+                        Err(
+                            "a docker build is already running in this manager; \
+                             retry once it finishes"
+                                .to_string(),
+                        ),
+                    );
+                }
+
+                // Image missing: kick off `docker build` through the same TUI
+                // path the in-TUI build prompt uses (so the TUI shows the same
+                // build output the streaming response will mirror), and stash
+                // a pending entry. The runtime's `BuildEvent::Output` /
+                // `BuildEvent::Finished` handlers forward through `event_tx`
+                // and finish the launch when the build completes.
+                let _ = event_tx.try_send(LaunchEvent::Status {
+                    message: format!("image {image} not found locally — building"),
+                });
+                self.build_project_idx = Some(workspace_idx);
+                self.build_container_idx = Some(template_idx);
+                self.build_session_group = None;
+                self.build_cursor = 0; // "build + launch" branch
+                self.run_build_action();
+                if self.build_task.is_none() {
+                    return finish_launch_stream(
+                        &event_tx,
+                        Err(format!(
+                            "manager could not start docker build for image '{image}' — \
+                             check the manager TUI logs for the underlying error"
+                        )),
+                    );
+                }
+                self.workspace_launch_pending = Some(WorkspaceLaunchPending {
+                    event_tx,
+                    workspace_name,
+                    template,
+                    workspace_idx,
+                    template_idx,
+                });
+            }
+            other => {
+                // Image present (or check failed — fall through and let docker
+                // surface the real error, matching `preflight_image_or_prompt_build`'s
+                // legacy behavior). Launch synchronously, finish the stream.
+                if matches!(other, Err(_)) {
+                    let _ = event_tx.try_send(LaunchEvent::Status {
+                        message: format!(
+                            "could not inspect image {image}; attempting launch anyway"
+                        ),
+                    });
+                }
+                let _ = event_tx.try_send(LaunchEvent::Status {
+                    message: format!("launching {template} on {workspace_name}"),
+                });
+                let outcome = self.do_launch_for_workspace_endpoint(
+                    workspace_idx,
+                    template_idx,
+                    &workspace_name,
+                    &template,
+                );
+                finish_launch_stream(&event_tx, outcome);
+            }
+        }
+    }
+
+    /// Run `do_launch_container_on_project_with_priority_and_env` and convert
+    /// the "did sessions grow?" indirection into a `Result` carrying the new
+    /// session's identifiers. Shared by the immediate-launch and post-build
+    /// launch paths.
+    pub(crate) fn do_launch_for_workspace_endpoint(
+        &mut self,
+        workspace_idx: usize,
+        template_idx: usize,
+        workspace_name: &str,
+        template: &str,
+    ) -> Result<WorkspaceLaunchResponse, String> {
+        let before_len = self.sessions.len();
+        self.do_launch_container_on_project_with_priority_and_env(
+            workspace_idx,
+            template_idx,
+            crate::proxy::SourcePriority::Primary,
+            &[],
+            None,
+        );
+        if self.sessions.len() == before_len {
+            return Err(format!(
+                "launch of '{template}' on '{workspace_name}' did not start a session — \
+                 check the manager TUI logs"
+            ));
+        }
+        let session = self
+            .sessions
+            .last()
+            .expect("just verified sessions.len() grew");
+        Ok(WorkspaceLaunchResponse {
+            session_token: session.session_token.clone(),
+            alias: session.alias.clone(),
+            docker_name: session.docker_name.clone(),
+            workspace_name: workspace_name.to_string(),
+            template: template.to_string(),
+        })
     }
 
     pub(crate) fn do_launch_container_on_project_with_priority(
@@ -230,4 +420,20 @@ mod tests {
         };
         assert_eq!(App::container_command_for_profile(&profile), None);
     }
+}
+
+/// Emit a terminal `Launched` or `Error` event on `event_tx`. The caller's
+/// owned `event_tx` clone (or a reference, since `Sender` is `Clone`) is then
+/// dropped, which closes the streaming HTTP response body on the CLI side.
+/// `try_send` is best-effort: if the CLI hung up partway, the manager
+/// shouldn't block its event loop on a now-dead pipe.
+pub(crate) fn finish_launch_stream(
+    event_tx: &tokio_mpsc::Sender<LaunchEvent>,
+    outcome: Result<WorkspaceLaunchResponse, String>,
+) {
+    let event = match outcome {
+        Ok(resp) => LaunchEvent::Launched(resp),
+        Err(reason) => LaunchEvent::Error { reason },
+    };
+    let _ = event_tx.try_send(event);
 }

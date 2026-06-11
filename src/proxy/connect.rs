@@ -140,7 +140,6 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
         return Ok(());
     };
 
-    let cfg = state.config.get();
     let connect_protocol = if port == 443 {
         "connect"
     } else {
@@ -159,6 +158,31 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
     );
     state.activity_line(&connect_activity.id, format!("target {host}:{port}"));
 
+    if let Some(bypass_pattern) =
+        container_tls_passthrough_match(&state.config.get(), source_container.as_deref(), &host)
+    {
+        info!(
+            host = %host,
+            bypass_pattern = %bypass_pattern,
+            source_project = ?source_project,
+            source_container = ?source_container,
+            source_status = source_status.as_str(),
+            connect_has_proxy_authorization,
+            "proxy CONNECT passthrough"
+        );
+        return tunnel_connect(
+            &state,
+            &connect_activity,
+            &mut stream,
+            &host,
+            port,
+            "CONNECT passthrough tunnel",
+            &connect_remainder,
+        )
+        .await;
+    }
+
+    let cfg = state.config.get();
     let rules = match config::load_composed_rules_for_workspace(&cfg, source_project.as_deref()) {
         Ok(rules) => rules,
         Err(e) => {
@@ -203,30 +227,6 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
         finish_blocked_network_activity(&state, &connect_activity);
         write_error_any(&mut stream, 403, "Forbidden by harness-hat policy").await?;
         return Ok(());
-    }
-
-    if let Some(bypass_pattern) =
-        container_tls_passthrough_match(&cfg, source_container.as_deref(), &host)
-    {
-        info!(
-            host = %host,
-            bypass_pattern = %bypass_pattern,
-            source_project = ?source_project,
-            source_container = ?source_container,
-            source_status = source_status.as_str(),
-            connect_has_proxy_authorization,
-            "proxy CONNECT passthrough"
-        );
-        return tunnel_connect(
-            &state,
-            &connect_activity,
-            &mut stream,
-            &host,
-            port,
-            "CONNECT passthrough tunnel",
-            &connect_remainder,
-        )
-        .await;
     }
 
     if port != 443 {

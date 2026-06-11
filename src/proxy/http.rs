@@ -117,6 +117,31 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
         );
     }
 
+    if let Some(bypass_pattern) = crate::proxy::helpers::container_tls_passthrough_match(
+        &cfg,
+        source_container.as_deref(),
+        &host,
+    ) {
+        state.activity_line(
+            &activity.id,
+            format!("proxy bypass host match: {bypass_pattern}"),
+        );
+        forward_request_with_activity(
+            &state,
+            &mut stream,
+            &activity,
+            "http",
+            &host,
+            port,
+            &path,
+            &method,
+            &headers,
+            body,
+        )
+        .await?;
+        return Ok(());
+    }
+
     let rules = match config::load_composed_rules_for_workspace(&cfg, source_project.as_deref()) {
         Ok(rules) => rules,
         Err(e) => {
@@ -378,6 +403,22 @@ where
             has_proxy_authorization,
             "proxy request missing source project metadata; permanent network rule persistence will not know which project to update"
         );
+    }
+
+    if let Some(bypass_pattern) = crate::proxy::helpers::container_tls_passthrough_match(
+        &state.config.get(),
+        source_container.as_deref(),
+        host,
+    ) {
+        state.activity_line(
+            &activity.id,
+            format!("proxy bypass host match: {bypass_pattern}"),
+        );
+        forward_request_with_activity(
+            state, tls_stream, &activity, "https", host, port, &path, &method, &headers, body,
+        )
+        .await?;
+        return Ok(());
     }
 
     let policy = rules.match_network_for_port(&method, host, &path, Some(port));

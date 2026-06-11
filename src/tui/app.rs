@@ -6,6 +6,7 @@ mod core;
 mod helpers;
 mod input;
 mod launch;
+pub(crate) mod native_dialog;
 mod runtime;
 mod settings;
 
@@ -13,7 +14,6 @@ mod settings;
 pub(crate) use crate::container::docker_image_exists;
 #[allow(unused_imports)]
 pub(crate) use helpers::{
-    control_hotkey_char, encode_sgr_mouse, is_scroll_mode_toggle_key,
-    maybe_encode_sgr_mouse_for_session, oneshot_dummy, run_build_shell_command,
-    shell_command_for_docker_args,
+    encode_sgr_mouse, is_scroll_mode_toggle_key, maybe_encode_sgr_mouse_for_session,
+    oneshot_dummy, run_build_shell_command, shell_command_for_docker_args,
 };

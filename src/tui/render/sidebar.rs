@@ -113,7 +113,9 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 pub(crate) fn render_terminal_overlays(frame: &mut Frame, app: &mut App, area: Rect) {
-    if !app.pending_net.is_empty() {
+    // On macOS approvals are shown in a native OS dialog, so the in-TUI overlay
+    // is suppressed to avoid a confusing double prompt.
+    if !app.pending_net.is_empty() && !App::native_dialog_enabled() {
         render_net_approval_overlay(frame, app, area);
     }
 }

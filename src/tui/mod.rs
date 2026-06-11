@@ -31,7 +31,7 @@ use crate::container::ContainerSession;
 use crate::proxy::{NetworkDecision, PendingNetworkItem, ProxyState};
 use crate::rules::NetworkPolicy;
 use crate::server::SessionRegistry;
-use crate::server::{ContainerStopDecision, ContainerStopItem};
+use crate::server::{ContainerStopDecision, ContainerStopItem, LaunchEvent, WorkspaceLaunchItem};
 use crate::shared_config::SharedConfig;
 use crate::state::{AuditEntry, StateManager};
 
@@ -159,6 +159,19 @@ pub struct PendingBaseRulesInternalWrite {
     pub expires_at: std::time::Instant,
 }
 
+/// In-flight `/workspace/launch` request that is currently waiting on a
+/// docker image build. The runtime forwards `BuildEvent::Output` lines to
+/// `event_tx` while the build is running, and on `BuildEvent::Finished` it
+/// completes the launch (or surfaces the build failure) and drops `event_tx`
+/// to close the streaming response.
+pub(crate) struct WorkspaceLaunchPending {
+    pub(crate) event_tx: tokio::sync::mpsc::Sender<LaunchEvent>,
+    pub(crate) workspace_name: String,
+    pub(crate) template: String,
+    pub(crate) workspace_idx: usize,
+    pub(crate) template_idx: usize,
+}
+
 /// Top-level TUI application state and event loop ownership.
 pub struct App {
     pub config: SharedConfig,
@@ -200,7 +213,15 @@ pub struct App {
     pub base_rules_changed: Option<BaseRulesChangedState>,
 
     pub stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
+    pub launch_pending_rx: mpsc::Receiver<WorkspaceLaunchItem>,
+    pub(crate) workspace_launch_pending: Option<WorkspaceLaunchPending>,
     pub net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
+    // Native OS approval dialog (macOS): results of finished `hh __dialog`
+    // subprocesses come back here; `inflight` holds the activity id of the one
+    // dialog currently on screen so we never pop two at once.
+    native_dialog_rx: mpsc::UnboundedReceiver<app::native_dialog::NativeDialogResult>,
+    native_dialog_tx: mpsc::UnboundedSender<app::native_dialog::NativeDialogResult>,
+    native_dialog_inflight: Option<String>,
     // Bounded (H12): a malicious in-container client streaming events at full
     // speed otherwise grows the backing Vec without limit. On full the
     // producers (proxy/server) `try_send` and drop the event with a debug log

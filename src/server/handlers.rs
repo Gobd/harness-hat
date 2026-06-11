@@ -1,11 +1,13 @@
 use anyhow::Result;
 use axum::{
     Json, Router,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
 };
+use futures::stream::unfold;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -86,6 +88,7 @@ pub struct ServerState {
     pub config: SharedConfig,
     pub state: StateManager,
     pub stop_tx: mpsc::Sender<ContainerStopItem>,
+    pub launch_tx: mpsc::Sender<WorkspaceLaunchItem>,
     pub audit_tx: mpsc::Sender<AuditEntry>,
     pub token: String,
     pub sessions: SessionRegistry,
@@ -104,6 +107,50 @@ pub struct ContainerStopItem {
 pub enum ContainerStopDecision {
     Stopped,
     NotFound,
+}
+
+/// Body accepted by `POST /workspace/launch`.
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceLaunchRequest {
+    pub workspace_name: String,
+    pub template: String,
+}
+
+/// Final-success payload included in a `LaunchEvent::Launched`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceLaunchResponse {
+    pub session_token: String,
+    pub alias: String,
+    pub docker_name: String,
+    pub workspace_name: String,
+    pub template: String,
+}
+
+/// Events streamed back over `POST /workspace/launch`, one per NDJSON line.
+/// The TUI emits these as it progresses through the launch (and any
+/// intervening `docker build`); the CLI mirrors `status` / `build_output`
+/// to stderr and treats `launched` / `error` as terminal.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LaunchEvent {
+    /// Coarse-grained milestone ("checking image", "building", "launching").
+    Status { message: String },
+    /// One line of `docker build` output (stdout or stderr).
+    BuildOutput { line: String, is_error: bool },
+    /// Launch succeeded — terminal, the stream closes after this.
+    Launched(WorkspaceLaunchResponse),
+    /// Launch (or its prerequisite build) failed — terminal.
+    Error { reason: String },
+}
+
+/// A workspace-launch request waiting to be handled by the TUI. The TUI
+/// reloads config from disk, swaps it into `SharedConfig`, looks up the named
+/// workspace/template, builds the image if needed, and runs the same launch
+/// path the in-TUI picker uses. Progress is streamed back through `event_tx`.
+pub struct WorkspaceLaunchItem {
+    pub workspace_name: String,
+    pub template: String,
+    pub event_tx: mpsc::Sender<LaunchEvent>,
 }
 
 /// Process-wide semaphore enforcing `CONTROL_CONCURRENCY_LIMIT`. Kept in a
@@ -136,11 +183,21 @@ pub async fn run_with_listener(
     // via `tokio::time::timeout` and `control_concurrency_semaphore()`.
     let router = Router::new()
         .route("/container/stop", post(stop_handler))
+        .route("/workspace/launch", post(workspace_launch_handler))
+        .route("/healthz", get(healthz_handler))
         .layer(DefaultBodyLimit::max(CONTROL_BODY_LIMIT_BYTES))
         .with_state(Arc::new(server_state));
 
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+/// Liveness probe used by `hh workspace` to fail fast with a clear message
+/// when the manager isn't running. Intentionally no auth — the response
+/// contains nothing sensitive, and requiring the token would force every CLI
+/// caller to load and parse it just to print "manager not running."
+async fn healthz_handler() -> Response {
+    (StatusCode::OK, "ok").into_response()
 }
 
 pub(super) async fn stop_handler(
@@ -231,6 +288,99 @@ pub(super) async fn stop_handler(
     }
 }
 
+/// Buffer for the NDJSON event stream. 64 entries leaves comfortable
+/// headroom for fast `docker build` output bursts (one line per send) without
+/// risking unbounded growth if the CLI is slow to read.
+const LAUNCH_EVENT_CHANNEL_CAPACITY: usize = 64;
+
+pub(super) async fn workspace_launch_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(req): Json<WorkspaceLaunchRequest>,
+) -> Response {
+    let semaphore = control_concurrency_semaphore();
+    // Use a permit that lives for the duration of the streaming body, not just
+    // the handler future, so a slow client holding the stream open still
+    // counts against the concurrency limit. `OwnedSemaphorePermit` is moved
+    // into the stream closure below.
+    let permit = match semaphore.try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            warn!("workspace_launch_handler rejecting request: concurrency limit reached");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "busy".into(),
+                    reason: "control server is at its concurrency limit".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(resp) = require_bearer(&state, &headers) {
+        return resp;
+    }
+
+    let workspace_name = req.workspace_name.trim().to_string();
+    let template = req.template.trim().to_string();
+    if workspace_name.is_empty() || template.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "bad_request".into(),
+                reason: "workspace_name and template must be non-empty".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    let (event_tx, event_rx) = mpsc::channel::<LaunchEvent>(LAUNCH_EVENT_CHANNEL_CAPACITY);
+    let item = WorkspaceLaunchItem {
+        workspace_name,
+        template,
+        event_tx,
+    };
+    if state.launch_tx.send(item).await.is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "manager_shutting_down".into(),
+                reason: "manager is shutting down".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    // Stream events as NDJSON. `event_tx` lives in the TUI's `WorkspaceLaunchItem`
+    // until the launch flow completes (success, build failure, or launch failure);
+    // dropping it terminates the receiver and closes the body.
+    let stream = unfold((event_rx, permit), |(mut rx, permit)| async move {
+        let event = rx.recv().await?;
+        let mut bytes = match serde_json::to_vec(&event) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(error = %e, "serializing launch event failed; closing stream");
+                return None;
+            }
+        };
+        bytes.push(b'\n');
+        Some((
+            Ok::<Bytes, std::convert::Infallible>(Bytes::from(bytes)),
+            (rx, permit),
+        ))
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/x-ndjson")
+        // Tell intermediaries (and reqwest) not to buffer; we want each line
+        // visible to the CLI as the build emits it.
+        .header("cache-control", "no-cache")
+        .body(Body::from_stream(stream))
+        .expect("static response builder cannot fail")
+}
+
 /// Build an `AuditEntry` describing a `/container/stop` outcome. Centralized
 /// here so each match arm above stays a one-liner.
 fn stop_audit_entry(project: &str, decision: DecisionKind, reason: &str) -> AuditEntry {
@@ -251,6 +401,33 @@ pub(super) fn require_session_identity(
     headers: &HeaderMap,
 ) -> Result<SessionIdentity, Response> {
     require_session_context(state, headers).map(|(_, identity)| identity)
+}
+
+/// Constant-time `Authorization: Bearer <token>` check with no session
+/// requirement. Used by endpoints (like `/workspace/launch`) called from the
+/// host CLI, before any session exists.
+#[allow(clippy::result_large_err)]
+pub(super) fn require_bearer(state: &ServerState, headers: &HeaderMap) -> Result<(), Response> {
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let expected = format!("Bearer {}", state.token);
+    let auth_bytes = auth.as_bytes();
+    let expected_bytes = expected.as_bytes();
+    let auth_ok =
+        auth_bytes.len() == expected_bytes.len() && bool::from(auth_bytes.ct_eq(expected_bytes));
+    if !auth_ok {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".into(),
+                reason: "invalid or missing token".into(),
+            }),
+        )
+            .into_response());
+    }
+    Ok(())
 }
 
 #[allow(clippy::result_large_err)]
@@ -356,6 +533,7 @@ mod tests {
             },
         );
         let (stop_tx, _stop_rx) = mpsc::channel(1);
+        let (launch_tx, _launch_rx) = mpsc::channel(1);
         let (audit_tx, _audit_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state_dir =
@@ -365,6 +543,7 @@ mod tests {
             config: SharedConfig::new(Arc::new(crate::config::Config::default())),
             state: StateManager::open(&state_dir).expect("state"),
             stop_tx,
+            launch_tx,
             audit_tx,
             token: "token".to_string(),
             sessions: registry,

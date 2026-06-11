@@ -13,16 +13,20 @@ impl App {
         }
 
         if self.base_rules_changed.is_some() {
-            if control_hotkey_char(key) == Some('y') {
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
                 self.base_rules_changed = None;
             }
             return;
         }
 
         if self.remove_workspace_confirm.is_some() {
-            match control_hotkey_char(key) {
-                Some('y') => self.finish_remove_workspace_confirm(true),
-                Some('n') => self.finish_remove_workspace_confirm(false),
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.finish_remove_workspace_confirm(true)
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.finish_remove_workspace_confirm(false)
+                }
                 _ => {}
             }
             return;
@@ -42,12 +46,15 @@ impl App {
             }
         }
 
-        if !self.pending_net.is_empty() {
-            match control_hotkey_char(key) {
-                Some('y') => self.approve_net(0),
-                Some('r') => self.approve_net_forever(0),
-                Some('n') => self.deny_net(0),
-                Some('d') => self.deny_net_forever(0),
+        // On macOS the decision is made in the native dialog, not via these
+        // keys (the overlay isn't even rendered), so let the keystrokes fall
+        // through to normal handling instead of silently approving/denying.
+        if !self.pending_net.is_empty() && !Self::native_dialog_enabled() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.approve_net(0),
+                KeyCode::Char('r') | KeyCode::Char('R') => self.approve_net_forever(0),
+                KeyCode::Char('n') | KeyCode::Char('N') => self.deny_net(0),
+                KeyCode::Char('d') | KeyCode::Char('D') => self.deny_net_forever(0),
                 _ => {}
             }
             return;

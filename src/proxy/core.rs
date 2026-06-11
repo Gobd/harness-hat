@@ -802,8 +802,6 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
         return Ok(());
     };
 
-    let cfg = state.config.get();
-
     let prefix = read_tls_client_hello_prefix(&mut stream).await?;
     let Some(sni_raw) = parse_sni_from_tls_client_hello(&prefix) else {
         warn!("transparent TLS connection missing SNI; dropping");
@@ -832,6 +830,33 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
         ActivityState::Forwarding,
     );
     state.activity_line(&connect_activity.id, format!("target {host}:443"));
+
+    if let Some(bypass_pattern) = container_tls_passthrough_match(
+        &state.config.get(),
+        source_container.as_deref(),
+        &host,
+    )
+    {
+        info!(
+            host = %host,
+            bypass_pattern = %bypass_pattern,
+            source_project = ?source_project,
+            source_container = ?source_container,
+            source_status = source_status.as_str(),
+            "proxy transparent TLS passthrough"
+        );
+        let mut upstream = state.connect_public_tcp(&host, 443).await.map_err(|e| {
+            anyhow::anyhow!("transparent passthrough connect to {host}:443 failed: {e}")
+        })?;
+        upstream.write_all(&prefix).await?;
+        state.activity_state(
+            &connect_activity.id,
+            ActivityState::Forwarding,
+            Some(format!("tunneling {host}:443")),
+        );
+        let _ = tunnel_with_activity(&state, &connect_activity, &mut stream, &mut upstream).await;
+        return Ok(());
+    }
 
     let rules = match state.load_composed_rules(source_project.as_deref()) {
         Ok(rules) => rules,
@@ -873,30 +898,6 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
     .await;
     if !preflight_allowed {
         finish_blocked_network_activity(&state, &connect_activity);
-        return Ok(());
-    }
-
-    if let Some(bypass_pattern) =
-        container_tls_passthrough_match(&cfg, source_container.as_deref(), &host)
-    {
-        info!(
-            host = %host,
-            bypass_pattern = %bypass_pattern,
-            source_project = ?source_project,
-            source_container = ?source_container,
-            source_status = source_status.as_str(),
-            "proxy transparent TLS passthrough"
-        );
-        let mut upstream = state.connect_public_tcp(&host, 443).await.map_err(|e| {
-            anyhow::anyhow!("transparent passthrough connect to {host}:443 failed: {e}")
-        })?;
-        upstream.write_all(&prefix).await?;
-        state.activity_state(
-            &connect_activity.id,
-            ActivityState::Forwarding,
-            Some(format!("tunneling {host}:443")),
-        );
-        let _ = tunnel_with_activity(&state, &connect_activity, &mut stream, &mut upstream).await;
         return Ok(());
     }
 

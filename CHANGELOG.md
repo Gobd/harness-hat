@@ -10,7 +10,9 @@ MITM proxy. The host-side command-execution and subagent-control subsystems
 have been removed entirely.
 
 ### Added
-- New `hh shell [ID]` subcommand: open an interactive shell in a running session. With no ID it lists running sessions and their IDs. Works as a thin Docker attach, independent of the manager TUI.
+- New `hh shell [ID] [COMMAND...]` subcommand: open an interactive shell in a running session, or run a one-off command in it. With no ID it lists running sessions and their IDs. Any args after the ID are passed verbatim to `docker exec` (e.g. `hh shell 0042 claude --resume`). Works as a thin Docker attach, independent of the manager TUI; falls back to `docker exec -i` (no `-t`) when stdin is not a terminal so piped commands like `echo prompt | hh shell ID cat` work.
+- Native OS notifications (Linux D-Bus, macOS, Windows toast) when a network-approval modal becomes pending in the TUI, so the user is nudged toward the approval even when the TUI isn't focused. The body shows the host, source workspace, and remaining pending count. Best-effort — any failure (missing D-Bus, macOS bundle quirks, toast permission) is logged at debug and ignored.
+- Default `starter_network_allowlist` in the example config now includes Antigravity CLI's runtime domains: `antigravity-unleash.goog`, `play.googleapis.com`, `oauth2.googleapis.com`, `www.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, `lh3.googleusercontent.com`, and the Playwright CDN domains (`playwright.azureedge.net`, `playwright-akamai.azureedge.net`, `playwright-verizon.azureedge.net`).
 - New `hh init [PATH]` subcommand to generate a sample config (replaces the old `--init` flag; defaults to `./harness-hat.toml`).
 - Built-in Docker templates for TypeScript/Bun/Node/pnpm, Go, Rust, and PHP development environments (`docker/typescript.dockerfile`, `docker/go.dockerfile`, `docker/rust.dockerfile`, `docker/php.dockerfile`).
 - Per-template Docker resource controls: `memory`, `cpus`, and `shm_size`.
@@ -66,6 +68,7 @@ have been removed entirely.
 - Approval "Allow forever" / "Deny forever" decisions now require an unambiguous source workspace; the silent sidebar-fallback was removed.
 - Stop endpoint exact-matches the requesting session's container ID rather than accepting substring prefixes.
 - Control endpoints now enforce body-size, request-timeout, and concurrency limits.
+- The Claude Code OAuth refresh token is no longer injected into containers — neither as `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` nor inside the seeded `~/.claude.json`'s `claudeAiOauth` block. Containers can't write a refreshed token back to the host's macOS Keychain, so allowing in-container refresh would rotate (and invalidate) the host's refresh token while the new token died with the container, breaking auth on the next launch. Sessions in the container are now bounded by the access token lifetime; re-run Claude locally to refresh the Keychain.
 
 ### Fixed
 - Build tasks can now be cancelled (cooperative flag + task abort) on TUI quit.
@@ -78,6 +81,7 @@ have been removed entirely.
 - TUI build pane error-detection heuristic no longer over-matches benign output containing the substring `error`.
 - Container alias allocation now bails on docker errors rather than silently risking collisions.
 - `loopback_to_host_docker` no longer appends a trailing slash when rewriting `HARNESS_HAT_URL` to `host.docker.internal`. The `url::Url` round-trip introduced during the hardening normalized `http://host:7878` to `http://host:7878/`; the container's strict-network init parses the port with naive shell, so the stray slash produced port `7878/`, failed `iptables`, and killed the container at startup (exit 2).
+- `hh shell` no longer leaves the host terminal in a broken state when the container exits out from under it. The CLI now stays as the parent of `docker exec` (instead of `exec()`-ing into it), ignores `SIGINT`/`SIGQUIT`/`SIGTSTP` so they forward to the container, and on exit emits resets for focus reporting, bracketed paste, all mouse-reporting modes (X10, button-event, any-event, SGR, urxvt), cursor visibility, alternate screen, line wrap, and SGR attributes that an inner program (bash readline, vim, fzf, custom prompt) may have enabled but never gotten to disable. Restoration is skipped when stdout is not a TTY so the resets don't pollute piped output.
 
 
 ## 0.7.0 Jun 1, 2026

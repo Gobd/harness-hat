@@ -21,12 +21,27 @@ impl App {
                 Err(_) => break,
             }
         }
+        // Launch requests reload config + spawn a container; bound the per-tick
+        // count so a flood from the control server can't starve the TUI loop.
+        for _ in 0..4 {
+            match self.launch_pending_rx.try_recv() {
+                Ok(item) => self.handle_workspace_launch_request(item),
+                Err(_) => break,
+            }
+        }
+        // Apply any native-dialog decisions that landed since the last tick
+        // before enqueueing new requests, so a finished dialog frees the
+        // in-flight slot and the next pending item can be prompted this tick.
+        self.drain_native_dialog_results();
         for _ in 0..32 {
             match self.net_pending_rx.try_recv() {
                 Ok(item) => self.enqueue_pending_network(item),
                 Err(_) => break,
             }
         }
+        // macOS: pop a native dialog for the front pending item (no-op on other
+        // platforms, which use the in-TUI overlay).
+        self.maybe_launch_native_dialog();
         self.refresh_session_terminal_states();
         for _ in 0..64 {
             match self.container_usage_rx.try_recv() {
@@ -71,6 +86,16 @@ impl App {
         for _ in 0..256 {
             match self.build_event_rx.try_recv() {
                 Ok(BuildEvent::Output { line, is_error }) => {
+                    // Mirror to any in-flight `/workspace/launch` streaming
+                    // response so the CLI sees the same lines the TUI is
+                    // about to render. `try_send` is best-effort — if the CLI
+                    // hung up, we keep updating the TUI.
+                    if let Some(pending) = &self.workspace_launch_pending {
+                        let _ = pending.event_tx.try_send(LaunchEvent::BuildOutput {
+                            line: line.clone(),
+                            is_error,
+                        });
+                    }
                     self.push_build_output(line, is_error);
                 }
                 Ok(BuildEvent::Finished {
@@ -97,14 +122,20 @@ impl App {
                             self.push_log(format!("  build detail: {diagnostic}"), true);
                         }
                         // Prefer the spawn error as the headline diagnostic.
-                        let diagnostic = Some(error);
+                        let diagnostic_for_state = Some(error.clone());
                         self.build_finished = Some(BuildFinished {
                             command,
                             cancelled: false,
                             exit_code,
-                            diagnostic,
+                            diagnostic: diagnostic_for_state,
                         });
                         self.focus = Focus::ImageBuild;
+                        if let Some(pending) = self.workspace_launch_pending.take() {
+                            crate::tui::app::launch::finish_launch_stream(
+                                &pending.event_tx,
+                                Err(format!("docker build failed: {error}")),
+                            );
+                        }
                         continue;
                     }
                     if cancelled {
@@ -118,6 +149,12 @@ impl App {
                             diagnostic,
                         });
                         self.focus = Focus::ImageBuild;
+                        if let Some(pending) = self.workspace_launch_pending.take() {
+                            crate::tui::app::launch::finish_launch_stream(
+                                &pending.event_tx,
+                                Err("docker build was cancelled in the manager TUI".to_string()),
+                            );
+                        }
                         continue;
                     }
                     if success {
@@ -126,12 +163,32 @@ impl App {
                         self.build_finished = None;
                         self.push_log(format!("{label} finished successfully"), false);
                         self.build_container_idx = None;
-                        self.do_launch_container_on_project_with_priority(
-                            launch_project_idx,
-                            launch_container_idx,
-                            crate::proxy::SourcePriority::Primary,
-                            launch_session_group,
-                        );
+                        let pending = self.workspace_launch_pending.take();
+                        if let Some(pending) = pending {
+                            let _ = pending.event_tx.try_send(LaunchEvent::Status {
+                                message: format!(
+                                    "build finished — launching {} on {}",
+                                    pending.template, pending.workspace_name,
+                                ),
+                            });
+                            let outcome = self.do_launch_for_workspace_endpoint(
+                                pending.workspace_idx,
+                                pending.template_idx,
+                                &pending.workspace_name,
+                                &pending.template,
+                            );
+                            crate::tui::app::launch::finish_launch_stream(
+                                &pending.event_tx,
+                                outcome,
+                            );
+                        } else {
+                            self.do_launch_container_on_project_with_priority(
+                                launch_project_idx,
+                                launch_container_idx,
+                                crate::proxy::SourcePriority::Primary,
+                                launch_session_group,
+                            );
+                        }
                     } else {
                         self.build_project_idx = None;
                         self.build_session_group = None;
@@ -142,6 +199,7 @@ impl App {
                         if let Some(diagnostic) = &diagnostic {
                             self.push_log(format!("  build detail: {diagnostic}"), true);
                         }
+                        let diagnostic_for_stream = diagnostic.clone();
                         self.build_finished = Some(BuildFinished {
                             command,
                             cancelled: false,
@@ -149,6 +207,22 @@ impl App {
                             diagnostic,
                         });
                         self.focus = Focus::ImageBuild;
+                        if let Some(pending) = self.workspace_launch_pending.take() {
+                            let reason = match (exit_code, diagnostic_for_stream) {
+                                (Some(code), Some(diag)) => {
+                                    format!("docker build failed (exit code {code}): {diag}")
+                                }
+                                (Some(code), None) => {
+                                    format!("docker build failed (exit code {code})")
+                                }
+                                (None, Some(diag)) => format!("docker build failed: {diag}"),
+                                (None, None) => "docker build failed".to_string(),
+                            };
+                            crate::tui::app::launch::finish_launch_stream(
+                                &pending.event_tx,
+                                Err(reason),
+                            );
+                        }
                     }
                 }
                 Err(_) => break,

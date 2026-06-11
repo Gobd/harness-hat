@@ -38,14 +38,17 @@ pub fn run(id: Option<String>, args: Vec<OsString>) -> Result<i32> {
 }
 
 /// A running harness-hat session, as seen through docker labels.
-struct Session {
-    alias: String,
-    workspace: String,
-    template: String,
-    name: String,
+pub(crate) struct Session {
+    pub(crate) alias: String,
+    pub(crate) workspace: String,
+    pub(crate) template: String,
+    pub(crate) name: String,
 }
 
-fn running_sessions() -> Result<Vec<Session>> {
+/// Enumerate running harness-hat sessions via `docker ps`. Returns containers
+/// in docker's natural order (newest first), so callers wanting most-recent
+/// behavior can take the first element.
+pub(crate) fn running_sessions() -> Result<Vec<Session>> {
     let output = Command::new("docker")
         .args([
             "ps",
@@ -78,7 +81,6 @@ fn running_sessions() -> Result<Vec<Session>> {
             name: name.trim().to_string(),
         });
     }
-    sessions.sort_by(|a, b| a.alias.cmp(&b.alias));
     Ok(sessions)
 }
 
@@ -115,6 +117,28 @@ fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
         }
     };
 
+    exec_into_container(&name, extra_args)
+}
+
+/// Run `docker exec` against a container with optional trailing argv (or
+/// `/bin/bash` when empty), with the same TTY auto-detect + signal guarding +
+/// host-terminal cleanup the interactive shell flow needs. Reused by
+/// `hh workspace`.
+///
+/// Don't `exec()` into docker exec. If the manager exits while this shell is
+/// attached, the `docker run --rm` container dies and `docker exec` is ripped
+/// out before any program inside (bash readline, vim, fzf, the user's
+/// prompt) can send its DECRST cleanup sequences. The host terminal is then
+/// stuck with focus reporting / bracketed paste / mouse mode / hidden cursor
+/// left on. Staying as the parent lets us emit the disable sequences
+/// ourselves on the way out.
+///
+/// Because we're no longer the docker exec process itself, Ctrl-C in the
+/// terminal would be delivered to both us and the child via the foreground
+/// process group. Ignore the terminal-driven signals here so they're handled
+/// by `docker exec` (which forwards them through the PTY) and we survive to
+/// run the cleanup.
+pub(crate) fn exec_into_container(container_name: &str, extra_args: &[OsString]) -> Result<i32> {
     // `-it` requires a TTY on stdin; without one (e.g. piped input) docker
     // exec refuses to start. Drop `-t` when stdin isn't a terminal so
     // `echo ... | hh shell ID cat` works.
@@ -127,7 +151,7 @@ fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
         SHELL_USER,
         "-e",
         &format!("HOME={SHELL_HOME}"),
-        &name,
+        container_name,
     ]);
     if extra_args.is_empty() {
         command.arg("/bin/bash");
@@ -135,19 +159,6 @@ fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
         command.args(extra_args);
     }
 
-    // Don't `exec()` into docker exec. If the manager exits while this shell is
-    // attached, the `docker run --rm` container dies and `docker exec` is ripped
-    // out before any program inside (bash readline, vim, fzf, the user's
-    // prompt) can send its DECRST cleanup sequences. The host terminal is then
-    // stuck with focus reporting / bracketed paste / mouse mode / hidden cursor
-    // left on. Staying as the parent lets us emit the disable sequences
-    // ourselves on the way out.
-    //
-    // Because we're no longer the docker exec process itself, Ctrl-C in the
-    // terminal would be delivered to both us and the child via the foreground
-    // process group. Ignore the terminal-driven signals here so they're handled
-    // by `docker exec` (which forwards them through the PTY) and we survive to
-    // run the cleanup.
     let _signal_guard = IgnoreTerminalSignals::install();
     let status = command.status().context("running docker exec")?;
     // Only restore terminal modes when stdout is actually a terminal — dumping
@@ -228,7 +239,8 @@ fn restore_host_terminal_modes() {
 }
 
 fn list() -> Result<()> {
-    let sessions = running_sessions()?;
+    let mut sessions = running_sessions()?;
+    sessions.sort_by(|a, b| a.alias.cmp(&b.alias));
     if sessions.is_empty() {
         println!(
             "No running harness-hat sessions. Sessions only exist while the manager is \

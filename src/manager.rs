@@ -40,6 +40,8 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
     );
 
     let (stop_pending_tx, stop_pending_rx) = mpsc::channel::<crate::server::ContainerStopItem>(64);
+    let (launch_pending_tx, launch_pending_rx) =
+        mpsc::channel::<crate::server::WorkspaceLaunchItem>(16);
     let (net_pending_tx, net_pending_rx) = mpsc::channel::<crate::proxy::PendingNetworkItem>(64);
     // Bounded (H12): see comments in tui::App and ProxyState/ServerState.
     // 4096 is a few seconds of normal traffic; bursts beyond that are dropped
@@ -68,6 +70,7 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
         config: shared_config.clone(),
         state: state.clone(),
         stop_tx: stop_pending_tx,
+        launch_tx: launch_pending_tx,
         audit_tx,
         token: token.clone(),
         sessions: session_registry.clone(),
@@ -118,6 +121,7 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
         token,
         session_registry,
         stop_pending_rx,
+        launch_pending_rx,
         net_pending_rx,
         activity_rx,
         audit_rx,

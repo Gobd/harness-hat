@@ -58,4 +58,6 @@ allowlist = [
     "domain=play.googleapis.com",
     "domain=playwright-akamai.azureedge.net",
     "domain=playwright-verizon.azureedge.net",
+    "domain=static.rust-lang.org",
 ]
+denylist = ["domain=160.79.104.10"]

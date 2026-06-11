@@ -278,26 +278,6 @@ pub(crate) async fn run_build_shell_command(
     });
 }
 
-pub(crate) fn control_hotkey_char(key: KeyEvent) -> Option<char> {
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && let KeyCode::Char(ch) = key.code
-    {
-        return Some(ch.to_ascii_lowercase());
-    }
-
-    if key.modifiers.is_empty()
-        && let KeyCode::Char(ch) = key.code
-        && ch.is_ascii_control()
-    {
-        let code = ch as u32;
-        if (1..=26).contains(&code) {
-            return char::from_u32((code - 1) + ('a' as u32));
-        }
-    }
-
-    None
-}
-
 pub(crate) fn is_scroll_mode_toggle_key(key: KeyEvent) -> bool {
     (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL))
         || (key.code == KeyCode::Char('\u{13}') && key.modifiers.is_empty())

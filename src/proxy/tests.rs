@@ -60,7 +60,7 @@ docker_dir = "/tmp"
 global_rules_file = "/tmp/global.toml"
 
 [defaults.containers]
-bypass_proxy = ["api.openai.com", "*.googleapis.com"]
+bypass_proxy = ["api.anthropic.com", "api.openai.com", "*.googleapis.com"]
 
 [container_profiles.dev]
 image = "default"
@@ -70,6 +70,10 @@ image = "default"
         std::fs::write(&config_path, raw).expect("write config");
         let cfg = crate::config::load(&config_path).expect("load config");
 
+        assert_eq!(
+            container_tls_passthrough_match(&cfg, Some("dev"), "api.anthropic.com"),
+            Some("api.anthropic.com")
+        );
         assert_eq!(
             container_tls_passthrough_match(&cfg, Some("dev"), "api.openai.com"),
             Some("api.openai.com")

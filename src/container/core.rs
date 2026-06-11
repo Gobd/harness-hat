@@ -267,13 +267,53 @@ impl ContainerSession {
     /// Uses `docker rm -f` to stop and remove the container. Non-zero exits and
     /// spawn failures are surfaced as `Err` and additionally logged at `warn!`
     /// level so an orphaned container is visible in operator logs.
+    ///
+    /// This is the blocking variant — `docker rm -f` can take several seconds
+    /// (SIGTERM grace, then SIGKILL, then daemon-side cleanup), so callers on
+    /// a UI/event-loop thread should prefer [`terminate_in_background`].
     pub fn terminate(&self) -> anyhow::Result<()> {
-        let target = if !self.container_id.is_empty() {
-            &self.container_id
+        Self::docker_rm_force(&self.target_for_rm())
+    }
+
+    /// Spawn `docker rm -f` on a background thread and return immediately so
+    /// the caller (e.g. the TUI event loop on a 'k' keypress) isn't blocked
+    /// for the multi-second shutdown grace period. Failures are logged via
+    /// `tracing::warn` — the caller has no way to surface them anyway because
+    /// the session is typically removed from in-memory state right after.
+    ///
+    /// Safe at process-exit time too: once the `docker rm` subprocess is
+    /// spawned, it survives our exit (reparented to init) and continues to
+    /// talk to the docker daemon on its own, so we don't leak a container by
+    /// not waiting.
+    pub fn terminate_in_background(&self) {
+        let target = self.target_for_rm();
+        if target.is_empty() {
+            return;
+        }
+        std::thread::spawn(move || {
+            let _ = Self::docker_rm_force(&target);
+        });
+    }
+
+    /// Resolve the best identifier to pass to `docker rm -f`: prefer the
+    /// stable container_id when known, fall back to the `--name` we chose.
+    /// Returns an empty string for sessions that never recorded either (so
+    /// callers can no-op).
+    fn target_for_rm(&self) -> String {
+        let candidate: &str = if !self.container_id.is_empty() {
+            self.container_id.as_str()
         } else {
-            &self.docker_name
+            self.docker_name.as_str()
         };
-        if target.is_empty() || target == "unknown" {
+        if candidate.is_empty() || candidate == "unknown" {
+            String::new()
+        } else {
+            candidate.to_string()
+        }
+    }
+
+    fn docker_rm_force(target: &str) -> anyhow::Result<()> {
+        if target.is_empty() {
             return Ok(());
         }
         let output = std::process::Command::new("docker")
