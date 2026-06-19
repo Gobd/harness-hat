@@ -18,12 +18,10 @@ use crate::container::core::{
     mount_mode_arg, parse_docker_label, sanitize_docker_name,
 };
 use crate::container::helpers::detect_default_colors;
-use crate::container::{ContainerSession, SessionEventProxy, compose_no_proxy, read_container_id};
+use crate::container::{ContainerSession, SessionEventProxy, read_container_id};
 use crate::fs_util::{is_valid_env_name, write_env_file_entry};
 
 const PRIMARY_PROXY_CONN_LIMIT: usize = 0;
-const HARNESS_HAT_CA_CERT_PATH: &str = "/usr/local/share/ca-certificates/harness-hat-ca.crt";
-const HARNESS_HAT_CA_BUNDLE_PATH: &str = "/tmp/harness-hat-ca-bundle.crt";
 const CODER_HOME: &str = "/home/coder";
 
 /// Launch `docker run` for a container definition and wire it to a PTY-backed
@@ -38,7 +36,6 @@ pub fn spawn(
     token: &str,
     control_url: &str,
     proxy_url: &str,
-    ca_cert_host_path: &str,
     hostdo_script_host_path: Option<&Path>,
     scoped_proxy: Option<crate::proxy::ScopedProxyListener>,
     proxy_priority: crate::proxy::SourcePriority,
@@ -47,12 +44,6 @@ pub fn spawn(
     rows: u16,
     cols: u16,
 ) -> Result<(ContainerSession, Vec<String>)> {
-    let ca_env_path = HARNESS_HAT_CA_CERT_PATH;
-    let no_proxy = if strict_network {
-        compose_no_proxy(&[])
-    } else {
-        compose_no_proxy(&ctr.bypass_proxy)
-    };
     let mount_str = ctr.mount_target.display().to_string();
 
     let cidfile =
@@ -147,13 +138,10 @@ pub fn spawn(
     // mode or add a second mount via Docker's option parser.
     validate_bind_path(&workspace_path.display().to_string(), "workspace_path")?;
     validate_bind_path(&mount_str, "container mount target")?;
-    validate_bind_path(ca_cert_host_path, "ca_cert_host_path")?;
 
     docker_args.extend_from_slice(&[
         "-v".to_string(),
         format!("{}:{}:rw", workspace_path.display(), mount_str),
-        "-v".to_string(),
-        format!("{ca_cert_host_path}:{ca_env_path}:ro"),
         "-w".to_string(),
         mount_str.clone(),
     ]);
@@ -178,7 +166,6 @@ pub fn spawn(
         .tempfile()
         .context("failed to create temp env file")?;
 
-    write_ca_env_entries(&mut env_file)?;
     for (key, value) in &ctr.env {
         write_env_file_entry(&mut env_file, key, value)?;
     }
@@ -226,11 +213,9 @@ pub fn spawn(
             ("HTTP_PROXY", &container_proxy_url),
             ("HTTPS_PROXY", &container_proxy_url),
             ("ALL_PROXY", &container_proxy_url),
-            ("NO_PROXY", &no_proxy),
             ("http_proxy", &container_proxy_url),
             ("https_proxy", &container_proxy_url),
             ("all_proxy", &container_proxy_url),
-            ("no_proxy", &no_proxy),
         ] {
             write_env_file_entry(&mut env_file, key, value)?;
         }
@@ -495,24 +480,6 @@ fn running_session_aliases() -> Result<std::collections::HashSet<String>> {
     Ok(set)
 }
 
-fn write_ca_env_entries<W: Write>(env_file: &mut W) -> Result<()> {
-    let ca_bundle_env_vars = [
-        "CODEX_CA_CERTIFICATE",
-        "SSL_CERT_FILE",
-        "CURL_CA_BUNDLE",
-        "DENO_CERT",
-        "REQUESTS_CA_BUNDLE",
-        "AWS_CA_BUNDLE",
-        "GIT_SSL_CAINFO",
-        "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH",
-    ];
-    for var in ca_bundle_env_vars {
-        write_env_file_entry(env_file, var, HARNESS_HAT_CA_BUNDLE_PATH)?;
-    }
-    write_env_file_entry(env_file, "NODE_EXTRA_CA_CERTS", HARNESS_HAT_CA_CERT_PATH)?;
-    Ok(())
-}
-
 fn prepare_executable_helper_script(path: &Path, prefix: &str) -> Result<NamedTempFile> {
     let contents = std::fs::read(path)
         .with_context(|| format!("reading helper script '{}'", path.display()))?;
@@ -761,9 +728,8 @@ fn read_claude_oauth_credentials_full() -> Option<ClaudeOAuthCredentials> {
 #[cfg(test)]
 mod tests {
     use super::{
-        HARNESS_HAT_CA_BUNDLE_PATH, HARNESS_HAT_CA_CERT_PATH, format_localhost_forwards,
+        format_localhost_forwards,
         proxy_addr_without_auth, seed_private_mount, should_inject_coder_home,
-        write_ca_env_entries,
     };
     use crate::config::{ContainerMount, LocalhostForward, MountMode};
     use std::io::Write as _;
@@ -883,23 +849,6 @@ mod tests {
             proxy_addr_without_auth("http://harness-hat:secret@[::1]:54321"),
             "[::1]:54321"
         );
-    }
-
-    #[test]
-    fn ca_env_entries_use_combined_bundle_for_replacement_vars() {
-        let mut env = Vec::new();
-        write_ca_env_entries(&mut env).expect("write CA env");
-        let env = String::from_utf8(env).expect("utf8 env");
-
-        assert!(env.contains(&format!("SSL_CERT_FILE={HARNESS_HAT_CA_BUNDLE_PATH}\n")));
-        assert!(env.contains(&format!(
-            "CODEX_CA_CERTIFICATE={HARNESS_HAT_CA_BUNDLE_PATH}\n"
-        )));
-        assert!(env.contains(&format!(
-            "REQUESTS_CA_BUNDLE={HARNESS_HAT_CA_BUNDLE_PATH}\n"
-        )));
-        assert!(env.contains(&format!("NODE_EXTRA_CA_CERTS={HARNESS_HAT_CA_CERT_PATH}\n")));
-        assert!(!env.contains(&format!("SSL_CERT_FILE={HARNESS_HAT_CA_CERT_PATH}\n")));
     }
 
     #[test]

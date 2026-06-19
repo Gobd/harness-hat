@@ -118,28 +118,6 @@ pub(crate) fn docker_image_exists(image: &str) -> std::io::Result<bool> {
     Ok(status.success())
 }
 
-pub(crate) fn compose_no_proxy(bypass_proxy: &[String]) -> String {
-    let mut entries = vec![
-        "localhost".to_string(),
-        "127.0.0.1".to_string(),
-        "host.docker.internal".to_string(),
-    ];
-    for host in bypass_proxy {
-        let host = host.trim();
-        if host.is_empty() {
-            continue;
-        }
-        // Hostnames are case-insensitive (RFC 4343); without lowercasing on
-        // both sides of the dedup we'd let `LocalHost` slip past `localhost`
-        // and emit redundant `NO_PROXY` entries that some runtimes mishandle.
-        let host_lower = host.to_ascii_lowercase();
-        if !entries.iter().any(|e| e.eq_ignore_ascii_case(&host_lower)) {
-            entries.push(host_lower);
-        }
-    }
-    entries.join(",")
-}
-
 pub(crate) fn detect_default_colors() -> ((u8, u8, u8), (u8, u8, u8)) {
     parse_colorfgbg(env::var("COLORFGBG").ok().as_deref())
 }

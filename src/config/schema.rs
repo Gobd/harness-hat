@@ -53,6 +53,10 @@ pub struct ContainerDef {
     /// Additional allowlist entries written into a starter `harness-rules.toml`.
     #[serde(default)]
     pub starter_network_allowlist: Vec<String>,
+    /// Hosts/domains allowed by default without network approval.
+    /// Merged with rules from harness-rules.toml at runtime.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
     /// Optional container log paths to scan for MCP startup diagnostics.
     #[serde(default)]
     pub mcp_log_paths: Vec<PathBuf>,
@@ -68,10 +72,6 @@ pub struct ContainerDef {
     /// Host env var names to pass through with `docker run -e NAME`.
     #[serde(default)]
     pub env_passthrough: Vec<String>,
-    /// Hostnames/domains to add to NO_PROXY for this container.
-    /// Use when specific endpoints must bypass the harness-hat proxy.
-    #[serde(default)]
-    pub bypass_proxy: Vec<String>,
     /// TCP ports on container localhost that forward to the host.
     #[serde(default)]
     pub localhost_forwards: Vec<LocalhostForward>,
@@ -103,6 +103,8 @@ pub struct ContainerProfile {
     #[serde(default)]
     pub starter_network_allowlist: Vec<String>,
     #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    #[serde(default)]
     pub mcp_log_paths: Vec<PathBuf>,
     #[serde(default)]
     pub mcp_log_pattern: Option<String>,
@@ -112,8 +114,6 @@ pub struct ContainerProfile {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub env_passthrough: Vec<String>,
-    #[serde(default)]
-    pub bypass_proxy: Vec<String>,
     #[serde(default)]
     pub localhost_forwards: Vec<LocalhostForward>,
     #[serde(default)]
@@ -143,7 +143,7 @@ pub struct ContainerDefaults {
     #[serde(default)]
     pub env_passthrough: Vec<String>,
     #[serde(default)]
-    pub bypass_proxy: Vec<String>,
+    pub allowed_hosts: Vec<String>,
     #[serde(default)]
     pub localhost_forwards: Vec<LocalhostForward>,
     #[serde(default)]

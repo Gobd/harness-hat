@@ -104,7 +104,6 @@ impl App {
         state: StateManager,
         proxy_state: ProxyState,
         _proxy_addr: String,
-        ca_cert_path: String,
     ) -> Result<Self> {
         let cfg = config.get();
         let watched_rules_stamps = Self::watched_rules_paths(&cfg)
@@ -164,7 +163,6 @@ impl App {
             loaded_config_path,
             token,
             session_registry,
-            ca_cert_path,
             proxy_state,
             workspaces,
             pending_stop: vec![],

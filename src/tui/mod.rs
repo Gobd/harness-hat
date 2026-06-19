@@ -180,7 +180,6 @@ pub struct App {
     pub loaded_config_path: PathBuf,
     pub token: String,
     pub session_registry: SessionRegistry,
-    pub ca_cert_path: String,
     proxy_state: ProxyState,
 
     pub workspaces: Vec<WorkspaceStatus>,

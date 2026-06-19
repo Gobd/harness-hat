@@ -39,7 +39,7 @@ log_dir = "~/.local/share/harness-hat"
 
 [defaults.containers]
 env_passthrough = ["TERM", "COLORTERM", "COLORFGBG", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]
-bypass_proxy = [
+allowed_hosts = [
   "api.anthropic.com",
   "claude.ai",
   "platform.claude.com",
@@ -60,7 +60,6 @@ bypass_proxy = [
   "www.googleapis.com",
   "openrouter.ai",
   "api.openrouter.ai",
-  "chatgpt.com",
   "db.chatgpt.com",
   "raw.githubusercontent.com",
   "github.com"
@@ -250,8 +249,8 @@ shm_size = "2g"
 # Optional per-template env passthrough.
 # env_passthrough = ["OPENAI_API_KEY"]
 
-# Optional hosts that bypass MITM TLS interception for this template.
-# bypass_proxy = ["api.example.com"]
+# Optional hosts allowed by default without network approval for this template.
+# allowed_hosts = ["api.example.com", "*.example.org"]
 
 # Optional container-local TCP forwards to host services.
 # [[container_profiles.large.localhost_forwards]]

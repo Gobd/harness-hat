@@ -29,16 +29,6 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
     let state = crate::state::StateManager::open(&config.logging.log_dir)?;
     let token = state.get_or_create_token()?;
 
-    let ca_dir = config.logging.log_dir.join("ca");
-    let ca = Arc::new(crate::ca::CaStore::load_or_create(&ca_dir)?);
-
-    let ca_cert_path = ca_dir.join("ca.crt");
-    info!(
-        "Harness Hat CA certificate available at {}.\n{}",
-        ca_cert_path.display(),
-        ca.cert_pem
-    );
-
     let (stop_pending_tx, stop_pending_rx) = mpsc::channel::<crate::server::ContainerStopItem>(64);
     let (launch_pending_tx, launch_pending_rx) =
         mpsc::channel::<crate::server::WorkspaceLaunchItem>(16);
@@ -104,7 +94,6 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
     }
     let proxy_addr = format!("{proxy_host}:{proxy_port}");
     let proxy_state = crate::proxy::ProxyState::new(
-        ca.clone(),
         shared_config.clone(),
         net_pending_tx,
         activity_tx,
@@ -117,7 +106,6 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
         }
     });
 
-    let ca_cert_path_str = ca_cert_path.display().to_string();
     let app = crate::tui::App::new(
         shared_config,
         config_path.clone(),
@@ -132,7 +120,6 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
         state,
         proxy_state,
         proxy_addr_display,
-        ca_cert_path_str,
     )?;
     crate::tui::run(app).await?;
 

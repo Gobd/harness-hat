@@ -1,12 +1,11 @@
 #[cfg(test)]
 mod tests {
-    use crate::ca::CaStore;
     use crate::proxy::connect::parse_sni_from_tls_client_hello;
     use crate::proxy::core::{NetworkDecision, ProxyState, SourceIdentityStatus, SourcePriority};
     use crate::proxy::helpers::{
-        bypass_host_matches, canonicalize_host, container_tls_passthrough_match,
+        canonicalize_host,
         decode_source_from_proxy_authorization, ensure_host_header_matches_target,
-        format_byte_count, is_valid_signing_host, proxy_authorization_matches_token,
+        format_byte_count, proxy_authorization_matches_token,
         resolve_public_addrs, split_host_port,
     };
     use crate::proxy::http::{prompt_network, read_body_any};
@@ -51,47 +50,7 @@ mod tests {
     }
 
     #[test]
-    fn tls_passthrough_matches_shared_bypass_hosts() {
-        let raw = r#"
-version = 1
-docker_dir = "/tmp"
-
-[manager]
-global_rules_file = "/tmp/global.toml"
-
-[defaults.containers]
-bypass_proxy = ["api.anthropic.com", "api.openai.com", "*.googleapis.com"]
-
-[container_profiles.dev]
-image = "default"
-"#;
-        let root = unique_temp_dir("proxy-test-config");
-        let config_path = root.join("harness-hat.toml");
-        std::fs::write(&config_path, raw).expect("write config");
-        let cfg = crate::config::load(&config_path).expect("load config");
-
-        assert_eq!(
-            container_tls_passthrough_match(&cfg, Some("dev"), "api.anthropic.com"),
-            Some("api.anthropic.com")
-        );
-        assert_eq!(
-            container_tls_passthrough_match(&cfg, Some("dev"), "api.openai.com"),
-            Some("api.openai.com")
-        );
-        assert_eq!(
-            container_tls_passthrough_match(&cfg, Some("dev"), "docs.googleapis.com"),
-            Some("*.googleapis.com")
-        );
-        assert_eq!(
-            container_tls_passthrough_match(&cfg, Some("dev"), "example.com"),
-            None
-        );
-    }
-
-    #[test]
     fn source_connection_limit_is_per_container_identity() {
-        let ca_dir = unique_temp_dir("proxy-test-ca");
-        let ca = Arc::new(CaStore::load_or_create(&ca_dir).unwrap());
         let raw = r#"
 docker_dir = "/tmp"
 [manager]
@@ -100,7 +59,6 @@ global_rules_file = "/tmp/global.toml""#;
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state = ProxyState::new(
-            ca,
             SharedConfig::new(Arc::new(cfg)),
             pending_tx,
             activity_tx,
@@ -134,8 +92,6 @@ global_rules_file = "/tmp/global.toml""#;
 
     #[test]
     fn scoped_source_connection_limit_is_per_session_token() {
-        let ca_dir = unique_temp_dir("proxy-test-ca");
-        let ca = Arc::new(CaStore::load_or_create(&ca_dir).unwrap());
         let raw = r#"
 docker_dir = "/tmp"
 [manager]
@@ -144,7 +100,6 @@ global_rules_file = "/tmp/global.toml""#;
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state = ProxyState::new(
-            ca,
             SharedConfig::new(Arc::new(cfg)),
             pending_tx,
             activity_tx,
@@ -176,8 +131,6 @@ global_rules_file = "/tmp/global.toml""#;
 
     #[test]
     fn primary_source_connections_are_not_limited_by_proxy_admission() {
-        let ca =
-            Arc::new(CaStore::load_or_create(&std::env::temp_dir().join("proxy-test-ca")).unwrap());
         let raw = r#"
 docker_dir = "/tmp"
 [manager]
@@ -186,7 +139,6 @@ global_rules_file = "/tmp/global.toml""#;
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state = ProxyState::new(
-            ca,
             SharedConfig::new(Arc::new(cfg)),
             pending_tx,
             activity_tx,
@@ -213,8 +165,6 @@ global_rules_file = "/tmp/global.toml""#;
 
     #[test]
     fn limited_source_connection_limit_is_strict() {
-        let ca =
-            Arc::new(CaStore::load_or_create(&std::env::temp_dir().join("proxy-test-ca")).unwrap());
         let raw = r#"
 docker_dir = "/tmp"
 [manager]
@@ -223,7 +173,6 @@ global_rules_file = "/tmp/global.toml""#;
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state = ProxyState::new(
-            ca,
             SharedConfig::new(Arc::new(cfg)),
             pending_tx,
             activity_tx,
@@ -249,8 +198,6 @@ global_rules_file = "/tmp/global.toml""#;
 
     #[test]
     fn limiteds_cannot_exhaust_primary_scoped_proxy_capacity() {
-        let ca =
-            Arc::new(CaStore::load_or_create(&std::env::temp_dir().join("proxy-test-ca")).unwrap());
         let raw = r#"
 docker_dir = "/tmp"
 [manager]
@@ -259,7 +206,6 @@ global_rules_file = "/tmp/global.toml""#;
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state = ProxyState::new(
-            ca,
             SharedConfig::new(Arc::new(cfg)),
             pending_tx,
             activity_tx,
@@ -318,8 +264,6 @@ global_rules_file = "/tmp/global.toml""#;
 
     #[tokio::test]
     async fn configured_localhost_forward_allows_scoped_proxy_loopback() {
-        let ca_dir = unique_temp_dir("proxy-test-ca");
-        let ca = Arc::new(CaStore::load_or_create(&ca_dir).unwrap());
         let raw = r#"
 version = 1
 docker_dir = "/tmp"
@@ -341,7 +285,6 @@ host_port = 18081
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state = ProxyState::new(
-            ca,
             SharedConfig::new(Arc::new(cfg)),
             pending_tx,
             activity_tx,
@@ -372,15 +315,6 @@ host_port = 18081
             err.to_string().contains("restricted address"),
             "unexpected error: {err}"
         );
-    }
-
-    #[test]
-    fn bypass_host_matches_wildcards() {
-        assert!(bypass_host_matches("*.google.com", "api.google.com"));
-        assert!(bypass_host_matches("*.google.com", "google.com"));
-        assert!(bypass_host_matches(".google.com", "api.google.com"));
-        assert!(bypass_host_matches("google.com", "google.com"));
-        assert!(!bypass_host_matches("google.com", "notgoogle.com"));
     }
 
     #[test]
@@ -465,8 +399,6 @@ host_port = 18081
     async fn prompt_network_sends_to_pending_tx() {
         let (_ca_tx, _ca_rx) = mpsc::channel::<()>(1); // dummy
         let (pending_tx, mut pending_rx) = mpsc::channel(1);
-        let ca =
-            Arc::new(CaStore::load_or_create(&std::env::temp_dir().join("proxy-test-ca")).unwrap());
         // Wait, I can just use build_test_app logic if I want but let's just make a dummy config.
         let raw = r#"
 docker_dir = "/tmp"
@@ -475,7 +407,6 @@ global_rules_file = "/tmp/global.toml""#;
         let cfg: crate::config::Config = toml::from_str(raw).unwrap();
         let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state = ProxyState::new(
-            ca,
             SharedConfig::new(Arc::new(cfg)),
             pending_tx,
             activity_tx,
@@ -511,28 +442,6 @@ global_rules_file = "/tmp/global.toml""#;
 
         let result = prompt_task.await.unwrap();
         assert!(result, "prompt_network should return true for Allow");
-    }
-
-    #[test]
-    fn is_valid_signing_host_accepts_hostnames_and_ips() {
-        assert!(is_valid_signing_host("example.com"));
-        assert!(is_valid_signing_host("sub.example.com"));
-        assert!(is_valid_signing_host("xn--nxasmq6b.example"));
-        assert!(is_valid_signing_host("127.0.0.1"));
-        assert!(is_valid_signing_host("::1"));
-    }
-
-    #[test]
-    fn is_valid_signing_host_rejects_malformed_hosts() {
-        assert!(!is_valid_signing_host(""));
-        assert!(!is_valid_signing_host("-leadinghyphen.com"));
-        assert!(!is_valid_signing_host("trailinghyphen-.com"));
-        assert!(!is_valid_signing_host("has space.com"));
-        assert!(!is_valid_signing_host("under_score.com"));
-        assert!(!is_valid_signing_host("emp..ty"));
-        // Replacement char from a lossy decode must never reach the signer.
-        assert!(!is_valid_signing_host("ex\u{fffd}ample.com"));
-        assert!(!is_valid_signing_host(&"a".repeat(254)));
     }
 
     #[test]

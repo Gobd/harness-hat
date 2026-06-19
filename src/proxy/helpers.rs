@@ -246,24 +246,26 @@ pub(crate) fn decode_source_from_proxy_authorization(
     (Some(project), Some(container), SourceIdentityStatus::Ok)
 }
 
-pub(crate) fn container_tls_passthrough_match<'a>(
-    config: &'a Config,
+pub(crate) fn is_host_allowed(
+    config: &Config,
     source_container: Option<&str>,
     host: &str,
-) -> Option<&'a str> {
-    let source_container = source_container?;
-    let container = config
-        .containers
-        .iter()
-        .find(|c| c.name == source_container)?;
+) -> bool {
+    let source_container = match source_container {
+        Some(name) => name,
+        None => return false,
+    };
+    let container = match config.containers.iter().find(|c| c.name == source_container) {
+        Some(c) => c,
+        None => return false,
+    };
     container
-        .bypass_proxy
+        .allowed_hosts
         .iter()
-        .find(|pattern| bypass_host_matches(pattern, host))
-        .map(String::as_str)
+        .any(|pattern| host_matches_pattern(pattern, host))
 }
 
-pub(crate) fn bypass_host_matches(pattern: &str, host: &str) -> bool {
+pub(crate) fn host_matches_pattern(pattern: &str, host: &str) -> bool {
     let pattern = pattern.trim();
     if pattern.is_empty() {
         return false;
@@ -359,28 +361,7 @@ pub(crate) fn canonicalize_host(raw: &str) -> Result<String> {
     Ok(ascii)
 }
 
-/// Return `true` if `host` looks like a syntactically valid DNS hostname
-/// (labels of `[A-Za-z0-9-]`, length limits) or a parseable IP literal. Used to
-/// gate inputs to the leaf-certificate signer so attacker-controllable CONNECT
-/// or SNI strings can't land arbitrary bytes in the signing pipeline.
-pub(crate) fn is_valid_signing_host(host: &str) -> bool {
-    if host.is_empty() || host.len() > 253 {
-        return false;
-    }
-    if host.parse::<IpAddr>().is_ok() {
-        return true;
-    }
-    host.split('.').all(|label| {
-        !label.is_empty()
-            && label.len() <= 63
-            && !label.starts_with('-')
-            && !label.ends_with('-')
-            && label
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    })
-}
-
+#[allow(dead_code)]
 pub(crate) fn ensure_host_header_matches_target(
     headers: &[(String, String)],
     expected_host: &str,
@@ -406,6 +387,7 @@ pub(crate) fn ensure_host_header_matches_target(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn host_names_match(actual: &str, expected: &str) -> bool {
     let actual = actual.trim().trim_end_matches('.');
     let expected = expected.trim().trim_end_matches('.');

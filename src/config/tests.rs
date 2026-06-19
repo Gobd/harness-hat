@@ -44,28 +44,6 @@ canonical_path = "{}"
 memory = "2g"
 cpus = "1.5"
 shm_size = "512m"
-bypass_proxy = [
-  "api.anthropic.com",
-  "claude.ai",
-  "platform.claude.com",
-  "downloads.claude.ai",
-  "storage.googleapis.com",
-  "chatgpt.com",
-  "*.chatgpt.com",
-  "*.openai.com",
-  "api.openai.com",
-  "chat.openai.com",
-  "auth.openai.com",
-  "*.googleapis.com",
-  "generativelanguage.googleapis.com",
-  "aistudio.google.com",
-  "antigravity.google",
-  "accounts.google.com",
-  "oauth2.googleapis.com",
-  "www.googleapis.com",
-  "openrouter.ai",
-  "api.openrouter.ai",
-]
 
 [container_profiles.dev]
 image = "default"
@@ -121,33 +99,6 @@ image = "default"
                 .any(|mount| mount.host == *host && mount.container == *host),
             "unexpected host-absolute shared session mount {:?}",
             host
-        );
-    }
-    for host in [
-        "api.anthropic.com",
-        "claude.ai",
-        "platform.claude.com",
-        "downloads.claude.ai",
-        "storage.googleapis.com",
-        "chatgpt.com",
-        "*.chatgpt.com",
-        "*.openai.com",
-        "api.openai.com",
-        "chat.openai.com",
-        "auth.openai.com",
-        "*.googleapis.com",
-        "generativelanguage.googleapis.com",
-        "aistudio.google.com",
-        "antigravity.google",
-        "accounts.google.com",
-        "oauth2.googleapis.com",
-        "www.googleapis.com",
-        "openrouter.ai",
-        "api.openrouter.ai",
-    ] {
-        assert!(
-            template.bypass_proxy.iter().any(|entry| entry == host),
-            "missing shared bypass host {host}"
         );
     }
 }

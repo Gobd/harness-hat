@@ -14,7 +14,6 @@
 
 pub mod activity;
 mod ansi;
-pub mod ca;
 pub mod cli;
 pub mod config;
 pub mod container;

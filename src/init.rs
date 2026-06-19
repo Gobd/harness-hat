@@ -226,38 +226,6 @@ mod tests {
 
         assert_eq!(parsed.defaults.control.server_port, 7878);
         assert_eq!(parsed.defaults.control.server_host, "127.0.0.1");
-        for host in [
-            "api.anthropic.com",
-            "claude.ai",
-            "platform.claude.com",
-            "downloads.claude.ai",
-            "storage.googleapis.com",
-            "chatgpt.com",
-            "*.chatgpt.com",
-            "*.openai.com",
-            "api.openai.com",
-            "chat.openai.com",
-            "auth.openai.com",
-            "*.googleapis.com",
-            "generativelanguage.googleapis.com",
-            "aistudio.google.com",
-            "antigravity.google",
-            "accounts.google.com",
-            "oauth2.googleapis.com",
-            "www.googleapis.com",
-            "openrouter.ai",
-            "api.openrouter.ai",
-        ] {
-            assert!(
-                parsed
-                    .defaults
-                    .containers
-                    .bypass_proxy
-                    .iter()
-                    .any(|entry| entry == host),
-                "missing shared default bypass host {host}"
-            );
-        }
         for (host, container) in [
             ("~/.claude.json", "/home/coder/.claude.json"),
             ("~/.claude/.claude.json", "/home/coder/.claude/.claude.json"),

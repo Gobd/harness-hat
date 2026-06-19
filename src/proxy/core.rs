@@ -13,35 +13,23 @@ use lru::LruCache;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
-use tokio_rustls::TlsAcceptor;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::activity::{Activity, ActivityEvent, ActivityKind, ActivityState, payload_preview};
-use crate::ca::CaStore;
-use crate::config;
-use crate::proxy::connect::{handle_connect, parse_sni_from_tls_client_hello};
+use crate::proxy::connect::handle_connect;
 use crate::proxy::helpers::{
-    canonicalize_host, connect_public_tcp_with_priority, container_tls_passthrough_match,
-    is_expected_disconnect, is_valid_signing_host, resolve_public_addrs_with_priority,
-    tunnel_with_activity, write_error_any,
+    connect_public_tcp_with_priority,
+    is_expected_disconnect, resolve_public_addrs_with_priority, write_error_any,
 };
-use crate::proxy::http::{
-    finish_blocked_network_activity, handle_plain_http, handle_tls_inner_request,
-    network_policy_allows,
-};
-use crate::rules::{ComposedRules, NetworkPolicy};
+use crate::proxy::http::handle_plain_http;
 use crate::shared_config::SharedConfig;
 use tracing::instrument;
 
 const REQWEST_CLIENT_CACHE_CAPACITY: usize = 256;
-const RULES_CACHE_CAPACITY: usize = 64;
 
 const FIRST_BYTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const ROOT_PROXY_CONNECTION_LIMIT: usize = 256;
@@ -129,7 +117,6 @@ impl SourceIdentityStatus {
 #[derive(Clone)]
 /// Shared proxy state used by all listener tasks.
 pub struct ProxyState {
-    pub ca: Arc<CaStore>,
     pub config: SharedConfig,
     pub pending_tx: mpsc::Sender<PendingNetworkItem>,
     // Bounded (H12); senders use `try_send` and drop with a debug log on full.
@@ -143,17 +130,6 @@ pub struct ProxyState {
     /// M1: bounded LRU of per-host reqwest clients, avoids rebuilding the TLS
     /// context + connection pool on every forwarded request.
     http_client_cache: Arc<Mutex<LruCache<String, reqwest::Client>>>,
-    /// M2: cached composed rules per workspace, keyed by `(workspace_dir,
-    /// mtime)`. On stat / parse failure we fall back to the last-known-good
-    /// entry rather than returning 500 to the in-container client.
-    rules_cache: Arc<Mutex<LruCache<PathBuf, RulesCacheEntry>>>,
-}
-
-#[derive(Clone)]
-struct RulesCacheEntry {
-    /// `None` if the rules file does not exist or stat failed.
-    mtime: Option<SystemTime>,
-    rules: Arc<ComposedRules>,
 }
 
 pub(crate) struct ProxyConnectionPermit {
@@ -168,13 +144,11 @@ pub(crate) struct SourceConnectionPermit {
 
 impl ProxyState {
     pub fn new(
-        ca: Arc<CaStore>,
         config: SharedConfig,
         pending_tx: mpsc::Sender<PendingNetworkItem>,
         activity_tx: mpsc::Sender<ActivityEvent>,
     ) -> Result<Self> {
         Ok(Self {
-            ca,
             config,
             pending_tx,
             activity_tx,
@@ -191,9 +165,6 @@ impl ProxyState {
             http_client_cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(REQWEST_CLIENT_CACHE_CAPACITY)
                     .expect("non-zero client cache cap"),
-            ))),
-            rules_cache: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(RULES_CACHE_CAPACITY).expect("non-zero rules cache cap"),
             ))),
         })
     }
@@ -363,102 +334,6 @@ impl ProxyState {
         Ok(client)
     }
 
-    /// Load composed rules for `source_project`, caching the result keyed by
-    /// the workspace path and the per-file mtimes. On stat/parse failure we
-    /// fall back to the previously cached entry rather than returning an error
-    /// so that a user editing `harness-rules.toml` in their editor does not
-    /// cause transient 500s to forwarded requests.
-    pub(crate) fn load_composed_rules(
-        &self,
-        source_project: Option<&str>,
-    ) -> Result<Arc<ComposedRules>> {
-        let cfg = self.config.get();
-        let cache_key = self.rules_cache_key(&cfg, source_project);
-        // Compute the current "version" of inputs via mtimes; if it matches a
-        // cached entry, reuse it without parsing.
-        let current_mtime = self.rules_inputs_mtime(&cfg, source_project);
-        if let Ok(mut cache) = self.rules_cache.lock()
-            && let Some(entry) = cache.get(&cache_key)
-            && entry.mtime == current_mtime
-        {
-            return Ok(entry.rules.clone());
-        }
-        match config::load_composed_rules_for_workspace(&cfg, source_project) {
-            Ok(rules) => {
-                let arc = Arc::new(rules);
-                if let Ok(mut cache) = self.rules_cache.lock() {
-                    cache.put(
-                        cache_key,
-                        RulesCacheEntry {
-                            mtime: current_mtime,
-                            rules: arc.clone(),
-                        },
-                    );
-                }
-                Ok(arc)
-            }
-            Err(e) => {
-                // Fall back to the last-known-good entry if we have one. This
-                // covers the editor-saved-partial-file race (M2).
-                if let Ok(mut cache) = self.rules_cache.lock()
-                    && let Some(entry) = cache.get(&cache_key)
-                {
-                    warn!("proxy rules reload failed ({e}); falling back to last-known-good rules");
-                    return Ok(entry.rules.clone());
-                }
-                Err(e)
-            }
-        }
-    }
-
-    fn rules_cache_key(
-        &self,
-        cfg: &crate::config::Config,
-        source_project: Option<&str>,
-    ) -> PathBuf {
-        // The cache key combines the workspace directory (or a sentinel for
-        // global-only) with the global rules file path so different workspaces
-        // get their own entries.
-        let workspace = source_project
-            .and_then(|name| cfg.workspaces.iter().find(|p| p.name == name))
-            .map(|w| w.canonical_path.clone())
-            .unwrap_or_else(|| PathBuf::from("<global-only>"));
-        // Include the global rules file in the key so swapping it invalidates.
-        let mut key = workspace;
-        key.push(
-            cfg.manager
-                .global_rules_file
-                .file_name()
-                .unwrap_or_default(),
-        );
-        key
-    }
-
-    fn rules_inputs_mtime(
-        &self,
-        cfg: &crate::config::Config,
-        source_project: Option<&str>,
-    ) -> Option<SystemTime> {
-        // Combine the two input file mtimes into the LATEST one. If either
-        // file is missing we still cache (mtime tracks Option::None too).
-        let mut latest: Option<SystemTime> = None;
-        if let Ok(meta) = std::fs::metadata(&cfg.manager.global_rules_file)
-            && let Ok(mtime) = meta.modified()
-        {
-            latest = Some(latest.map_or(mtime, |cur| cur.max(mtime)));
-        }
-        if let Some(name) = source_project
-            && let Some(project) = cfg.workspaces.iter().find(|p| p.name == name)
-        {
-            let path = project.canonical_path.join("harness-rules.toml");
-            if let Ok(meta) = std::fs::metadata(&path)
-                && let Ok(mtime) = meta.modified()
-            {
-                latest = Some(latest.map_or(mtime, |cur| cur.max(mtime)));
-            }
-        }
-        latest
-    }
 }
 
 fn is_container_host_alias(host: &str) -> bool {
@@ -710,259 +585,11 @@ async fn handle_connection(stream: TcpStream, state: ProxyState) -> Result<()> {
         }
     }
 
-    // Prefer explicit CONNECT first, then fall back to sniffing for raw TLS.
-    // This lets the same listener handle both proxy-aware clients and clients
-    // that try to talk TLS directly to the gateway.
+    // Only handle explicit CONNECT requests or plain HTTP.
+    // TLS interception (transparent TLS) is disabled without root cert injection.
     if n >= 7 && &peek[..7] == b"CONNECT" {
         handle_connect(stream, state).await
-    } else if looks_like_tls_client_hello(&peek[..n]) {
-        handle_transparent_tls(stream, state).await
     } else {
         handle_plain_http(stream, state).await
     }
-}
-
-fn looks_like_tls_client_hello(buf: &[u8]) -> bool {
-    buf.len() >= 3 && buf[0] == 0x16 && buf[1] == 0x03 && (0x01..=0x04).contains(&buf[2])
-}
-
-// ── Transparent TLS (no CONNECT) ─────────────────────────────────────────────
-
-struct PrefixedTcpStream {
-    prefix: std::io::Cursor<Vec<u8>>,
-    inner: TcpStream,
-}
-
-impl AsyncRead for PrefixedTcpStream {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        // M7: an `AsyncRead` impl must tolerate a zero-remaining buffer; the
-        // previous `debug_assert!(after > before)` would have panicked here.
-        if buf.remaining() == 0 {
-            return std::task::Poll::Ready(Ok(()));
-        }
-        if (self.prefix.position() as usize) < self.prefix.get_ref().len() {
-            let pos = self.prefix.position();
-            let rem = &self.prefix.get_ref()[pos as usize..];
-            let to_copy = rem.len().min(buf.remaining());
-            buf.put_slice(&rem[..to_copy]);
-            self.prefix.set_position(pos + to_copy as u64);
-            return std::task::Poll::Ready(Ok(()));
-        }
-        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for PrefixedTcpStream {
-    fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        data: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.inner).poll_write(cx, data)
-    }
-
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
-    }
-}
-
-async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Result<()> {
-    if let Some(fixed) = &state.fixed_source {
-        warn!(
-            source_project = %fixed.project,
-            source_container = %fixed.container,
-            "dropping transparent TLS connection to scoped proxy without proxy authentication"
-        );
-        return Ok(());
-    }
-
-    let (source_project, source_container, source_status, has_proxy_authorization) = (
-        None,
-        None,
-        SourceIdentityStatus::MissingProxyAuthorization,
-        false,
-    );
-    let Some(_source_permit) =
-        state.try_acquire_source_connection(source_project.as_deref(), source_container.as_deref())
-    else {
-        return Ok(());
-    };
-
-    let prefix = read_tls_client_hello_prefix(&mut stream).await?;
-    let Some(sni_raw) = parse_sni_from_tls_client_hello(&prefix) else {
-        warn!("transparent TLS connection missing SNI; dropping");
-        return Ok(());
-    };
-    // CR4: canonicalize before anything policy-related touches it. SNI
-    // strings often arrive lowercased already but we accept whatever the
-    // client gave us; rules matching expects the normalized form.
-    let host = match canonicalize_host(&sni_raw) {
-        Ok(h) => h,
-        Err(e) => {
-            warn!(sni = %sni_raw, "transparent TLS rejected: {e}");
-            return Ok(());
-        }
-    };
-
-    let connect_activity = state.start_network_activity(
-        source_project.clone(),
-        source_container.clone(),
-        "CONNECT",
-        &host,
-        "/",
-        "transparent-tls",
-        &[],
-        &[],
-        ActivityState::Forwarding,
-    );
-    state.activity_line(&connect_activity.id, format!("target {host}:443"));
-
-    if let Some(bypass_pattern) =
-        container_tls_passthrough_match(&state.config.get(), source_container.as_deref(), &host)
-    {
-        info!(
-            host = %host,
-            bypass_pattern = %bypass_pattern,
-            source_project = ?source_project,
-            source_container = ?source_container,
-            source_status = source_status.as_str(),
-            "proxy transparent TLS passthrough"
-        );
-        let mut upstream = state.connect_public_tcp(&host, 443).await.map_err(|e| {
-            anyhow::anyhow!("transparent passthrough connect to {host}:443 failed: {e}")
-        })?;
-        upstream.write_all(&prefix).await?;
-        state.activity_state(
-            &connect_activity.id,
-            ActivityState::Forwarding,
-            Some(format!("tunneling {host}:443")),
-        );
-        let _ = tunnel_with_activity(&state, &connect_activity, &mut stream, &mut upstream).await;
-        return Ok(());
-    }
-
-    let rules = match state.load_composed_rules(source_project.as_deref()) {
-        Ok(rules) => rules,
-        Err(e) => {
-            warn!("proxy rules load error: {e}");
-            state.activity_finished(
-                &connect_activity.id,
-                ActivityState::Failed,
-                Some("invalid harness-rules.toml configuration".to_string()),
-            );
-            return Ok(());
-        }
-    };
-    let preflight_policy = rules.match_connect(&host, 443);
-    if preflight_policy != NetworkPolicy::Deny {
-        if let Err(e) = state.resolve_request_addrs(&host, 443).await {
-            state.activity_finished(
-                &connect_activity.id,
-                ActivityState::Denied,
-                Some(e.to_string()),
-            );
-            return Ok(());
-        }
-    }
-    let preflight_allowed = network_policy_allows(
-        &state,
-        &connect_activity,
-        preflight_policy,
-        "waiting for CONNECT approval",
-        "CONNECT",
-        &host,
-        Some(443),
-        "/",
-        source_project.clone(),
-        source_container.clone(),
-        source_status.as_str(),
-        has_proxy_authorization,
-    )
-    .await;
-    if !preflight_allowed {
-        finish_blocked_network_activity(&state, &connect_activity);
-        return Ok(());
-    }
-
-    let prefixed = PrefixedTcpStream {
-        prefix: std::io::Cursor::new(prefix),
-        inner: stream,
-    };
-
-    // Gate attacker-controllable SNI/Host before it reaches the cert signer so
-    // it can never become a cache key or certificate subject of arbitrary shape.
-    if !is_valid_signing_host(&host) {
-        state.activity_finished(
-            &connect_activity.id,
-            ActivityState::Failed,
-            Some(format!(
-                "refusing to sign leaf cert for invalid host {host:?}"
-            )),
-        );
-        return Ok(());
-    }
-    let server_config = state.ca.leaf_server_config(&host).await?;
-    let acceptor = TlsAcceptor::from(server_config);
-    let mut tls_stream = acceptor.accept(prefixed).await.map_err(|e| {
-        state.activity_finished(
-            &connect_activity.id,
-            ActivityState::Failed,
-            Some(format!("TLS accept for {host}: {e}")),
-        );
-        anyhow::anyhow!("TLS accept for {host}: {e}")
-    })?;
-
-    debug!("proxy TLS established for host={host} (transparent)");
-    state.activity_finished(
-        &connect_activity.id,
-        ActivityState::Complete,
-        Some("TLS tunnel established".to_string()),
-    );
-
-    handle_tls_inner_request(
-        &state,
-        &mut tls_stream,
-        rules.as_ref(),
-        &host,
-        443,
-        source_project,
-        source_container,
-        source_status,
-        has_proxy_authorization,
-    )
-    .await
-}
-
-async fn read_tls_client_hello_prefix(stream: &mut TcpStream) -> Result<Vec<u8>> {
-    // We only need enough of the ClientHello to recover SNI and route policy;
-    // the rest of the handshake is forwarded untouched.
-    let mut hdr = [0u8; 5];
-    stream.read_exact(&mut hdr).await?;
-    if hdr[0] != 0x16 {
-        anyhow::bail!("not a TLS handshake record");
-    }
-    let len = u16::from_be_bytes([hdr[3], hdr[4]]) as usize;
-    if len > 64 * 1024 {
-        anyhow::bail!("TLS record too large");
-    }
-    let mut body = vec![0u8; len];
-    stream.read_exact(&mut body).await?;
-    let mut out = Vec::with_capacity(5 + len);
-    out.extend_from_slice(&hdr);
-    out.extend_from_slice(&body);
-    Ok(out)
 }

@@ -2,15 +2,8 @@
 
 ## 0.8.0 Unreleased
 
-This release is a major rewrite. Harness Hat moves from a host-command
-execution bridge (`hostdo`/`agentctl`) to a **workspace + Docker-template
-session model**: you register workspaces, pick a language template, and get
-an interactive shell in a sandboxed container whose egress is filtered by the
-MITM proxy. The old subagent-control subsystem has been removed; the container-
-side `hostdo` bridge is now restored on top of the new control server and TUI
-architecture.
-
 ### Added
+- `allowed_hosts` configuration field in `harness-hat.toml` (at defaults and per-container level) for hosts that bypass network approval prompts without needing `harness-rules.toml` entries. Supports wildcard patterns matching.
 - New `hh shell [ID] [COMMAND...]` subcommand: open an interactive shell in a running session, or run a one-off command in it. With no ID it lists running sessions and their IDs. Any args after the ID are passed verbatim to `docker exec` (e.g. `hh shell 0042 claude --resume`). Works as a thin Docker attach, independent of the manager TUI; falls back to `docker exec -i` (no `-t`) when stdin is not a terminal so piped commands like `echo prompt | hh shell ID cat` work.
 - Restored the in-container `hostdo` command and tracked hostdo jobs (`run`/`list`/`status`/`tail`/`send`/`stop`) on top of the new `/exec` and `/exec/jobs/*` control-server endpoints.
 - Restored hostdo sidebar child rows in the manager TUI: hostdo requests now create navigable activity items that can be inspected and cancelled with `Ctrl+C`, just like earlier hostdo activity tracking.
@@ -29,6 +22,7 @@ architecture.
 - `api.github.com` and `downloads.claude.ai` added to the default network allowlist to support Dockerfile template fetch and the apt-based Claude Code install.
 
 ### Changed
+- **Breaking:** `bypass_proxy` configuration has been replaced by `allowed_hosts` for specifying hosts that are automatically allowed without network approval. The field is now supported at the defaults level and per-container profile in `harness-hat.toml`, and no longer requires setting `NO_PROXY` environment variables.
 - **Breaking:** the manager binary is renamed `harness-hat-manager` → `hh` (a single binary). Running `hh` with no subcommand launches the interactive workspace manager.
 - **Breaking:** Harness Hat now uses a workspace + Docker-template session model; sessions are shell-first Docker containers. The previous command-passthrough / host-command-control model is gone.
 - **Breaking:** config section `[defaults.hostdo]` is replaced by `[defaults.control]` (the authenticated lifecycle/control server used by `killme`). The hostdo execution-policy keys (`max_timeout_secs`, `denied_executables`, `hostdo_block_common`, `denied_argument_fragments`, `command_aliases`, and per-workspace `hostdo` overrides) are no longer recognized.
@@ -45,6 +39,9 @@ architecture.
 - README rewritten around the new workspace/template/shell workflow.
 
 ### Removed
+- **Breaking:** root certificate injection and MITM TLS support (`src/ca.rs`, CA field from `ProxyState`, transparent TLS handler). Containers can no longer intercept HTTPS traffic; CONNECT requests now tunnel directly without certificate signing. This simplifies the proxy architecture and removes the need for injecting self-signed CAs into containers.
+- **Breaking:** `bypass_proxy` configuration field (migrated to `allowed_hosts`). Use `allowed_hosts` in `harness-hat.toml` instead for hosts that should be automatically allowed without network approval.
+- HTTP request type filtering and request-smuggling protections (H4 method validation, CR3 line-ending and body-framing validation). The proxy now accepts all HTTP methods and simplified body reading.
 - **Breaking:** the `agentctl` subagent spawn/control system (`agentctl spawn`/`status`/`tail`/`send`/`stop`) and its TUI integration (`docker/scripts/agentctl.py`, `src/agents.rs`, `src/tui/app/agents.rs`).
 - The legacy substring-based container-ID match in the stop endpoint.
 - Per-request `reqwest::Client` rebuild on the proxy hot path (now cached on `ProxyState`).

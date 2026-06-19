@@ -276,6 +276,11 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
             command: profile.command.clone(),
             grayscale_palette: prefer!(grayscale_palette).unwrap_or(false),
             starter_network_allowlist: profile.starter_network_allowlist.clone(),
+            allowed_hosts: merge_unique_strings(
+                &defaults.allowed_hosts,
+                &profile.allowed_hosts,
+                &[],
+            ),
             mcp_log_paths: merge_unique_paths(&defaults.mcp_log_paths, &profile.mcp_log_paths),
             mcp_log_pattern: prefer!(mcp_log_pattern),
             mounts,
@@ -285,14 +290,6 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
                 &profile.env_passthrough,
                 &[],
             ),
-            bypass_proxy: {
-                let global_bypass_proxy = vec!["*".to_string()];
-                merge_unique_strings(
-                    &global_bypass_proxy,
-                    &defaults.bypass_proxy,
-                    &profile.bypass_proxy,
-                )
-            },
             localhost_forwards: merge_localhost_forwards(
                 &defaults.localhost_forwards,
                 &profile.localhost_forwards,
@@ -634,13 +631,6 @@ fn validate(config: &Config) -> Result<()> {
                 "container '{}': env_passthrough must be env var names only (no '='): {}",
                 ctr.name,
                 name
-            );
-        }
-        for host in &ctr.bypass_proxy {
-            anyhow::ensure!(
-                !host.trim().is_empty(),
-                "container '{}': bypass_proxy contains an empty host",
-                ctr.name
             );
         }
         for forward in &ctr.localhost_forwards {

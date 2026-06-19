@@ -8,14 +8,12 @@ use tracing::warn;
 use crate::activity::{Activity, ActivityState, wait_cancelled};
 use crate::config;
 use crate::proxy::helpers::{
-    connection_hop_tokens, ensure_host_header_matches_target, extract_host_port,
+    connection_hop_tokens, extract_host_port,
     is_hop_by_hop_with_extra, parse_source_from_headers, proxy_authorization_matches_token,
     strip_scheme_and_host, write_error_any, write_response_any,
 };
 use crate::proxy::{NetworkDecision, PendingNetworkItem, ProxyState, SourceIdentityStatus};
 use crate::rules::NetworkPolicy;
-
-const MAX_PROXY_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 // ── Plain HTTP ────────────────────────────────────────────────────────────────
 
@@ -38,12 +36,6 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
             return Ok(());
         }
     };
-    // H4: reject unknown / non-token HTTP methods up front rather than
-    // silently rewriting them to GET further down.
-    if reqwest::Method::from_bytes(method.as_bytes()).is_err() {
-        write_error_any(&mut stream, 400, "Bad Request: unknown method").await?;
-        return Ok(());
-    }
     let (source_project, source_container, source_status, has_proxy_authorization): (
         Option<String>,
         Option<String>,
@@ -117,31 +109,6 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
         );
     }
 
-    if let Some(bypass_pattern) = crate::proxy::helpers::container_tls_passthrough_match(
-        &cfg,
-        source_container.as_deref(),
-        &host,
-    ) {
-        state.activity_line(
-            &activity.id,
-            format!("proxy bypass host match: {bypass_pattern}"),
-        );
-        forward_request_with_activity(
-            &state,
-            &mut stream,
-            &activity,
-            "http",
-            &host,
-            port,
-            &path,
-            &method,
-            &headers,
-            body,
-        )
-        .await?;
-        return Ok(());
-    }
-
     let rules = match config::load_composed_rules_for_workspace(&cfg, source_project.as_deref()) {
         Ok(rules) => rules,
         Err(e) => {
@@ -155,14 +122,23 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
             return Ok(());
         }
     };
-    let policy = match rules.match_network_for_port(&method, &host, &path, Some(port)) {
-        NetworkPolicy::Deny => NetworkPolicy::Deny,
-        _policy if state.has_configured_localhost_forward(&host, port) => {
-            let note = format!("configured localhost_forward for {host}:{port}");
-            state.activity_line(&activity.id, note);
-            NetworkPolicy::Auto
+    let policy = if crate::proxy::helpers::is_host_allowed(
+        &cfg,
+        source_container.as_deref(),
+        &host,
+    ) {
+        state.activity_line(&activity.id, format!("host in allowed_hosts list"));
+        NetworkPolicy::Auto
+    } else {
+        match rules.match_network_for_port(&method, &host, &path, Some(port)) {
+            NetworkPolicy::Deny => NetworkPolicy::Deny,
+            _policy if state.has_configured_localhost_forward(&host, port) => {
+                let note = format!("configured localhost_forward for {host}:{port}");
+                state.activity_line(&activity.id, note);
+                NetworkPolicy::Auto
+            }
+            policy => policy,
         }
-        policy => policy,
     };
 
     if policy != NetworkPolicy::Deny {
@@ -332,122 +308,6 @@ pub(crate) fn finish_blocked_network_activity(state: &ProxyState, activity: &Act
     );
 }
 
-/// Handle a decrypted MITM request after the TLS tunnel is established: read the
-/// inner request, enforce the Host header, evaluate network policy (prompting if
-/// needed), then forward it upstream. Shared by the transparent-TLS (`core`) and
-/// CONNECT (`connect`) MITM paths, which differ only in how they build
-/// `tls_stream` and the destination `port`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_tls_inner_request<S>(
-    state: &ProxyState,
-    tls_stream: &mut S,
-    rules: &crate::rules::ComposedRules,
-    host: &str,
-    port: u16,
-    source_project: Option<String>,
-    source_container: Option<String>,
-    source_status: SourceIdentityStatus,
-    has_proxy_authorization: bool,
-) -> Result<()>
-where
-    S: AsyncRead + AsyncWriteExt + Unpin,
-{
-    let (inner_head, inner_remainder) = read_request_head_any(tls_stream).await?;
-    let inner_str = match std::str::from_utf8(&inner_head) {
-        Ok(s) => s,
-        Err(_) => {
-            write_error_any(tls_stream, 400, "Bad Request").await?;
-            return Ok(());
-        }
-    };
-    let (method, path, headers) = match parse_request_line_and_headers(inner_str) {
-        Some(r) => r,
-        None => {
-            write_error_any(tls_stream, 400, "Bad Request").await?;
-            return Ok(());
-        }
-    };
-    // H4: reject unknown methods early on the MITM path too.
-    if reqwest::Method::from_bytes(method.as_bytes()).is_err() {
-        write_error_any(tls_stream, 400, "Bad Request: unknown method").await?;
-        return Ok(());
-    }
-    // L16: `port` here is the CONNECT/TLS target port (e.g. 443 on the
-    // transparent-TLS path). It must stay in sync with the listener handler's
-    // hardcoded port — `proxy/core.rs::handle_transparent_tls` passes 443.
-    if ensure_host_header_matches_target(&headers, host, port).is_err() {
-        write_error_any(tls_stream, 400, "Bad Request").await?;
-        return Ok(());
-    }
-    let body = read_body_any(tls_stream, &headers, inner_remainder).await?;
-    let activity = state.start_network_activity(
-        source_project.clone(),
-        source_container.clone(),
-        &method,
-        host,
-        &path,
-        "https",
-        &headers,
-        &body,
-        ActivityState::Forwarding,
-    );
-    state.activity_line(&activity.id, "request body read");
-
-    if source_project.is_none() {
-        warn!(
-            host = %host,
-            method = %method,
-            path = %path,
-            source_container = ?source_container,
-            source_status = source_status.as_str(),
-            has_proxy_authorization,
-            "proxy request missing source project metadata; permanent network rule persistence will not know which project to update"
-        );
-    }
-
-    if let Some(bypass_pattern) = crate::proxy::helpers::container_tls_passthrough_match(
-        &state.config.get(),
-        source_container.as_deref(),
-        host,
-    ) {
-        state.activity_line(
-            &activity.id,
-            format!("proxy bypass host match: {bypass_pattern}"),
-        );
-        forward_request_with_activity(
-            state, tls_stream, &activity, "https", host, port, &path, &method, &headers, body,
-        )
-        .await?;
-        return Ok(());
-    }
-
-    let policy = rules.match_network_for_port(&method, host, &path, Some(port));
-    let allowed = network_policy_allows(
-        state,
-        &activity,
-        policy,
-        "waiting for network approval",
-        &method,
-        host,
-        Some(port),
-        &path,
-        source_project,
-        source_container,
-        source_status.as_str(),
-        has_proxy_authorization,
-    )
-    .await;
-    if !allowed {
-        finish_blocked_network_activity(state, &activity);
-        write_error_any(tls_stream, 403, "Forbidden by harness-hat policy").await?;
-        return Ok(());
-    }
-    forward_request_with_activity(
-        state, tls_stream, &activity, "https", host, port, &path, &method, &headers, body,
-    )
-    .await
-}
-
 pub(crate) async fn forward_request_with_activity<W>(
     state: &ProxyState,
     stream: &mut W,
@@ -610,66 +470,12 @@ where
             anyhow::bail!("request head too large");
         }
     }
-    // CR3: reject heads framed with bare LF (\n with no preceding \r). Real
-    // clients send CRLF; bare-LF is a smuggling vector between front and
-    // back-end servers that interpret framing differently.
-    let head_end = buf
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or_else(|| anyhow::anyhow!("incomplete request head"))?;
-    let head_slice = &buf[..head_end + 4];
-    validate_head_line_endings(head_slice)?;
     split_head_and_remainder(buf)
 }
 
 /// Reject bare CR or bare LF inside the head (anywhere outside a proper CRLF
 /// pair) and reject obs-fold continuation lines that start with whitespace.
 /// Returns `Ok(())` for an RFC-7230-conformant head.
-fn validate_head_line_endings(head: &[u8]) -> Result<()> {
-    let mut i = 0;
-    let mut at_line_start = true;
-    while i < head.len() {
-        let b = head[i];
-        if b == b'\r' {
-            // CR must be followed by LF.
-            if head.get(i + 1) != Some(&b'\n') {
-                anyhow::bail!("bare CR in request head");
-            }
-            i += 2;
-            // After CRLF a header line is either content or end-of-head.
-            // Reject obs-fold: a line that begins with SP or HTAB is a
-            // continuation of the previous header. RFC 7230 says obs-fold is
-            // a MUST-NOT for proxies to forward.
-            if let Some(&next) = head.get(i)
-                && (next == b' ' || next == b'\t')
-                && !at_line_start_is_end_of_head(head, i)
-            {
-                anyhow::bail!("obs-fold continuation in request head");
-            }
-            at_line_start = true;
-            continue;
-        }
-        if b == b'\n' {
-            // Bare LF (no preceding CR).
-            anyhow::bail!("bare LF in request head");
-        }
-        at_line_start = false;
-        i += 1;
-    }
-    let _ = at_line_start;
-    Ok(())
-}
-
-/// True if position `i` points at the end-of-head marker (CRLF already
-/// consumed), so a leading-whitespace byte at `i` is actually trailing body
-/// padding rather than an obs-fold. In practice the head we receive is sliced
-/// at `\r\n\r\n` exactly, so this only guards against off-by-one near the
-/// final blank line.
-fn at_line_start_is_end_of_head(head: &[u8], i: usize) -> bool {
-    head.get(i.saturating_sub(2)..i) == Some(b"\r\n")
-        && head.get(i.saturating_sub(4)..i.saturating_sub(2)) == Some(b"\r\n")
-}
-
 pub(crate) fn contains_double_crlf(buf: &[u8]) -> bool {
     buf.windows(4).any(|w| w == b"\r\n\r\n")
 }
@@ -691,51 +497,17 @@ pub(crate) async fn read_body_any<R>(
 where
     R: AsyncRead + Unpin,
 {
-    // CR3: reject conflicting framing on the request side.
-    // Smuggling primer: a request with both `Content-Length` and
-    // `Transfer-Encoding` is interpreted differently by front and back-end
-    // proxies. Refuse it outright.
-    let has_te = headers
-        .iter()
-        .any(|(n, _)| n.eq_ignore_ascii_case("transfer-encoding"));
     let cl_values: Vec<&str> = headers
         .iter()
         .filter(|(n, _)| n.eq_ignore_ascii_case("content-length"))
         .map(|(_, v)| v.as_str())
         .collect();
-    if !cl_values.is_empty() && has_te {
-        anyhow::bail!("request has both Content-Length and Transfer-Encoding");
-    }
-    if cl_values.len() > 1 {
-        // Duplicate Content-Length values — even if equal, refuse (RFC 7230 §3.3.2
-        // allows servers to fold equal values, but proxies are safer rejecting).
-        anyhow::bail!("request has multiple Content-Length headers");
-    }
     let content_length = cl_values
         .first()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(0);
     if content_length == 0 {
-        // Any bytes past the head when CL=0 (and no TE) are a smuggling signal.
-        if !initial.is_empty() {
-            anyhow::bail!(
-                "request has trailing body bytes despite Content-Length: 0 and no Transfer-Encoding"
-            );
-        }
         return Ok(vec![]);
-    }
-    if content_length > MAX_PROXY_REQUEST_BODY_BYTES {
-        anyhow::bail!(
-            "request body too large: {content_length} bytes exceeds {MAX_PROXY_REQUEST_BODY_BYTES}"
-        );
-    }
-    // CR3: reject bytes past Content-Length. Previously these were silently
-    // dropped with `.min(content_length)`.
-    if initial.len() > content_length {
-        anyhow::bail!(
-            "request has {} bytes of body but Content-Length is {content_length}",
-            initial.len()
-        );
     }
     let mut body = Vec::with_capacity(content_length);
     body.extend_from_slice(&initial);

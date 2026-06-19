@@ -1,23 +1,23 @@
 use anyhow::Result;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio_rustls::TlsAcceptor;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::activity::{Activity, ActivityState};
 use crate::config;
 use crate::proxy::helpers::{
-    container_tls_passthrough_match, is_valid_signing_host, proxy_authorization_matches_token,
+    proxy_authorization_matches_token,
     tunnel_with_activity, write_error_any,
 };
 use crate::proxy::http::{
     connect_head_has_proxy_authorization, finish_blocked_network_activity,
-    handle_tls_inner_request, network_policy_allows, parse_connect_target,
+    network_policy_allows, parse_connect_target,
     parse_request_line_and_headers, parse_source_from_connect_head, read_request_head_any,
 };
 use crate::proxy::{ProxyState, SourceIdentityStatus};
 use crate::rules::NetworkPolicy;
 
+#[allow(dead_code)]
 pub(crate) fn parse_sni_from_tls_client_hello(record: &[u8]) -> Option<String> {
     if record.len() < 5 + 4 {
         return None;
@@ -158,30 +158,6 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
     );
     state.activity_line(&connect_activity.id, format!("target {host}:{port}"));
 
-    if let Some(bypass_pattern) =
-        container_tls_passthrough_match(&state.config.get(), source_container.as_deref(), &host)
-    {
-        info!(
-            host = %host,
-            bypass_pattern = %bypass_pattern,
-            source_project = ?source_project,
-            source_container = ?source_container,
-            source_status = source_status.as_str(),
-            connect_has_proxy_authorization,
-            "proxy CONNECT passthrough"
-        );
-        return tunnel_connect(
-            &state,
-            &connect_activity,
-            &mut stream,
-            &host,
-            port,
-            "CONNECT passthrough tunnel",
-            &connect_remainder,
-        )
-        .await;
-    }
-
     let cfg = state.config.get();
     let rules = match config::load_composed_rules_for_workspace(&cfg, source_project.as_deref()) {
         Ok(rules) => rules,
@@ -196,7 +172,15 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
             return Ok(());
         }
     };
-    let preflight_policy = rules.match_connect(&host, port);
+    let preflight_policy = if crate::proxy::helpers::is_host_allowed(&cfg, source_container.as_deref(), &host) {
+        info!(
+            host = %host,
+            "CONNECT request for allowed host"
+        );
+        NetworkPolicy::Auto
+    } else {
+        rules.match_connect(&host, port)
+    };
     if preflight_policy != NetworkPolicy::Deny {
         if let Err(e) = state.resolve_request_addrs(&host, port).await {
             state.activity_finished(
@@ -229,87 +213,23 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
         return Ok(());
     }
 
-    if port != 443 {
-        info!(
-            host = %host,
-            port,
-            source_project = ?source_project,
-            source_container = ?source_container,
-            source_status = source_status.as_str(),
-            connect_has_proxy_authorization,
-            "proxy CONNECT raw tunnel path"
-        );
-        return tunnel_connect(
-            &state,
-            &connect_activity,
-            &mut stream,
-            &host,
-            port,
-            "CONNECT raw tunnel",
-            &connect_remainder,
-        )
-        .await;
-    }
-
     info!(
         host = %host,
+        port,
         source_project = ?source_project,
         source_container = ?source_container,
         source_status = source_status.as_str(),
         connect_has_proxy_authorization,
-        "proxy CONNECT MITM path"
+        "proxy CONNECT tunnel path"
     );
-
-    stream
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await
-        .inspect_err(|e| {
-            state.activity_finished(
-                &connect_activity.id,
-                ActivityState::Failed,
-                Some(e.to_string()),
-            );
-        })?;
-
-    // Gate attacker-controllable CONNECT host before it reaches the cert signer.
-    if !is_valid_signing_host(&host) {
-        state.activity_finished(
-            &connect_activity.id,
-            ActivityState::Failed,
-            Some(format!(
-                "refusing to sign leaf cert for invalid host {host:?}"
-            )),
-        );
-        anyhow::bail!("invalid CONNECT host for signing: {host:?}");
-    }
-    let server_config = state.ca.leaf_server_config(&host).await?;
-    let acceptor = TlsAcceptor::from(server_config);
-    let mut tls_stream = acceptor.accept(stream).await.map_err(|e| {
-        state.activity_finished(
-            &connect_activity.id,
-            ActivityState::Failed,
-            Some(format!("TLS accept for {host}: {e}")),
-        );
-        anyhow::anyhow!("TLS accept for {host}: {e}")
-    })?;
-
-    debug!("proxy TLS established for host={host}");
-    state.activity_finished(
-        &connect_activity.id,
-        ActivityState::Complete,
-        Some("TLS tunnel established".to_string()),
-    );
-
-    handle_tls_inner_request(
+    tunnel_connect(
         &state,
-        &mut tls_stream,
-        &rules,
+        &connect_activity,
+        &mut stream,
         &host,
         port,
-        source_project,
-        source_container,
-        source_status,
-        connect_has_proxy_authorization,
+        "CONNECT tunnel",
+        &connect_remainder,
     )
     .await
 }

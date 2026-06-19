@@ -491,25 +491,6 @@ mod tests {
     };
 
     #[test]
-    fn compose_no_proxy_handles_empty_and_duplicates() {
-        use crate::container::helpers::compose_no_proxy;
-        let bypass = vec![
-            "google.com".to_string(),
-            "  ".to_string(),
-            "localhost".to_string(),
-        ];
-        let out = compose_no_proxy(&bypass);
-        // Default: localhost,127.0.0.1,host.docker.internal
-        assert!(out.contains("localhost"));
-        assert!(out.contains("127.0.0.1"));
-        assert!(out.contains("host.docker.internal"));
-        assert!(out.contains("google.com"));
-        // "localhost" was already there, "  " should be ignored
-        assert_eq!(out.split(',').filter(|&s| s == "localhost").count(), 1);
-        assert!(!out.contains("  "));
-    }
-
-    #[test]
     fn loopback_to_host_docker_rewrites_host_without_adding_slash() {
         use crate::container::core::loopback_to_host_docker;
         // Regression: must NOT add a trailing slash. The container's strict-mode
