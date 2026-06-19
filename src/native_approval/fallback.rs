@@ -7,11 +7,19 @@
 
 use tracing::debug;
 
-use super::{ApprovalRequest, Outcome};
+use super::{ApprovalRequest, HostdoApprovalRequest, Outcome};
 
 pub fn prompt_network_approval(req: &ApprovalRequest) -> Outcome {
     debug!(
         host = %req.host,
+        "no native approval backend on this target; returning Cancelled"
+    );
+    Outcome::Cancelled
+}
+
+pub fn prompt_hostdo_approval(req: &HostdoApprovalRequest) -> Outcome {
+    debug!(
+        command = %req.command,
         "no native approval backend on this target; returning Cancelled"
     );
     Outcome::Cancelled

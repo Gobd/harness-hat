@@ -6,11 +6,15 @@ This release is a major rewrite. Harness Hat moves from a host-command
 execution bridge (`hostdo`/`agentctl`) to a **workspace + Docker-template
 session model**: you register workspaces, pick a language template, and get
 an interactive shell in a sandboxed container whose egress is filtered by the
-MITM proxy. The host-side command-execution and subagent-control subsystems
-have been removed entirely.
+MITM proxy. The old subagent-control subsystem has been removed; the container-
+side `hostdo` bridge is now restored on top of the new control server and TUI
+architecture.
 
 ### Added
 - New `hh shell [ID] [COMMAND...]` subcommand: open an interactive shell in a running session, or run a one-off command in it. With no ID it lists running sessions and their IDs. Any args after the ID are passed verbatim to `docker exec` (e.g. `hh shell 0042 claude --resume`). Works as a thin Docker attach, independent of the manager TUI; falls back to `docker exec -i` (no `-t`) when stdin is not a terminal so piped commands like `echo prompt | hh shell ID cat` work.
+- Restored the in-container `hostdo` command and tracked hostdo jobs (`run`/`list`/`status`/`tail`/`send`/`stop`) on top of the new `/exec` and `/exec/jobs/*` control-server endpoints.
+- Restored hostdo sidebar child rows in the manager TUI: hostdo requests now create navigable activity items that can be inspected and cancelled with `Ctrl+C`, just like earlier hostdo activity tracking.
+- Hostdo approvals now use the same native modal subprocess flow as network approvals on macOS, with the in-TUI approval overlay retained as the non-macOS fallback.
 - Native OS notifications (Linux D-Bus, macOS, Windows toast) when a network-approval modal becomes pending in the TUI, so the user is nudged toward the approval even when the TUI isn't focused. The body shows the host, source workspace, and remaining pending count. Best-effort — any failure (missing D-Bus, macOS bundle quirks, toast permission) is logged at debug and ignored.
 - Default `starter_network_allowlist` in the example config now includes Antigravity CLI's runtime domains: `antigravity-unleash.goog`, `play.googleapis.com`, `oauth2.googleapis.com`, `www.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, `lh3.googleusercontent.com`, and the Playwright CDN domains (`playwright.azureedge.net`, `playwright-akamai.azureedge.net`, `playwright-verizon.azureedge.net`).
 - New `hh init [PATH]` subcommand to generate a sample config (replaces the old `--init` flag; defaults to `./harness-hat.toml`).
@@ -28,6 +32,8 @@ have been removed entirely.
 - **Breaking:** the manager binary is renamed `harness-hat-manager` → `hh` (a single binary). Running `hh` with no subcommand launches the interactive workspace manager.
 - **Breaking:** Harness Hat now uses a workspace + Docker-template session model; sessions are shell-first Docker containers. The previous command-passthrough / host-command-control model is gone.
 - **Breaking:** config section `[defaults.hostdo]` is replaced by `[defaults.control]` (the authenticated lifecycle/control server used by `killme`). The hostdo execution-policy keys (`max_timeout_secs`, `denied_executables`, `hostdo_block_common`, `denied_argument_fragments`, `command_aliases`, and per-workspace `hostdo` overrides) are no longer recognized.
+- `hostdo` is no longer exposed as an `hh hostdo` subcommand; the supported interface is again the standalone in-container `hostdo` command mounted into managed containers.
+- Workspace `harness-rules.toml` hostdo entries now support exact `image` and `timeout_secs` fields in addition to `argv`, `cwd`, and `approval_mode`, so remembered allow/deny decisions can persist image-backed and custom-timeout hostdo requests exactly.
 - **Breaking:** example container profiles are reorganized from agent-centric names (`claude`, `codex`, `gemini`, `pi`) to language/size templates (`typescript`, `go`, `rust`, `php`, `base`, `large`).
 - **Breaking:** the example config now ships with `server_host = "127.0.0.1"` and `proxy_host = "127.0.0.1"`. The manager refuses non-loopback binds unless `allow_remote_control = true` is set explicitly.
 - **Breaking:** the base Docker image now installs Claude Code from Anthropic's signed apt repository (`downloads.claude.ai`) instead of npm. Image rebuilds are now the only upgrade path for Claude Code.
@@ -39,7 +45,6 @@ have been removed entirely.
 - README rewritten around the new workspace/template/shell workflow.
 
 ### Removed
-- **Breaking:** the `hostdo` in-container host-command bridge and all its subcommands (`hostdo run`/`list`/`status`/`tail`/`send`/`stop`) — the headline 0.7.0 feature. The host execution server, command policy/approval engine, and passthrough mode are gone (`docker/scripts/hostdo.py`, `src/exec.rs`, `src/passthrough.rs`, `src/server/core.rs`).
 - **Breaking:** the `agentctl` subagent spawn/control system (`agentctl spawn`/`status`/`tail`/`send`/`stop`) and its TUI integration (`docker/scripts/agentctl.py`, `src/agents.rs`, `src/tui/app/agents.rs`).
 - The legacy substring-based container-ID match in the stop endpoint.
 - Per-request `reqwest::Client` rebuild on the proxy hot path (now cached on `ProxyState`).
@@ -71,6 +76,7 @@ have been removed entirely.
 - The Claude Code OAuth refresh token is no longer injected into containers — neither as `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` nor inside the seeded `~/.claude.json`'s `claudeAiOauth` block. Containers can't write a refreshed token back to the host's macOS Keychain, so allowing in-container refresh would rotate (and invalidate) the host's refresh token while the new token died with the container, breaking auth on the next launch. Sessions in the container are now bounded by the access token lifetime; re-run Claude locally to refresh the Keychain.
 
 ### Fixed
+- Generated starter `harness-rules.toml` files once again document the hostdo rule model, including exact command examples and image-backed hostdo examples.
 - Build tasks can now be cancelled (cooperative flag + task abort) on TUI quit.
 - Pressing Esc or `h` on the build pane while a build is running now returns to the sidebar without canceling the build; press `C` to cancel a running build.
 - Waiting sessions in the sidebar no longer show a `?` indicator to the left of their title.
@@ -82,6 +88,9 @@ have been removed entirely.
 - Container alias allocation now bails on docker errors rather than silently risking collisions.
 - `loopback_to_host_docker` no longer appends a trailing slash when rewriting `HARNESS_HAT_URL` to `host.docker.internal`. The `url::Url` round-trip introduced during the hardening normalized `http://host:7878` to `http://host:7878/`; the container's strict-network init parses the port with naive shell, so the stray slash produced port `7878/`, failed `iptables`, and killed the container at startup (exit 2).
 - `hh shell` no longer leaves the host terminal in a broken state when the container exits out from under it. The CLI now stays as the parent of `docker exec` (instead of `exec()`-ing into it), ignores `SIGINT`/`SIGQUIT`/`SIGTSTP` so they forward to the container, and on exit emits resets for focus reporting, bracketed paste, all mouse-reporting modes (X10, button-event, any-event, SGR, urxvt), cursor visibility, alternate screen, line wrap, and SGR attributes that an inner program (bash readline, vim, fzf, custom prompt) may have enabled but never gotten to disable. Restoration is skipped when stdout is not a TTY so the resets don't pollute piped output.
+- Hostdo strict-network startup path discovery now avoids virtual DNS relay IPs (`198.18.x.x`) and prefers direct route/gateway targets from `/proc/net/route` first, preventing connection failures before the first request is made.
+- Hostdo exec-job URLs are now wired to Axum 0.7 route syntax, resolving `/exec/jobs/{id}` correctly again.
+- Added regression tests that lock in both behaviors: Axum 0.7 route compatibility for `/exec/jobs/<uuid>` responses and hostdo candidate base URL ordering/filtering in strict-network mode.
 
 
 ## 0.7.0 Jun 1, 2026

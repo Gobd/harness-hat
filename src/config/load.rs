@@ -285,7 +285,14 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
                 &profile.env_passthrough,
                 &[],
             ),
-            bypass_proxy: merge_unique_strings(&defaults.bypass_proxy, &profile.bypass_proxy, &[]),
+            bypass_proxy: {
+                let global_bypass_proxy = vec!["*".to_string()];
+                merge_unique_strings(
+                    &global_bypass_proxy,
+                    &defaults.bypass_proxy,
+                    &profile.bypass_proxy,
+                )
+            },
             localhost_forwards: merge_localhost_forwards(
                 &defaults.localhost_forwards,
                 &profile.localhost_forwards,

@@ -317,6 +317,7 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                     let indent = sidebar_activity_indent_for_activity(app, id);
                     let (marker, color) = match &activity.state {
                         crate::activity::ActivityState::PendingApproval => ("? ", Color::Yellow),
+                        crate::activity::ActivityState::PullingImage => ("↓ ", Color::Yellow),
                         crate::activity::ActivityState::Running => ("$ ", Color::Cyan),
                         crate::activity::ActivityState::Forwarding => ("⇅ ", Color::Magenta),
                         crate::activity::ActivityState::Complete => ("✓ ", Color::Green),
@@ -444,6 +445,7 @@ fn network_sidebar_marker(activities: &[&crate::activity::Activity]) -> (&'stati
     for activity in activities {
         match &activity.state {
             crate::activity::ActivityState::PendingApproval => has_pending = true,
+            crate::activity::ActivityState::PullingImage => has_active = true,
             crate::activity::ActivityState::Forwarding
             | crate::activity::ActivityState::Running => has_active = true,
             crate::activity::ActivityState::Failed | crate::activity::ActivityState::Denied => {

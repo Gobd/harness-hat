@@ -95,6 +95,7 @@ impl App {
         loaded_config_path: PathBuf,
         token: String,
         session_registry: SessionRegistry,
+        exec_pending_rx: mpsc::Receiver<PendingItem>,
         stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
         launch_pending_rx: mpsc::Receiver<WorkspaceLaunchItem>,
         net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
@@ -167,6 +168,7 @@ impl App {
             proxy_state,
             workspaces,
             pending_stop: vec![],
+            pending_exec: vec![],
             pending_net: vec![],
             activities: vec![],
             log,
@@ -196,6 +198,7 @@ impl App {
             new_project: None,
             remove_workspace_confirm: None,
             base_rules_changed: None,
+            exec_pending_rx,
             stop_pending_rx,
             launch_pending_rx,
             workspace_launch_pending: None,
@@ -552,8 +555,25 @@ impl App {
     }
 
     pub fn pending_for_session(&self, session_idx: usize) -> Vec<usize> {
-        let _ = session_idx;
-        Vec::new()
+        let Some(session) = self.sessions.get(session_idx) else {
+            return Vec::new();
+        };
+        self.pending_exec
+            .iter()
+            .enumerate()
+            .filter(|(_, pending)| {
+                pending.project == session.project
+                    && pending.container_id.as_deref().is_none_or(|container| {
+                        Self::container_identity_matches(
+                            container,
+                            &session.container_id,
+                            &session.container_name,
+                            &session.docker_name,
+                        )
+                    })
+            })
+            .map(|(idx, _)| idx)
+            .collect()
     }
 
     pub(crate) fn activity_by_id(&self, id: &str) -> Option<&Activity> {
@@ -726,6 +746,15 @@ impl App {
             }
             ActivityEvent::State { id, state, status } => {
                 if let Some(activity) = self.activity_by_id_mut(&id) {
+                    if matches!(
+                        (&activity.kind, &state),
+                        (
+                            crate::activity::ActivityKind::Hostdo { .. },
+                            crate::activity::ActivityState::Running
+                        )
+                    ) {
+                        activity.mark_command_started(std::time::Instant::now());
+                    }
                     activity.state = state;
                     activity.status = status;
                     activity.updated_at = std::time::Instant::now();
@@ -744,6 +773,9 @@ impl App {
             }
             ActivityEvent::Finished { id, state, status } => {
                 if let Some(activity) = self.activity_by_id_mut(&id) {
+                    if matches!(activity.kind, crate::activity::ActivityKind::Hostdo { .. }) {
+                        activity.mark_command_finished(std::time::Instant::now());
+                    }
                     activity.state = state;
                     activity.status = status;
                     activity.updated_at = std::time::Instant::now();
@@ -832,7 +864,13 @@ impl App {
     }
 
     pub(crate) fn has_pending_approval_modal(&self) -> bool {
-        !self.pending_net.is_empty()
+        !self.pending_exec.is_empty()
+            || !self.pending_net.is_empty()
+            || self.native_dialog_inflight.is_some()
+    }
+
+    pub(crate) fn active_exec_modal_idx(&self) -> Option<usize> {
+        (!self.pending_exec.is_empty()).then_some(0)
     }
 
     pub(crate) fn sidebar_workspace_hotkey_target(&self, hotkey: char) -> Option<usize> {
@@ -915,6 +953,7 @@ impl App {
             })
             .flatten()
             .collect::<std::collections::HashSet<_>>();
+        self.deny_pending_exec_for_sessions(&tokens, &container_identities);
         self.deny_pending_network_for_sessions(&tokens, &container_identities);
 
         for remove_idx in indices.into_iter().rev() {
@@ -987,6 +1026,63 @@ impl App {
                 i += 1;
             }
         }
+    }
+
+    fn deny_pending_exec_for_sessions(
+        &mut self,
+        tokens: &std::collections::HashSet<String>,
+        container_identities: &std::collections::HashSet<String>,
+    ) {
+        let mut i = 0;
+        while i < self.pending_exec.len() {
+            let activity_id = self.pending_exec[i].activity_id.clone();
+            let matches_activity = self
+                .activity_by_id(&activity_id)
+                .and_then(|activity| activity.session_token.as_deref())
+                .is_some_and(|session_token| tokens.contains(session_token));
+            let matches_container = self.pending_exec[i]
+                .container_id
+                .as_deref()
+                .is_some_and(|source| container_identities.contains(source));
+
+            if matches_activity || matches_container {
+                self.deny_exec(i);
+                if let Some(activity) = self.activity_by_id_mut(&activity_id) {
+                    activity.state = crate::activity::ActivityState::Cancelled;
+                    activity.status = Some("container stopped".to_string());
+                    activity.updated_at = std::time::Instant::now();
+                    activity.finished_at = Some(activity.updated_at);
+                    activity.terminal_unselected_at = None;
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    pub(crate) fn cancel_activity(&mut self, id: &str) {
+        if let Some(activity) = self.activity_by_id(id) {
+            activity.request_cancel();
+        }
+        if let Some(idx) = self
+            .pending_exec
+            .iter()
+            .position(|item| item.activity_id == id)
+        {
+            self.deny_exec(idx);
+            return;
+        }
+        if let Some(activity) = self.activity_by_id_mut(id) {
+            activity.state = crate::activity::ActivityState::Cancelled;
+            activity.status = Some("cancellation requested".to_string());
+            activity.updated_at = std::time::Instant::now();
+        }
+    }
+
+    pub(crate) fn selected_network_activity_id(&self, session_idx: usize) -> Option<ActivityId> {
+        self.network_activities_for_session(session_idx)
+            .get(self.network_cursor_for_session(session_idx))
+            .map(|activity| activity.id.clone())
     }
 
     pub(crate) fn mark_session_stopped(&mut self, idx: usize) {

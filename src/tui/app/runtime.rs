@@ -16,6 +16,12 @@ impl App {
             self.selected_sidebar_item_from(&items)
         };
         for _ in 0..32 {
+            match self.exec_pending_rx.try_recv() {
+                Ok(item) => self.pending_exec.push(item),
+                Err(_) => break,
+            }
+        }
+        for _ in 0..32 {
             match self.stop_pending_rx.try_recv() {
                 Ok(item) => self.pending_stop.push(item),
                 Err(_) => break,

@@ -34,6 +34,8 @@ pub struct ProjectRules {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_instructions: Option<String>,
     #[serde(default)]
+    pub hostdo: HostdoRules,
+    #[serde(default)]
     pub network: NetworkRules,
 }
 
@@ -46,7 +48,49 @@ impl Default for ProjectRules {
         Self {
             version: CURRENT_RULES_VERSION,
             llm_instructions: None,
+            hostdo: HostdoRules::default(),
             network: NetworkRules::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct HostdoRules {
+    #[serde(default)]
+    pub default_policy: NetworkPolicy,
+    #[serde(default)]
+    pub commands: Vec<HostdoCommand>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct HostdoCommand {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default = "default_hostdo_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub approval_mode: NetworkPolicy,
+}
+
+fn default_hostdo_timeout_secs() -> u64 {
+    60
+}
+
+impl Default for HostdoCommand {
+    fn default() -> Self {
+        Self {
+            name: None,
+            argv: Vec::new(),
+            image: None,
+            cwd: None,
+            timeout_secs: default_hostdo_timeout_secs(),
+            approval_mode: NetworkPolicy::Prompt,
         }
     }
 }
@@ -85,6 +129,7 @@ pub struct NetworkRule {
 /// Global rules and all project rules are unioned together.
 #[derive(Debug, Clone, Default)]
 pub struct ComposedRules {
+    pub hostdo: HostdoRules,
     pub network_rules: Vec<NetworkRule>,
     pub network_deny_rules: Vec<NetworkRule>,
     pub network_default: NetworkPolicy,
@@ -94,15 +139,30 @@ impl ComposedRules {
     /// Compose global rules + one or more project rule sets.
     /// Global rules come first (higher priority in declaration order).
     pub fn compose(global: &ProjectRules, projects: &[ProjectRules]) -> Self {
+        let mut hostdo = global.hostdo.commands.clone();
         let mut network_allowlist = global.network.allowlist.clone();
         let mut network_denylist = global.network.denylist.clone();
+        let mut hostdo_default = global.hostdo.default_policy;
 
         for proj in projects {
+            hostdo_default = compose_hostdo_policies(hostdo_default, proj.hostdo.default_policy);
+            for cmd in &proj.hostdo.commands {
+                if !hostdo
+                    .iter()
+                    .any(|c| c.argv == cmd.argv && c.image == cmd.image)
+                {
+                    hostdo.push(cmd.clone());
+                }
+            }
             network_allowlist.extend(proj.network.allowlist.clone());
             network_denylist.extend(proj.network.denylist.clone());
         }
 
         Self {
+            hostdo: HostdoRules {
+                default_policy: hostdo_default,
+                commands: parse_dedup_hostdo_commands(hostdo),
+            },
             network_rules: parse_dedup_network_rules(network_allowlist),
             network_deny_rules: parse_dedup_network_rules(network_denylist),
             // Coder-style rules engine is explicit allowlist with prompt-by-default.
@@ -163,6 +223,19 @@ impl ComposedRules {
         } else {
             self.network_default
         }
+    }
+
+    /// Find effective host policy for an exact command match.
+    pub fn match_hostdo(&self, command: &[String], image: Option<&str>) -> Option<NetworkPolicy> {
+        self.find_hostdo(command, image)
+            .map(|entry| entry.approval_mode)
+    }
+
+    pub fn find_hostdo(&self, command: &[String], image: Option<&str>) -> Option<&HostdoCommand> {
+        self.hostdo
+            .commands
+            .iter()
+            .find(|entry| entry.argv == command && entry.image.as_deref() == image)
     }
 }
 
@@ -460,6 +533,21 @@ fn parse_dedup_network_rules(raws: Vec<String>) -> Vec<NetworkRule> {
         .collect()
 }
 
+fn parse_dedup_hostdo_commands(raws: Vec<HostdoCommand>) -> Vec<HostdoCommand> {
+    let mut seen = HashSet::new();
+    raws.into_iter()
+        .filter(|raw| seen.insert((raw.argv.clone(), raw.image.clone())) && !raw.argv.is_empty())
+        .collect()
+}
+
+fn compose_hostdo_policies(lhs: NetworkPolicy, rhs: NetworkPolicy) -> NetworkPolicy {
+    match (lhs, rhs) {
+        (NetworkPolicy::Deny, _) | (_, NetworkPolicy::Deny) => NetworkPolicy::Deny,
+        (NetworkPolicy::Prompt, _) | (_, NetworkPolicy::Prompt) => NetworkPolicy::Prompt,
+        _ => NetworkPolicy::Auto,
+    }
+}
+
 // ── Loading / saving ─────────────────────────────────────────────────────────
 
 /// Load a `harness-rules.toml` file.  Returns a default (empty) rule set if the
@@ -475,6 +563,7 @@ pub fn load(path: &Path) -> Result<ProjectRules> {
     validate_rules_version(parsed.version, path)?;
     validate_network_list("allowlist", &parsed.network.allowlist, path)?;
     validate_network_list("denylist", &parsed.network.denylist, path)?;
+    validate_hostdo_rules(&parsed.hostdo.commands, path)?;
     Ok(parsed)
 }
 
@@ -491,6 +580,70 @@ fn validate_network_list(list: &str, entries: &[String], path: &Path) -> Result<
         })?;
     }
     Ok(())
+}
+
+fn validate_hostdo_rules(entries: &[HostdoCommand], path: &Path) -> Result<()> {
+    for entry in entries {
+        anyhow::ensure!(
+            !entry.argv.is_empty(),
+            "invalid [hostdo].commands entry '{}' in {}: command argv must not be empty",
+            entry.argv.join(" "),
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Persist a host command approval for future requests.
+///
+/// The command is deduplicated by `argv + image` and forced to
+/// `approval_mode = "auto"`.
+pub fn append_hostdo_auto_approval(
+    path: &Path,
+    argv: &[String],
+    image: Option<&str>,
+    timeout_secs: u64,
+) -> Result<bool> {
+    if argv.is_empty() {
+        return Ok(false);
+    }
+
+    let mut rules = load(path)?;
+    let mut changed = false;
+
+    if let Some(existing) = rules
+        .hostdo
+        .commands
+        .iter_mut()
+        .find(|entry| entry.argv == argv && entry.image.as_deref() == image)
+    {
+        if existing.approval_mode != NetworkPolicy::Auto {
+            existing.approval_mode = NetworkPolicy::Auto;
+            changed = true;
+        }
+        if existing.timeout_secs != timeout_secs {
+            existing.timeout_secs = timeout_secs;
+            changed = true;
+        }
+    } else {
+        rules.hostdo.commands.push(HostdoCommand {
+            name: None,
+            argv: argv.to_vec(),
+            image: image.map(str::to_string),
+            cwd: Some("$WORKSPACE".to_string()),
+            timeout_secs,
+            approval_mode: NetworkPolicy::Auto,
+        });
+        changed = true;
+    }
+
+    if !changed {
+        return Ok(false);
+    }
+
+    write_rules_file(path, &rules)
+        .with_context(|| format!("writing remembered hostdo approval to {}", path.display()))?;
+    Ok(true)
 }
 
 fn validate_rules_version(version: u32, path: &Path) -> Result<()> {
@@ -538,6 +691,30 @@ const RULES_FILE_HEADER: &str = "\
 # - Do not assume host tools, credentials, or services are directly available in the container.
 # - Use `killme` only when the user explicitly asks you to end this container.
 # \"\"\"
+#
+# Hostdo (host-side command execution)
+#
+# default_policy: what happens when a command doesn't match any rule below.
+#   auto   — run without prompting (use with caution)
+#   prompt — ask the developer in the TUI (default)
+#   deny   — reject silently
+#
+# Passthrough command (exact argv match, auto-approved):
+#   [[hostdo.commands]]
+#   argv = [\"cargo\", \"test\"] # run inside container with `hostdo run cargo test`
+#   cwd = \"$WORKSPACE\"         # execution cwd only, not part of approval matching
+#   timeout_secs = 60
+#   approval_mode = \"auto\"
+#
+# Short-lived Docker runner (exact argv + image match, auto-approved):
+#   [[hostdo.commands]]
+#   argv = [\"npm\", \"test\"]   # run with `hostdo run --image node:20 npm test`
+#   image = \"node:20\"
+#   cwd = \"$WORKSPACE\"
+#   timeout_secs = 60
+#   approval_mode = \"auto\"
+#
+# $WORKSPACE = workspace path on the host.
 #
 # Network (HTTP/HTTPS proxy policy)
 #

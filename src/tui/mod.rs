@@ -31,7 +31,9 @@ use crate::container::ContainerSession;
 use crate::proxy::{NetworkDecision, PendingNetworkItem, ProxyState};
 use crate::rules::NetworkPolicy;
 use crate::server::SessionRegistry;
-use crate::server::{ContainerStopDecision, ContainerStopItem, LaunchEvent, WorkspaceLaunchItem};
+use crate::server::{
+    ContainerStopDecision, ContainerStopItem, LaunchEvent, PendingItem, WorkspaceLaunchItem,
+};
 use crate::shared_config::SharedConfig;
 use crate::state::{AuditEntry, StateManager};
 
@@ -183,6 +185,7 @@ pub struct App {
 
     pub workspaces: Vec<WorkspaceStatus>,
     pub pending_stop: Vec<ContainerStopItem>,
+    pub pending_exec: Vec<PendingItem>,
     pub pending_net: Vec<PendingNetworkItem>,
     pub activities: Vec<Activity>,
     pub log: VecDeque<LogEntry>,
@@ -212,6 +215,7 @@ pub struct App {
     pub remove_workspace_confirm: Option<RemoveWorkspaceConfirmState>,
     pub base_rules_changed: Option<BaseRulesChangedState>,
 
+    pub exec_pending_rx: mpsc::Receiver<PendingItem>,
     pub stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
     pub launch_pending_rx: mpsc::Receiver<WorkspaceLaunchItem>,
     pub(crate) workspace_launch_pending: Option<WorkspaceLaunchPending>,
@@ -221,7 +225,7 @@ pub struct App {
     // dialog currently on screen so we never pop two at once.
     native_dialog_rx: mpsc::UnboundedReceiver<app::native_dialog::NativeDialogResult>,
     native_dialog_tx: mpsc::UnboundedSender<app::native_dialog::NativeDialogResult>,
-    native_dialog_inflight: Option<String>,
+    native_dialog_inflight: Option<app::native_dialog::NativeDialogTarget>,
     // Bounded (H12): a malicious in-container client streaming events at full
     // speed otherwise grows the backing Vec without limit. On full the
     // producers (proxy/server) `try_send` and drop the event with a debug log

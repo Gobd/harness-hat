@@ -12,6 +12,7 @@ Environment variables:
 
 import json
 import os
+import socket
 import sys
 import urllib.error
 import urllib.parse
@@ -24,15 +25,105 @@ def _no_proxy_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+def _route_hex_ipv4(raw: str) -> str:
+    value = int(raw, 16)
+    return ".".join(
+        [
+            str(value & 0xFF),
+            str((value >> 8) & 0xFF),
+            str((value >> 16) & 0xFF),
+            str((value >> 24) & 0xFF),
+        ]
+    )
+
+
+def _is_virtual_dns_ip(ip: str) -> bool:
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        first = int(parts[0], 10)
+        second = int(parts[1], 10)
+    except ValueError:
+        return False
+    return first == 198 and second in (18, 19)
+
+
+def _docker_desktop_host_ips() -> list[str]:
+    seen = set()
+    out = []
+    try:
+        with open("/proc/net/route", "r", encoding="utf-8") as f:
+            next(f, None)
+            for line in f:
+                cols = line.strip().split()
+                if len(cols) < 8:
+                    continue
+                destination_hex = cols[1]
+                gateway_hex = cols[2]
+                flags_hex = cols[3]
+                mask_hex = cols[7]
+                try:
+                    flags = int(flags_hex, 16)
+                except ValueError:
+                    continue
+                if (flags & 0x1) == 0:
+                    continue
+                for raw in (destination_hex, gateway_hex):
+                    if raw == "00000000":
+                        continue
+                    if raw == destination_hex and mask_hex != "FFFFFFFF":
+                        continue
+                    ip = _route_hex_ipv4(raw)
+                    if ip.startswith("127.") or _is_virtual_dns_ip(ip):
+                        continue
+                    if ip not in seen:
+                        seen.add(ip)
+                        out.append(ip)
+    except Exception:
+        pass
+    return out
+
+
+def _resolved_ipv4_host_entries(host: str) -> list[str]:
+    seen = set()
+    out = []
+    try:
+        for entry in socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM):
+            ip = entry[4][0]
+            if not _is_virtual_dns_ip(ip) and ip not in seen:
+                seen.add(ip)
+                out.append(ip)
+    except Exception:
+        pass
+    return out
+
+
 def _candidate_base_urls(base_url: str) -> list[str]:
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname or ""
     port = parsed.port or 80
     scheme = parsed.scheme or "http"
+    strict_network = os.environ.get("HARNESS_HAT_STRICT_NETWORK", "").strip() == "1"
 
-    out = [base_url]
+    out = []
     if host == "host.docker.internal":
+        for ip in _docker_desktop_host_ips():
+            out.append(f"{scheme}://{ip}:{port}")
         out.append(f"{scheme}://172.17.0.1:{port}")
+        out.append(f"{scheme}://192.168.65.254:{port}")
+        for alias in ("host.docker.internal", "host.containers.internal"):
+            if alias != host and not strict_network:
+                out.append(f"{scheme}://{alias}:{port}")
+            for ip in _resolved_ipv4_host_entries(alias):
+                out.append(f"{scheme}://{ip}:{port}")
+        if not strict_network:
+            out.append(base_url)
+    else:
+        out.append(base_url)
+
+    if not out:
+        out = [base_url]
 
     seen = set()
     uniq = []

@@ -88,8 +88,8 @@ pub(crate) fn status_bar_keys(app: &App) -> &'static str {
         Focus::Activity if app.scroll_mode => {
             " SCROLL: [↑↓/jk]line  [PgUp/PgDn]page  [g/G]top/bottom  [Esc/q]exit scroll"
         }
-        Focus::Activity => " [Esc/^B]sidebar  [^C/^Q]quit",
-        Focus::Network => " [↑↓/jk]select request  [Esc/^B]sidebar  [^C/^Q]quit",
+        Focus::Activity => " [^C]cancel activity  [Esc/^B]sidebar  [^Q]quit",
+        Focus::Network => " [↑↓/jk]select request  [^C]cancel selected  [Esc/^B]sidebar  [^Q]quit",
         Focus::Settings => " [↑↓/jk]navigate  [↵/l]select  [^B]back  [^C/^Q]quit",
         Focus::ContainerPicker => " [↑↓/jk]navigate  [↵/l]launch  [^B]back  [^C/^Q]quit",
         Focus::ImageBuild => {

@@ -10,6 +10,89 @@ pub(crate) enum PersistKind {
 }
 
 impl App {
+    pub(crate) fn approve_exec(&mut self, idx: usize, remember: bool) {
+        if idx >= self.pending_exec.len() {
+            return;
+        }
+        if remember {
+            let item = &self.pending_exec[idx];
+            let image = item.image.clone();
+            let timeout_secs = item.timeout_secs;
+            let argv = item.argv.clone();
+            let project = item.project.clone();
+            let rule_cwd = item.rule_cwd.clone();
+            if let Some(rules_path) = self.project_rules_path(&project) {
+                let cwd = self.portable_cwd(&rule_cwd, &project);
+                match self.persist_exec_rule(
+                    &rules_path,
+                    &argv,
+                    image.as_deref(),
+                    timeout_secs,
+                    &cwd,
+                    NetworkPolicy::Auto,
+                ) {
+                    Ok(()) => self.push_log(
+                        format!(
+                            "saved hostdo allow rule in {}: {}",
+                            rules_path.display(),
+                            argv.join(" ")
+                        ),
+                        false,
+                    ),
+                    Err(e) => self.push_log(format!("failed to save hostdo rule: {e}"), true),
+                }
+            }
+        }
+        if let Some(tx) = self.pending_exec[idx].response_tx.take() {
+            let _ = tx.send(crate::server::ApprovalDecision::Approve { remember });
+        }
+        self.pending_exec.remove(idx);
+    }
+
+    pub(crate) fn deny_exec(&mut self, idx: usize) {
+        if idx >= self.pending_exec.len() {
+            return;
+        }
+        if let Some(tx) = self.pending_exec[idx].response_tx.take() {
+            let _ = tx.send(crate::server::ApprovalDecision::Deny);
+        }
+        self.pending_exec.remove(idx);
+    }
+
+    pub(crate) fn deny_exec_forever(&mut self, idx: usize) {
+        if idx >= self.pending_exec.len() {
+            return;
+        }
+        let item = &self.pending_exec[idx];
+        let image = item.image.clone();
+        let timeout_secs = item.timeout_secs;
+        let argv = item.argv.clone();
+        let project = item.project.clone();
+        let rule_cwd = item.rule_cwd.clone();
+        if let Some(rules_path) = self.project_rules_path(&project) {
+            let cwd = self.portable_cwd(&rule_cwd, &project);
+            match self.persist_exec_rule(
+                &rules_path,
+                &argv,
+                image.as_deref(),
+                timeout_secs,
+                &cwd,
+                NetworkPolicy::Deny,
+            ) {
+                Ok(()) => self.push_log(
+                    format!(
+                        "saved hostdo deny rule in {}: {}",
+                        rules_path.display(),
+                        argv.join(" ")
+                    ),
+                    false,
+                ),
+                Err(e) => self.push_log(format!("failed to save hostdo deny rule: {e}"), true),
+            }
+        }
+        self.deny_exec(idx);
+    }
+
     pub(crate) fn approve_net(&mut self, idx: usize) {
         if idx >= self.pending_net.len() {
             return;
@@ -220,6 +303,58 @@ impl App {
         crate::rules::write_rules_file(&rules_path, &rules)
             .with_context(|| format!("writing rules file '{}'", rules_path.display()))?;
         Ok(Some(rules_path))
+    }
+
+    pub(crate) fn persist_exec_rule(
+        &mut self,
+        rules_path: &std::path::Path,
+        argv: &[String],
+        image: Option<&str>,
+        timeout_secs: u64,
+        cwd: &str,
+        approval_mode: NetworkPolicy,
+    ) -> Result<()> {
+        let mut rules = crate::rules::load(rules_path)
+            .with_context(|| format!("loading rules file '{}'", rules_path.display()))?;
+        let mut changed = false;
+        if let Some(existing) = rules
+            .hostdo
+            .commands
+            .iter_mut()
+            .find(|entry| entry.argv == argv && entry.image.as_deref() == image)
+        {
+            if existing.approval_mode != approval_mode {
+                existing.approval_mode = approval_mode;
+                changed = true;
+            }
+            if existing.cwd.as_deref() != Some(cwd) {
+                existing.cwd = Some(cwd.to_string());
+                changed = true;
+            }
+            if existing.timeout_secs != timeout_secs {
+                existing.timeout_secs = timeout_secs;
+                changed = true;
+            }
+        } else {
+            rules.hostdo.commands.push(crate::rules::HostdoCommand {
+                name: None,
+                argv: argv.to_vec(),
+                image: image.map(str::to_string),
+                cwd: Some(cwd.to_string()),
+                timeout_secs,
+                approval_mode,
+            });
+            changed = true;
+        }
+        if !changed {
+            return Ok(());
+        }
+        let expected_content = crate::rules::render_rules_file(&rules)
+            .with_context(|| format!("rendering rules file '{}'", rules_path.display()))?;
+        self.note_rules_internal_write(rules_path.to_path_buf(), expected_content);
+        crate::rules::write_rules_file(rules_path, &rules)
+            .with_context(|| format!("writing rules file '{}'", rules_path.display()))?;
+        Ok(())
     }
 
     pub(crate) fn log_ambiguous_network_project_context(&mut self, idx: usize, action: &str) {

@@ -42,6 +42,7 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
     let (stop_pending_tx, stop_pending_rx) = mpsc::channel::<crate::server::ContainerStopItem>(64);
     let (launch_pending_tx, launch_pending_rx) =
         mpsc::channel::<crate::server::WorkspaceLaunchItem>(16);
+    let (exec_pending_tx, exec_pending_rx) = mpsc::channel::<crate::server::PendingItem>(64);
     let (net_pending_tx, net_pending_rx) = mpsc::channel::<crate::proxy::PendingNetworkItem>(64);
     // Bounded (H12): see comments in tui::App and ProxyState/ServerState.
     // 4096 is a few seconds of normal traffic; bursts beyond that are dropped
@@ -69,11 +70,13 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
     let server_state = crate::server::ServerState {
         config: shared_config.clone(),
         state: state.clone(),
+        pending_tx: exec_pending_tx,
         stop_tx: stop_pending_tx,
         launch_tx: launch_pending_tx,
         audit_tx,
         token: token.clone(),
         sessions: session_registry.clone(),
+        exec_jobs: crate::server::ExecJobRegistry::default(),
         activity_tx: activity_tx.clone(),
     };
     let control_listener = tokio::net::TcpListener::bind(&control_addr)
@@ -120,6 +123,7 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
         config_path.clone(),
         token,
         session_registry,
+        exec_pending_rx,
         stop_pending_rx,
         launch_pending_rx,
         net_pending_rx,

@@ -39,7 +39,7 @@ pub fn spawn(
     control_url: &str,
     proxy_url: &str,
     ca_cert_host_path: &str,
-    control_script_host_path: Option<&Path>,
+    hostdo_script_host_path: Option<&Path>,
     scoped_proxy: Option<crate::proxy::ScopedProxyListener>,
     proxy_priority: crate::proxy::SourcePriority,
     strict_network: bool,
@@ -158,13 +158,19 @@ pub fn spawn(
         mount_str.clone(),
     ]);
 
-    let control_tempfile = match control_script_host_path {
+    let hostdo_tempfile = match hostdo_script_host_path {
         Some(path) => Some(prepare_executable_helper_script(
             path,
-            "harness-hat-control-",
+            "harness-hat-hostdo-",
         )?),
         None => None,
     };
+    if let Some(hostdo) = hostdo_tempfile.as_ref() {
+        docker_args.extend_from_slice(&[
+            "-v".to_string(),
+            format!("{}:/usr/local/bin/hostdo:ro", hostdo.path().display()),
+        ]);
+    }
 
     // Prepare secure env file to prevent token leakage via `ps`
     let mut env_file = tempfile::Builder::new()
@@ -421,7 +427,8 @@ pub fn spawn(
             _scoped_proxy: scoped_proxy,
             _seed_tempfiles: seed_tempfiles,
             _env_tempfile: Some(env_file),
-            _control_tempfile: control_tempfile,
+            _control_tempfile: None,
+            _hostdo_tempfile: hostdo_tempfile,
         },
         launch_notes,
     ))

@@ -115,7 +115,9 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 pub(crate) fn render_terminal_overlays(frame: &mut Frame, app: &mut App, area: Rect) {
     // On macOS approvals are shown in a native OS dialog, so the in-TUI overlay
     // is suppressed to avoid a confusing double prompt.
-    if !app.pending_net.is_empty() && !App::native_dialog_enabled() {
+    if app.active_exec_modal_idx().is_some() && !App::native_dialog_enabled() {
+        render_exec_approval_overlay(frame, app, area, 0);
+    } else if !app.pending_net.is_empty() && !App::native_dialog_enabled() {
         render_net_approval_overlay(frame, app, area);
     }
 }
@@ -139,7 +141,10 @@ pub(crate) fn render_activity_detail(
         return;
     };
     let tone = |c| maybe_dim(c, dimmed);
-    let title = " Network Activity ";
+    let title = match &activity.kind {
+        crate::activity::ActivityKind::Hostdo { .. } => " Hostdo Activity ",
+        crate::activity::ActivityKind::Network { .. } => " Network Activity ",
+    };
     let block = Block::default()
         .title(title)
         .title_style(
@@ -156,8 +161,14 @@ pub(crate) fn render_activity_detail(
     let mut lines = Vec::new();
     lines.push(Line::from(""));
     append_activity_summary_lines(&mut lines, activity, &tone);
-
-    append_network_detail_lines(&mut lines, activity, &tone);
+    match &activity.kind {
+        crate::activity::ActivityKind::Hostdo { .. } => {
+            append_hostdo_detail_lines(&mut lines, activity, &tone)
+        }
+        crate::activity::ActivityKind::Network { .. } => {
+            append_network_detail_lines(&mut lines, activity, &tone)
+        }
+    }
 
     append_activity_status_line(&mut lines, activity, &tone);
 
@@ -205,7 +216,7 @@ pub(crate) fn render_activity_detail(
         let footer = if in_scroll_mode {
             "  SCROLL: [↑↓/jk]line  [PgUp/PgDn]page  [g/G]top/bottom  [Esc/q]exit scroll"
         } else {
-            "  [^C/^Q] Quit   [^S] Scroll   [Esc/^B] Back to sidebar"
+            "  [^C] Cancel   [^S] Scroll   [Esc/^B] Back to sidebar"
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -296,6 +307,7 @@ pub(crate) fn render_network_group_detail(
                 let target = truncate_middle(&format!("{host}{path}"), 58);
                 format!("{method:<7} {target}")
             }
+            crate::activity::ActivityKind::Hostdo { .. } => activity.title(),
         };
         lines.push(Line::from(vec![
             Span::styled(
@@ -347,7 +359,7 @@ pub(crate) fn render_network_group_detail(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         if focused {
-            "  [↑↓/jk] Select request   [^C/^Q] Quit   [Esc/^B] Back to sidebar"
+            "  [↑↓/jk] Select request   [^C] Cancel selected   [Esc/^B] Back to sidebar"
         } else {
             "  [↵/l] Open network list   [Esc/^B] Back to sidebar"
         },
@@ -418,7 +430,10 @@ fn append_network_detail_lines(
         payload_truncated,
         content_type,
         content_length,
-    } = &activity.kind;
+    } = &activity.kind
+    else {
+        return;
+    };
 
     lines.push(Line::from(vec![
         Span::styled("  Method  : ", Style::default().fg(tone(Color::DarkGray))),
@@ -479,6 +494,56 @@ fn append_network_detail_lines(
     }
 }
 
+fn append_hostdo_detail_lines(
+    lines: &mut Vec<Line>,
+    activity: &crate::activity::Activity,
+    tone: &impl Fn(Color) -> Color,
+) {
+    let crate::activity::ActivityKind::Hostdo {
+        argv,
+        image,
+        timeout_secs,
+        cwd,
+    } = &activity.kind
+    else {
+        return;
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled("  Command : ", Style::default().fg(tone(Color::DarkGray))),
+        Span::styled(argv.join(" "), Style::default().fg(tone(Color::White))),
+    ]));
+    if let Some(image) = image {
+        lines.push(Line::from(vec![
+            Span::styled("  Image   : ", Style::default().fg(tone(Color::DarkGray))),
+            Span::styled(image.clone(), Style::default().fg(tone(Color::White))),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("  Host cwd: ", Style::default().fg(tone(Color::DarkGray))),
+        Span::styled(
+            cwd.display().to_string(),
+            Style::default().fg(tone(Color::White)),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Timeout : ", Style::default().fg(tone(Color::DarkGray))),
+        Span::styled(
+            hostdo_timeout_label(activity, *timeout_secs),
+            Style::default().fg(tone(Color::White)),
+        ),
+    ]));
+    if let Some(command_duration) = activity.command_elapsed_duration() {
+        lines.push(Line::from(vec![
+            Span::styled("  Runtime : ", Style::default().fg(tone(Color::DarkGray))),
+            Span::styled(
+                format!("{}s command runtime", command_duration.as_secs()),
+                Style::default().fg(tone(Color::White)),
+            ),
+        ]));
+    }
+}
+
 fn append_activity_status_line(
     lines: &mut Vec<Line>,
     activity: &crate::activity::Activity,
@@ -532,12 +597,31 @@ fn append_recent_activity_history_lines(
 fn activity_status_color(state: &crate::activity::ActivityState) -> Color {
     match state {
         crate::activity::ActivityState::PendingApproval => Color::Yellow,
+        crate::activity::ActivityState::PullingImage => Color::Yellow,
         crate::activity::ActivityState::Running => Color::Cyan,
         crate::activity::ActivityState::Forwarding => Color::Yellow,
         crate::activity::ActivityState::Complete => Color::Green,
         crate::activity::ActivityState::Failed => Color::Red,
         crate::activity::ActivityState::Denied => Color::Red,
         crate::activity::ActivityState::Cancelled => Color::Red,
+    }
+}
+
+fn hostdo_timeout_label(activity: &crate::activity::Activity, timeout_secs: u64) -> String {
+    if activity.command_started_at.is_some() {
+        return format!("{timeout_secs}s command-only");
+    }
+    match &activity.state {
+        crate::activity::ActivityState::PullingImage => {
+            format!("{timeout_secs}s command-only, starts after image is ready")
+        }
+        crate::activity::ActivityState::PendingApproval => {
+            format!("{timeout_secs}s command-only, starts after approval")
+        }
+        state if state.is_terminal() => {
+            format!("{timeout_secs}s command-only, command did not run")
+        }
+        _ => format!("{timeout_secs}s command-only, starts when command runs"),
     }
 }
 

@@ -211,14 +211,10 @@ fn choose_template(config: &Config, override_name: Option<&str>) -> Result<Strin
             .map(|c| c.name.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        bail!(
-            "no container template named '{name}' in this config (available: {available})"
-        );
+        bail!("no container template named '{name}' in this config (available: {available})");
     }
     if config.containers.is_empty() {
-        bail!(
-            "config has no [container_profiles.*] entries — add at least one before launching"
-        );
+        bail!("config has no [container_profiles.*] entries — add at least one before launching");
     }
     if config.containers.len() == 1 {
         return Ok(config.containers[0].name.clone());
@@ -239,15 +235,14 @@ fn choose_template(config: &Config, override_name: Option<&str>) -> Result<Strin
 }
 
 fn prompt_for_template(containers: &[ContainerDef]) -> Result<String> {
-    println!("There is no running session for this workspace.  Choose a container template to start one:");
+    println!(
+        "There is no running session for this workspace.  Choose a container template to start one:"
+    );
     for (i, ctr) in containers.iter().enumerate() {
         println!("  {}. {}", i + 1, ctr.name);
     }
     loop {
-        print!(
-            "Select [1-{}] (or 'q' to cancel): ",
-            containers.len()
-        );
+        print!("Select [1-{}] (or 'q' to cancel): ", containers.len());
         io::stdout().flush().ok();
         let mut input = String::new();
         io::stdin()
@@ -262,15 +257,18 @@ fn prompt_for_template(containers: &[ContainerDef]) -> Result<String> {
                 return Ok(containers[n - 1].name.clone());
             }
         }
-        println!("invalid selection; enter a number between 1 and {}", containers.len());
+        println!(
+            "invalid selection; enter a number between 1 and {}",
+            containers.len()
+        );
     }
 }
 
 // ── Manager IPC ─────────────────────────────────────────────────────────────
 
 fn read_manager_token(path: &Path) -> Result<String> {
-    let contents = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let contents =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let token = contents.trim().to_string();
     if token.is_empty() {
         bail!("{} is empty", path.display());
@@ -372,7 +370,10 @@ fn consume_launch_stream(resp: reqwest::blocking::Response) -> Result<LaunchResp
             continue;
         }
         let event: StreamedEvent = serde_json::from_str(&line).with_context(|| {
-            format!("parsing streamed launch event: {}", truncate_for_error(&line))
+            format!(
+                "parsing streamed launch event: {}",
+                truncate_for_error(&line)
+            )
         })?;
         match event {
             StreamedEvent::Status { message } => {
@@ -457,10 +458,7 @@ mod tests {
     #[test]
     fn dedupe_workspace_name_appends_suffix_on_collision() {
         let mut config = Config::default();
-        config.workspaces = vec![
-            workspace("app", "/a"),
-            workspace("app-2", "/b"),
-        ];
+        config.workspaces = vec![workspace("app", "/a"), workspace("app-2", "/b")];
         assert_eq!(dedupe_workspace_name(&config, "app"), "app-3");
     }
 

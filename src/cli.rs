@@ -83,6 +83,19 @@ pub enum DialogCommand {
         #[arg(long, value_name = "WORKSPACE")]
         workspace: Option<String>,
     },
+    /// Host command-approval prompt.
+    HostdoApproval {
+        #[arg(long, value_name = "COMMAND")]
+        command: String,
+        #[arg(long, value_name = "CWD")]
+        cwd: Option<String>,
+        #[arg(long, value_name = "IMAGE")]
+        image: Option<String>,
+        #[arg(long = "timeout", value_name = "TIMEOUT_SECS")]
+        timeout_secs: Option<u64>,
+        #[arg(long, value_name = "WORKSPACE")]
+        workspace: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +110,7 @@ pub fn parse() -> Result<Cli> {
 }
 
 pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
-    const USAGE: &str = "Usage: hh [--config PATH] [init [PATH] | shell [ID]]";
+    const USAGE: &str = "Usage: hh [--config PATH] [init [PATH] | shell [ID] [COMMAND...] | workspace [OPTIONS] [COMMAND...]]";
     if raw.is_empty() {
         bail!("missing argv[0]. {USAGE}");
     }
@@ -175,7 +188,12 @@ mod tests {
         assert!(args.is_empty());
 
         let cli = parse_from(argv(&[
-            "hh", "workspace", "--template", "dev", "claude", "--resume",
+            "hh",
+            "workspace",
+            "--template",
+            "dev",
+            "claude",
+            "--resume",
         ]))
         .expect("parse");
         let Some(Command::Workspace { template, args }) = cli.command else {
@@ -198,7 +216,9 @@ mod tests {
         };
         assert_eq!(id.as_deref(), Some("0042"));
         assert_eq!(
-            args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+            args.iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
             vec!["claude".to_string(), "--resume".to_string()],
         );
     }

@@ -160,13 +160,29 @@ pub(crate) fn exec_into_container(container_name: &str, extra_args: &[OsString])
     }
 
     let _signal_guard = IgnoreTerminalSignals::install();
+    let _terminal_reset = TerminalModesResetGuard::new();
     let status = command.status().context("running docker exec")?;
-    // Only restore terminal modes when stdout is actually a terminal — dumping
-    // CSI sequences into a pipe would pollute downstream output.
-    if std::io::stdout().is_terminal() {
-        restore_host_terminal_modes();
-    }
     Ok(status.code().unwrap_or(1))
+}
+
+struct TerminalModesResetGuard {
+    enabled: bool,
+}
+
+impl TerminalModesResetGuard {
+    fn new() -> Self {
+        Self {
+            enabled: std::io::stdout().is_terminal(),
+        }
+    }
+}
+
+impl Drop for TerminalModesResetGuard {
+    fn drop(&mut self) {
+        if self.enabled {
+            restore_host_terminal_modes();
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -215,11 +231,14 @@ impl IgnoreTerminalSignals {
 /// never gotten to disable. We can't know which modes the inner program set, so
 /// we unconditionally disable the common ones whose "stuck" state is visible to
 /// the user (focus reporting prints `^[[I` / `^[[O` on focus changes; bracketed
-/// paste wraps every paste in `^[[200~`; mouse reporting eats clicks; hidden
+/// paste wraps every paste in `^[[200~`; mouse reporting eats clicks; kitty key
+/// encoding leaves `CSI u` text in the app when legacy tools resume; hidden
 /// cursor makes shells look frozen). Sequences that have no effect when already
 /// off are harmless, so this is safe to run on every exit.
 fn restore_host_terminal_modes() {
     const RESET: &[u8] = concat!(
+        "\x1b<u",      // kitty keyboard protocol: pop mode
+        "\x1b[>4;0m",  // xterm: disable modifyOtherKeys
         "\x1b[?1004l", // focus reporting
         "\x1b[?2004l", // bracketed paste
         "\x1b[?1000l", // mouse: X10

@@ -10,6 +10,7 @@ use axum::{
 use futures::stream::unfold;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -26,7 +27,6 @@ const CONTROL_BODY_LIMIT_BYTES: usize = 8 * 1024;
 
 /// Per-handler timeout used in lieu of a `tower_http::TimeoutLayer` (see below).
 const CONTROL_HANDLER_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// Maximum number of in-flight control requests, enforced via a per-process
 /// semaphore in lieu of a `tower::limit::ConcurrencyLimitLayer` (see below).
 const CONTROL_CONCURRENCY_LIMIT: usize = 64;
@@ -36,6 +36,199 @@ const CONTROL_CONCURRENCY_LIMIT: usize = 64;
 pub struct ErrorResponse {
     pub error: String,
     pub reason: String,
+}
+
+/// Request payload accepted by `POST /exec`.
+#[derive(Debug, Deserialize)]
+pub struct ExecRequest {
+    #[serde(default, alias = "command")]
+    pub argv: Vec<String>,
+    pub cwd: String,
+    #[serde(default, alias = "image")]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub detach: bool,
+}
+
+/// Response payload returned by `POST /exec`.
+#[derive(Debug, Serialize)]
+pub struct ExecResponse {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// A command request waiting for developer approval in the TUI.
+pub struct PendingItem {
+    pub id: String,
+    pub activity_id: String,
+    pub cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub project: String,
+    pub container_id: Option<String>,
+    pub argv: Vec<String>,
+    pub image: Option<String>,
+    pub timeout_secs: u64,
+    pub cwd: PathBuf,
+    pub rule_cwd: PathBuf,
+    pub matched_command: Option<String>,
+    pub response_tx: Option<oneshot::Sender<ApprovalDecision>>,
+}
+
+pub enum ApprovalDecision {
+    Approve { remember: bool },
+    Deny,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecJobState {
+    Running,
+    Complete,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecJobPhase {
+    PendingApproval,
+    PullingImage,
+    StartingCommand,
+    RunningCommand,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ExecJobProgress {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecJobStatus {
+    pub state: ExecJobState,
+    pub job_id: String,
+    #[serde(skip_serializing)]
+    pub project: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    pub timeout_secs: u64,
+    pub argv: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<ExecJobPhase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ExecJobProgress>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poll_after_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing)]
+    pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    #[serde(skip_serializing)]
+    pub stdin_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+}
+
+#[derive(Clone, Default)]
+pub struct ExecJobRegistry {
+    inner: Arc<Mutex<HashMap<String, ExecJobStatus>>>,
+}
+
+impl ExecJobRegistry {
+    pub fn insert(&self, mut status: ExecJobStatus) -> ExecJobStatus {
+        if status.job_id.is_empty() {
+            status.job_id = uuid::Uuid::new_v4().to_string();
+        }
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        map.insert(status.job_id.clone(), status.clone());
+        status
+    }
+
+    pub fn update(&self, job_id: &str, f: impl FnOnce(&mut ExecJobStatus)) {
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(status) = map.get_mut(job_id) {
+            f(status);
+        }
+    }
+
+    pub fn get_for_project(&self, job_id: &str, project: &str) -> Option<ExecJobStatus> {
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(job_id)
+            .filter(|job| job.project == project)
+            .cloned()
+    }
+
+    pub fn list_for_project(&self, project: &str) -> Vec<ExecJobStatus> {
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut jobs = map
+            .values()
+            .filter(|job| job.project == project)
+            .cloned()
+            .collect::<Vec<_>>();
+        jobs.sort_by(|a, b| a.job_id.cmp(&b.job_id));
+        jobs
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecJobListResponse {
+    pub jobs: Vec<ExecJobStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecJobOutputResponse {
+    pub job_id: String,
+    pub state: ExecJobState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<ExecJobPhase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExecJobOutputQuery {
+    #[serde(default)]
+    pub stream: Option<String>,
+    #[serde(default)]
+    pub tail: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecJobKillResponse {
+    pub ok: bool,
+    pub job_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExecJobSendRequest {
+    pub input: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecJobSendResponse {
+    pub ok: bool,
+    pub job_id: String,
+    pub message: String,
 }
 
 /// Request payload accepted by the container stop endpoint.
@@ -87,11 +280,13 @@ impl SessionRegistry {
 pub struct ServerState {
     pub config: SharedConfig,
     pub state: StateManager,
+    pub pending_tx: mpsc::Sender<PendingItem>,
     pub stop_tx: mpsc::Sender<ContainerStopItem>,
     pub launch_tx: mpsc::Sender<WorkspaceLaunchItem>,
     pub audit_tx: mpsc::Sender<AuditEntry>,
     pub token: String,
     pub sessions: SessionRegistry,
+    pub exec_jobs: ExecJobRegistry,
     // Bounded; see H12 comments at the construction site in manager::run.
     pub activity_tx: mpsc::Sender<ActivityEvent>,
 }
@@ -184,6 +379,27 @@ pub async fn run_with_listener(
     let router = Router::new()
         .route("/container/stop", post(stop_handler))
         .route("/workspace/launch", post(workspace_launch_handler))
+        .route("/exec", post(crate::server::core::exec_handler))
+        .route(
+            "/exec/jobs",
+            get(crate::server::core::exec_jobs_list_handler),
+        )
+        .route(
+            "/exec/jobs/:id",
+            get(crate::server::core::exec_job_handler),
+        )
+        .route(
+            "/exec/jobs/:id/output",
+            get(crate::server::core::exec_job_output_handler),
+        )
+        .route(
+            "/exec/jobs/:id/kill",
+            post(crate::server::core::exec_job_kill_handler),
+        )
+        .route(
+            "/exec/jobs/:id/input",
+            post(crate::server::core::exec_job_send_handler),
+        )
         .route("/healthz", get(healthz_handler))
         .layer(DefaultBodyLimit::max(CONTROL_BODY_LIMIT_BYTES))
         .with_state(Arc::new(server_state));
@@ -501,6 +717,32 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
 
+    fn test_server_state(
+        registry: SessionRegistry,
+        exec_jobs: ExecJobRegistry,
+    ) -> ServerState {
+        let (pending_tx, _pending_rx) = mpsc::channel(1);
+        let (stop_tx, _stop_rx) = mpsc::channel(1);
+        let (launch_tx, _launch_rx) = mpsc::channel(1);
+        let (audit_tx, _audit_rx) = mpsc::channel(1);
+        let (activity_tx, _activity_rx) = mpsc::channel(16);
+        let state_dir =
+            std::env::temp_dir().join(format!("harness-hat-state-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&state_dir).expect("create state dir");
+        ServerState {
+            config: SharedConfig::new(Arc::new(crate::config::Config::default())),
+            state: StateManager::open(&state_dir).expect("state"),
+            pending_tx,
+            stop_tx,
+            launch_tx,
+            audit_tx,
+            token: "token".to_string(),
+            sessions: registry,
+            exec_jobs,
+            activity_tx,
+        }
+    }
+
     #[test]
     fn session_registry_round_trips_identity() {
         let registry = SessionRegistry::default();
@@ -532,23 +774,7 @@ mod tests {
                 mount_target: "/workspace".to_string(),
             },
         );
-        let (stop_tx, _stop_rx) = mpsc::channel(1);
-        let (launch_tx, _launch_rx) = mpsc::channel(1);
-        let (audit_tx, _audit_rx) = mpsc::channel(1);
-        let (activity_tx, _activity_rx) = mpsc::channel(16);
-        let state_dir =
-            std::env::temp_dir().join(format!("harness-hat-state-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&state_dir).expect("create state dir");
-        let state = ServerState {
-            config: SharedConfig::new(Arc::new(crate::config::Config::default())),
-            state: StateManager::open(&state_dir).expect("state"),
-            stop_tx,
-            launch_tx,
-            audit_tx,
-            token: "token".to_string(),
-            sessions: registry,
-            activity_tx,
-        };
+        let state = test_server_state(registry, ExecJobRegistry::default());
 
         let mut headers = HeaderMap::new();
         headers.insert("authorization", HeaderValue::from_static("Bearer token"));
@@ -560,5 +786,78 @@ mod tests {
             require_session_context(&state, &headers).expect("session context");
         assert_eq!(session_token, "session");
         assert_eq!(identity.project, "workspace");
+    }
+
+    #[tokio::test]
+    async fn exec_job_uuid_routes_resolve_under_axum_0_7() {
+        let registry = SessionRegistry::default();
+        registry.insert(
+            "session".to_string(),
+            SessionIdentity {
+                project: "workspace".to_string(),
+                container_id: "container".to_string(),
+                mount_target: "/workspace".to_string(),
+            },
+        );
+        let exec_jobs = ExecJobRegistry::default();
+        let job_id = "151fb311-2a78-458d-b036-eb9a59e7f0ad";
+        exec_jobs.insert(ExecJobStatus {
+            state: ExecJobState::Complete,
+            job_id: job_id.to_string(),
+            project: "workspace".to_string(),
+            container: Some("container".to_string()),
+            timeout_secs: 60,
+            argv: vec!["curl".to_string(), "example.com".to_string()],
+            cwd: Some("/workspace".to_string()),
+            phase: None,
+            image: None,
+            message: "Command finished with exit code 0.".to_string(),
+            progress: None,
+            poll_after_ms: None,
+            exit_code: Some(0),
+            stdout: Some("ok\n".to_string()),
+            stderr: Some(String::new()),
+            reason: None,
+            cancel_flag: None,
+            stdin_tx: None,
+        });
+        let state = test_server_state(registry, exec_jobs);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            run_with_listener(state, listener)
+                .await
+                .expect("control server")
+        });
+        let client = reqwest::Client::new();
+
+        let status_response = client
+            .get(format!("http://{addr}/exec/jobs/{job_id}"))
+            .bearer_auth("token")
+            .header("x-harness-hat-session-token", "session")
+            .send()
+            .await
+            .expect("job status request");
+        assert_eq!(status_response.status(), StatusCode::OK);
+        let status_body: serde_json::Value =
+            status_response.json().await.expect("job status json");
+        assert_eq!(status_body["job_id"], job_id);
+
+        let output_response = client
+            .get(format!("http://{addr}/exec/jobs/{job_id}/output"))
+            .bearer_auth("token")
+            .header("x-harness-hat-session-token", "session")
+            .send()
+            .await
+            .expect("job output request");
+        assert_eq!(output_response.status(), StatusCode::OK);
+        let output_body: serde_json::Value =
+            output_response.json().await.expect("job output json");
+        assert_eq!(output_body["job_id"], job_id);
+        assert_eq!(output_body["stdout"], "ok\n");
+
+        server.abort();
     }
 }

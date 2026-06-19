@@ -3,7 +3,23 @@ use super::*;
 impl App {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.should_quit = true;
+            if self.focus == Focus::Activity
+                && let Some(id) = self.active_activity.clone()
+            {
+                self.cancel_activity(&id);
+                return;
+            }
+            if self.focus == Focus::Network
+                && let Some(si) = self.active_network_session
+                && let Some(id) = self.selected_network_activity_id(si)
+            {
+                self.cancel_activity(&id);
+                return;
+            }
+            if self.build_is_running() {
+                self.cancel_docker_build();
+                return;
+            }
             return;
         }
 
@@ -46,9 +62,17 @@ impl App {
             }
         }
 
-        // On macOS the decision is made in the native dialog, not via these
-        // keys (the overlay isn't even rendered), so let the keystrokes fall
-        // through to normal handling instead of silently approving/denying.
+        if self.active_exec_modal_idx().is_some() && !Self::native_dialog_enabled() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.approve_exec(0, false),
+                KeyCode::Char('r') | KeyCode::Char('R') => self.approve_exec(0, true),
+                KeyCode::Char('n') | KeyCode::Char('N') => self.deny_exec(0),
+                KeyCode::Char('d') | KeyCode::Char('D') => self.deny_exec_forever(0),
+                _ => {}
+            }
+            return;
+        }
+
         if !self.pending_net.is_empty() && !Self::native_dialog_enabled() {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.approve_net(0),
@@ -365,6 +389,11 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 if len > 0 {
                     self.network_cursor = (self.network_cursor + 1).min(len.saturating_sub(1));
+                }
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(id) = self.selected_network_activity_id(si) {
+                    self.cancel_activity(&id);
                 }
             }
             _ => {}

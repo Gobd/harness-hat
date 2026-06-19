@@ -46,9 +46,7 @@ pub fn notify_pending_network_approval(
     queue_total: usize,
 ) {
     let host = host.to_string();
-    let workspace = source_workspace
-        .unwrap_or("unknown workspace")
-        .to_string();
+    let workspace = source_workspace.unwrap_or("unknown workspace").to_string();
     let extra = if queue_total > 1 {
         format!(" (+{} more pending)", queue_total - 1)
     } else {

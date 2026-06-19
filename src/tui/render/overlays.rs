@@ -1,5 +1,150 @@
 use super::*;
 
+pub(crate) fn render_exec_approval_overlay(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    item_idx: usize,
+) {
+    let Some(item) = app.pending_exec.get(item_idx) else {
+        return;
+    };
+
+    let popup_area = centered_rect(72, 56, 12, area);
+    frame.render_widget(Clear, popup_area);
+
+    let match_str = match &item.matched_command {
+        Some(name) => format!("rule: {name}"),
+        None => "unlisted command".to_string(),
+    };
+
+    let action_line = Line::from(vec![
+        Span::styled(
+            "Y ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Allow  ", Style::default().fg(Color::White)),
+        Span::styled(
+            "R ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Always allow  ", Style::default().fg(Color::White)),
+        Span::styled(
+            "N ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Deny  ", Style::default().fg(Color::White)),
+        Span::styled(
+            "D ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Always deny", Style::default().fg(Color::White)),
+    ]);
+
+    let queue_total = app
+        .pending_exec
+        .iter()
+        .filter(|pending| pending.project == item.project)
+        .count();
+    let queue_pos = app
+        .pending_exec
+        .iter()
+        .filter(|pending| pending.project == item.project)
+        .position(|pending| pending.id == item.id)
+        .map(|idx| idx + 1)
+        .unwrap_or(1);
+    let source_container = item
+        .container_id
+        .clone()
+        .unwrap_or_else(|| "unknown-container".to_string());
+    let mut command_label = match &item.image {
+        Some(image) => format!("--image {image} {}", item.argv.join(" ")),
+        None => item.argv.join(" "),
+    };
+    if item.timeout_secs != 60 {
+        command_label = format!("--timeout {} {}", item.timeout_secs, command_label);
+    }
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  APPROVAL REQUIRED",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Command : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                command_label,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Workspace: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(item.project.clone(), Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Source  : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("workspace={}  container={}", item.project, source_container),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Queue   : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(
+                    "{}/{} for workspace '{}' (exec total: {}, net total: {})",
+                    queue_pos,
+                    queue_total.max(1),
+                    item.project,
+                    app.pending_exec.len(),
+                    app.pending_net.len()
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Host cwd: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                item.cwd.display().to_string(),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Match   : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(match_str, Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(""),
+        action_line,
+        Line::from(""),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" Hostdo Approval ")
+                .title_alignment(Alignment::Center)
+                .title_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        ),
+        popup_area,
+    );
+}
+
 pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let Some(item) = app.pending_net.first() else {
         return;
@@ -11,13 +156,29 @@ pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Re
     let source_header = pending_network_source_header(app, item);
 
     let action_line = Line::from(vec![
-        Span::styled("Y ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Y ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Allow  ", Style::default().fg(Color::White)),
-        Span::styled("R ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "R ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Always allow  ", Style::default().fg(Color::White)),
-        Span::styled("N ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "N ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Deny  ", Style::default().fg(Color::White)),
-        Span::styled("D ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "D ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Always deny", Style::default().fg(Color::White)),
     ]);
 
@@ -214,9 +375,19 @@ pub(crate) fn render_remove_workspace_confirm_overlay(frame: &mut Frame, app: &A
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Y ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Y ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Remove  ", Style::default().fg(Color::White)),
-            Span::styled("N ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "N ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Cancel", Style::default().fg(Color::White)),
         ]),
     ];
@@ -275,7 +446,12 @@ pub(crate) fn render_base_rules_changed_overlay(frame: &mut Frame, app: &App, ar
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Y ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Y ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Dismiss", Style::default().fg(Color::White)),
         ]),
     ];

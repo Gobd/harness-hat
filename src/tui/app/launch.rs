@@ -93,11 +93,9 @@ impl App {
                 if self.build_task.is_some() || self.workspace_launch_pending.is_some() {
                     return finish_launch_stream(
                         &event_tx,
-                        Err(
-                            "a docker build is already running in this manager; \
+                        Err("a docker build is already running in this manager; \
                              retry once it finishes"
-                                .to_string(),
-                        ),
+                            .to_string()),
                     );
                 }
 
@@ -246,6 +244,7 @@ impl App {
         let control_port = cfg.defaults.control.server_port;
         let control_host = &cfg.defaults.control.server_host;
         let control_url = format!("http://{control_host}:{control_port}");
+        let hostdo_script_host_path = cfg.docker_dir.join("scripts/hostdo.py");
         let proxy_host = &cfg.defaults.proxy.proxy_host;
         let session_token = uuid::Uuid::new_v4().simple().to_string();
         let scoped_proxy = match crate::proxy::spawn_scoped_listener(
@@ -305,7 +304,7 @@ impl App {
             &control_url,
             &proxy_url,
             &self.ca_cert_path,
-            None,
+            Some(hostdo_script_host_path.as_path()),
             Some(scoped_proxy),
             proxy_priority,
             cfg.defaults.proxy.strict_network,

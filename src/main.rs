@@ -32,6 +32,22 @@ async fn main() -> Result<()> {
                     };
                     harness_hat::native_approval::run_network_approval(&req)
                 }
+                DialogCommand::HostdoApproval {
+                    command,
+                    image,
+                    cwd,
+                    timeout_secs,
+                    workspace,
+                } => {
+                    let req = harness_hat::native_approval::HostdoApprovalRequest {
+                        command,
+                        cwd,
+                        image,
+                        timeout_secs,
+                        workspace,
+                    };
+                    harness_hat::native_approval::run_hostdo_approval(&req)
+                }
             };
             println!("{}", outcome.encode());
             return Ok(());

@@ -831,11 +831,8 @@ async fn handle_transparent_tls(mut stream: TcpStream, state: ProxyState) -> Res
     );
     state.activity_line(&connect_activity.id, format!("target {host}:443"));
 
-    if let Some(bypass_pattern) = container_tls_passthrough_match(
-        &state.config.get(),
-        source_container.as_deref(),
-        &host,
-    )
+    if let Some(bypass_pattern) =
+        container_tls_passthrough_match(&state.config.get(), source_container.as_deref(), &host)
     {
         info!(
             host = %host,

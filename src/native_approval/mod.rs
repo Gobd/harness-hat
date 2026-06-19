@@ -20,10 +20,10 @@
 
 use anyhow::{Context, Result, bail};
 
-#[cfg(target_os = "macos")]
-mod macos;
 #[cfg(not(target_os = "macos"))]
 mod fallback;
+#[cfg(target_os = "macos")]
+mod macos;
 
 /// All the context a native dialog needs to render a useful prompt. Mirrors
 /// the subset of `proxy::PendingNetworkItem` that the user actually reads.
@@ -36,12 +36,25 @@ pub struct ApprovalRequest {
     pub workspace: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct HostdoApprovalRequest {
+    pub command: String,
+    pub cwd: Option<String>,
+    pub workspace: Option<String>,
+    pub image: Option<String>,
+    pub timeout_secs: Option<u64>,
+}
+
 /// What the user picked. `remember` is the "Remember this decision" checkbox
 /// state, which the parent uses to decide whether to write a persistent rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    Allow { remember: bool },
-    Deny { remember: bool },
+    Allow {
+        remember: bool,
+    },
+    Deny {
+        remember: bool,
+    },
     /// User dismissed the dialog without picking (Esc, close button, native
     /// backend missing). Parent should treat this as "deny once".
     Cancelled,
@@ -93,6 +106,19 @@ pub fn run_network_approval(req: &ApprovalRequest) -> Outcome {
     #[cfg(not(target_os = "macos"))]
     {
         fallback::prompt_network_approval(req)
+    }
+}
+
+/// Entry point called from the `__dialog hostdo-approval ...` subprocess.
+/// Returns `Allow`/`Deny`/`Cancelled` as a machine-readable single line.
+pub fn run_hostdo_approval(req: &HostdoApprovalRequest) -> Outcome {
+    #[cfg(target_os = "macos")]
+    {
+        macos::prompt_hostdo_approval(req)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        fallback::prompt_hostdo_approval(req)
     }
 }
 

@@ -82,6 +82,7 @@ pub struct ContainerSession {
     pub(crate) _seed_tempfiles: Vec<NamedTempFile>,
     pub(crate) _env_tempfile: Option<NamedTempFile>,
     pub(crate) _control_tempfile: Option<NamedTempFile>,
+    pub(crate) _hostdo_tempfile: Option<NamedTempFile>,
 }
 
 /// Event sink that keeps the Alacritty-backed PTY state synchronized with the
