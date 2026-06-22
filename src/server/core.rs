@@ -734,7 +734,26 @@ async fn run_command(
 ) -> Result<ExecResult, ExecFailure> {
     let job_id = job.as_ref().map(|(job_id, _)| job_id.clone());
     if let Some(image) = &run.image {
-        ensure_image_present(&run, image, job_id.as_deref()).await?;
+        if let Err(err) = ensure_image_present(&run, image, job_id.as_deref()).await {
+            let (activity_state, msg) = exec_failure_state(&err, run.timeout_secs);
+            let _ = run.state.activity_tx.try_send(ActivityEvent::Finished {
+                id: run.activity_id.clone(),
+                state: activity_state,
+                status: Some(msg.clone()),
+            });
+            if let Some(job_id) = &job_id {
+                run.state.exec_jobs.update(job_id, |status| {
+                    status.state = ExecJobState::Failed;
+                    status.phase = None;
+                    status.message = msg;
+                    status.progress = None;
+                    status.poll_after_ms = None;
+                    status.cancel_flag = None;
+                    status.stdin_tx = None;
+                });
+            }
+            return Err(err);
+        }
     }
 
     let mut cmd = build_command(&run)?;
@@ -798,7 +817,42 @@ async fn run_command(
         }
     }
 
-    let status = wait_for_child(&mut child, run.cancel_flag.clone(), run.timeout_secs).await?;
+    let status = match wait_for_child(&mut child, run.cancel_flag.clone(), run.timeout_secs).await {
+        Ok(status) => status,
+        Err(err) => {
+            stdout_task.abort();
+            stderr_task.abort();
+            let duration_ms = started_at.elapsed().as_millis() as u64;
+            let (activity_state, msg) = exec_failure_state(&err, run.timeout_secs);
+            record_command_audit(
+                &run.state,
+                &run.project,
+                &run.argv,
+                &run.request_cwd,
+                run.decision_kind.clone(),
+                None,
+                Some(duration_ms),
+            )
+            .await;
+            let _ = run.state.activity_tx.try_send(ActivityEvent::Finished {
+                id: run.activity_id.clone(),
+                state: activity_state,
+                status: Some(msg.clone()),
+            });
+            if let Some(job_id) = &job_id {
+                run.state.exec_jobs.update(job_id, |status| {
+                    status.state = ExecJobState::Failed;
+                    status.phase = None;
+                    status.message = msg;
+                    status.progress = None;
+                    status.poll_after_ms = None;
+                    status.cancel_flag = None;
+                    status.stdin_tx = None;
+                });
+            }
+            return Err(err);
+        }
+    };
     let stdout = stdout_task
         .await
         .map_err(|e| ExecFailure::Message(format!("stdout task failed: {e}")))??;
@@ -907,8 +961,14 @@ async fn ensure_image_present(
         true,
     );
 
-    let status =
-        wait_for_child(&mut child, run.cancel_flag.clone(), IMAGE_PULL_TIMEOUT_SECS).await?;
+    let status = match wait_for_child(&mut child, run.cancel_flag.clone(), IMAGE_PULL_TIMEOUT_SECS).await {
+        Ok(s) => s,
+        Err(err) => {
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(err);
+        }
+    };
     let _ = stdout_task
         .await
         .map_err(|e| ExecFailure::Message(format!("docker pull stdout task failed: {e}")))??;
@@ -928,7 +988,7 @@ fn build_command(run: &CommandRun) -> Result<TokioCommand, ExecFailure> {
     if run.argv.is_empty() {
         return Err(ExecFailure::Message("command argv is empty".into()));
     }
-    let cmd = if let Some(image) = &run.image {
+    let mut cmd = if let Some(image) = &run.image {
         let mut cmd = TokioCommand::new("docker");
         cmd.arg("run")
             .arg("--rm")
@@ -951,6 +1011,10 @@ fn build_command(run: &CommandRun) -> Result<TokioCommand, ExecFailure> {
         cmd.args(&run.argv[1..]).current_dir(&run.host_cwd);
         cmd
     };
+    // Place each spawned process in its own process group so kill_child_and_group
+    // can reach all descendants, not just the direct child.
+    #[cfg(unix)]
+    cmd.process_group(0);
     Ok(cmd)
 }
 
@@ -967,6 +1031,17 @@ async fn docker_image_present(image: &str) -> Result<bool, ExecFailure> {
     Ok(status.success())
 }
 
+async fn kill_child_and_group(child: &mut tokio::process::Child) {
+    // Kill the entire process group so child subprocesses don't outlive the timeout.
+    // The process group ID equals the child PID when process_group(0) is set in build_command.
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
 async fn wait_for_child(
     child: &mut tokio::process::Child,
     cancel_flag: Arc<AtomicBool>,
@@ -975,13 +1050,11 @@ async fn wait_for_child(
     let started = Instant::now();
     loop {
         if cancel_flag.load(Ordering::SeqCst) {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            kill_child_and_group(child).await;
             return Err(ExecFailure::Cancelled);
         }
         if started.elapsed() >= Duration::from_secs(timeout_secs) {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            kill_child_and_group(child).await;
             return Err(ExecFailure::TimedOut);
         }
         if let Some(status) = child
@@ -991,6 +1064,17 @@ async fn wait_for_child(
             return Ok(status);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn exec_failure_state(err: &ExecFailure, timeout_secs: u64) -> (ActivityState, String) {
+    match err {
+        ExecFailure::TimedOut => (
+            ActivityState::Failed,
+            format!("timed out after {timeout_secs}s"),
+        ),
+        ExecFailure::Cancelled => (ActivityState::Cancelled, "cancelled".to_string()),
+        ExecFailure::Message(m) => (ActivityState::Failed, m.clone()),
     }
 }
 
