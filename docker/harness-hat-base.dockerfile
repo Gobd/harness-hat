@@ -513,6 +513,13 @@ RUN set -eu; \
     test -x /usr/local/bin/antigravity; \
     test -x /usr/local/bin/agy
 
+# jq — required by the default Claude Code statusLine script
+# (~/.claude/statusline-command.sh parses the status JSON via jq) and broadly
+# useful for in-container tooling.
+RUN apt-get update -o APT::Update::Error-Mode=any \
+    && apt-get install -y --no-install-recommends jq \
+    && rm -rf /var/lib/apt/lists/*
+
 # Claude Code — TWO coexisting builds, so a session runs the newest model by
 # default but can fall back if a `latest` release regresses:
 #   * `claude-stable` → the `stable` apt build (GPG-verified, ~1 week delayed).
