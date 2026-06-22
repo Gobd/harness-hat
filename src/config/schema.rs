@@ -37,6 +37,11 @@ pub struct ContainerDef {
     /// Dockerfile stem (e.g. `default` -> `<docker_dir>/default.dockerfile`).
     #[serde(default)]
     pub image_stem: String,
+    /// Optional path to a local workspace dockerfile for this template.
+    /// When set, build and validation helpers prefer this path over
+    /// `<docker_dir>/<image_stem>.dockerfile`.
+    #[serde(default)]
+    pub dockerfile_path: Option<PathBuf>,
     /// Optional profile key (legacy/internal compatibility field).
     #[serde(default)]
     pub profile: Option<String>,

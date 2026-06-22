@@ -27,6 +27,34 @@ mod tests {
         dir
     }
 
+    fn with_temp_home<R>(home: &std::path::Path, f: impl FnOnce() -> R) -> R {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("test env lock");
+        let original_home = std::env::var_os("HOME");
+        let original_xdg_data_home = std::env::var_os("XDG_DATA_HOME");
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::set_var("XDG_DATA_HOME", home.join(".local/share"));
+        }
+        let result = f();
+        match original_home {
+            Some(value) => unsafe {
+                std::env::set_var("HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("HOME");
+            },
+        }
+        match original_xdg_data_home {
+            Some(value) => unsafe {
+                std::env::set_var("XDG_DATA_HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("XDG_DATA_HOME");
+            },
+        }
+        result
+    }
+
     #[test]
     fn decode_source_from_proxy_authorization_works() {
         let auth_payload = format!(
@@ -281,7 +309,7 @@ host_port = 18081
         let root = unique_temp_dir("proxy-test-config");
         let config_path = root.join("harness-hat.toml");
         std::fs::write(&config_path, raw).expect("write config");
-        let cfg = crate::config::load(&config_path).expect("load config");
+        let cfg = with_temp_home(&root, || crate::config::load(&config_path)).expect("load config");
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
         let state = ProxyState::new(

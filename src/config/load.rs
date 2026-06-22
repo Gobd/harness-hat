@@ -1,10 +1,13 @@
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::{fs, io::{self, BufRead, BufReader}};
 use toml_edit::{DocumentMut, value};
 use tracing::instrument;
 
 use crate::config::{
     Config, ContainerMount, LocalhostForward, WorkspaceConfig, default_mount_target,
+    ContainerDefaults, ContainerProfile,
 };
 
 const WORKSPACE_SIDEBAR_HOTKEY_POOL: &[char] = &[
@@ -258,51 +261,251 @@ fn resolve_container_profiles(config: &mut Config) -> Result<()> {
             profile_name
         );
         let image_tag = image_tag_for_stem(&image_stem);
-
-        let mounts = merge_mounts(&defaults.mounts, &session_state_mounts, &profile.mounts);
-
-        // Prefer the profile's value for an `Option` field, else the default's.
-        macro_rules! prefer {
-            ($field:ident) => {
-                profile.$field.clone().or_else(|| defaults.$field.clone())
-            };
-        }
-
-        resolved.push(crate::config::ContainerDef {
-            name: profile_name.clone(),
-            profile: None,
-            image: image_tag,
-            mount_target: prefer!(mount_target).unwrap_or_else(default_mount_target),
-            command: profile.command.clone(),
-            grayscale_palette: prefer!(grayscale_palette).unwrap_or(false),
-            starter_network_allowlist: profile.starter_network_allowlist.clone(),
-            allowed_hosts: merge_unique_strings(
-                &defaults.allowed_hosts,
-                &profile.allowed_hosts,
-                &[],
-            ),
-            mcp_log_paths: merge_unique_paths(&defaults.mcp_log_paths, &profile.mcp_log_paths),
-            mcp_log_pattern: prefer!(mcp_log_pattern),
-            mounts,
-            env: merge_env_vars(&defaults.env, &profile.env),
-            env_passthrough: merge_unique_strings(
-                &defaults.env_passthrough,
-                &profile.env_passthrough,
-                &[],
-            ),
-            localhost_forwards: merge_localhost_forwards(
-                &defaults.localhost_forwards,
-                &profile.localhost_forwards,
-            ),
-            memory: prefer!(memory),
-            cpus: prefer!(cpus),
-            shm_size: prefer!(shm_size),
+        resolved.push(materialize_container_def(
+            &profile_name,
+            image_tag,
             image_stem,
-        });
+            Some(profile),
+            &defaults,
+            &session_state_mounts,
+            None,
+        ));
     }
     config.containers = resolved;
 
     Ok(())
+}
+
+pub(crate) fn materialize_container_def(
+    profile_name: &str,
+    image: String,
+    image_stem: String,
+    profile: Option<&ContainerProfile>,
+    defaults: &ContainerDefaults,
+    session_state_mounts: &[ContainerMount],
+    dockerfile_path: Option<PathBuf>,
+) -> crate::config::ContainerDef {
+    let profile = match profile {
+        Some(profile) => profile,
+        None => &ContainerProfile::default(),
+    };
+
+    let mounts = merge_mounts(&defaults.mounts, session_state_mounts, &profile.mounts);
+
+    // Prefer the profile's value for an `Option` field, else the default's.
+    macro_rules! prefer {
+        ($field:ident) => {
+            profile.$field.clone().or_else(|| defaults.$field.clone())
+        };
+    }
+
+    crate::config::ContainerDef {
+        name: profile_name.to_string(),
+        profile: None,
+        image,
+        image_stem,
+        dockerfile_path,
+        mount_target: prefer!(mount_target).unwrap_or_else(default_mount_target),
+        command: profile.command.clone(),
+        grayscale_palette: prefer!(grayscale_palette).unwrap_or(false),
+        starter_network_allowlist: profile.starter_network_allowlist.clone(),
+        allowed_hosts: merge_unique_strings(&defaults.allowed_hosts, &profile.allowed_hosts, &[]),
+        mcp_log_paths: merge_unique_paths(&defaults.mcp_log_paths, &profile.mcp_log_paths),
+        mcp_log_pattern: prefer!(mcp_log_pattern),
+        mounts,
+        env: merge_env_vars(&defaults.env, &profile.env),
+        env_passthrough: merge_unique_strings(
+            &defaults.env_passthrough,
+            &profile.env_passthrough,
+            &[],
+        ),
+        localhost_forwards: merge_localhost_forwards(
+            &defaults.localhost_forwards,
+            &profile.localhost_forwards,
+        ),
+        memory: prefer!(memory),
+        cpus: prefer!(cpus),
+        shm_size: prefer!(shm_size),
+    }
+}
+
+/// Merge preconfigured container profiles with workspace-local `.dockerfile`
+/// templates found under the workspace root.
+///
+/// Local templates are always appended after configured templates so picker and
+/// launch flows can treat workspace-local entries as optional extras.
+pub(crate) fn resolve_workspace_container_templates(
+    workspace_path: &Path,
+    defaults: &crate::config::ContainerDefaults,
+    configured: &[crate::config::ContainerDef],
+) -> Result<Vec<crate::config::ContainerDef>> {
+    let mut out = configured.to_vec();
+    let mut seen_names = out
+        .iter()
+        .map(|container| container.name.clone())
+        .collect::<HashSet<_>>();
+
+    let local_dockerfiles = discover_workspace_local_dockerfiles(workspace_path)?;
+    if local_dockerfiles.is_empty() {
+        return Ok(out);
+    }
+
+    let session_state_mounts = shared_session_state_mounts()?;
+    for dockerfile in local_dockerfiles {
+        let raw_name = local_template_name(workspace_path, &dockerfile);
+        let name = dedupe_template_name(raw_name, &mut seen_names);
+        let image_stem = local_image_stem(workspace_path, &dockerfile);
+        let image = image_tag_for_stem(&image_stem);
+        out.push(materialize_container_def(
+            &name,
+            image,
+            image_stem,
+            None,
+            defaults,
+            &session_state_mounts,
+            Some(dockerfile),
+        ));
+    }
+
+    Ok(out)
+}
+
+fn dedupe_template_name(name: String, used: &mut HashSet<String>) -> String {
+    if used.insert(name.clone()) {
+        return name;
+    }
+
+    let mut suffix = 2;
+    loop {
+        let candidate = if suffix == 2 {
+            format!("{name} (local)")
+        } else {
+            format!("{name} (local {suffix})")
+        };
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+fn discover_workspace_local_dockerfiles(workspace_path: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    if !workspace_path.exists() {
+        return Ok(out);
+    }
+
+    let mut stack = vec![workspace_path.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let entries = match fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            if is_skippable_entry(&file_name) {
+                continue;
+            }
+
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file()
+                && path.extension().map_or(false, |ext| {
+                    ext.to_string_lossy().eq_ignore_ascii_case("dockerfile")
+                })
+                && local_dockerfile_uses_local_base(&path)?
+            {
+                out.push(path);
+            }
+            // Symlinks are skipped to avoid recursion through unexpected cycles.
+        }
+    }
+
+    out.sort();
+    Ok(out)
+}
+
+fn is_skippable_entry(file_name: &str) -> bool {
+    matches!(
+        file_name,
+        ".git" | ".idea" | ".gradle" | "target" | "node_modules" | "dist" | "build"
+    )
+}
+
+fn local_dockerfile_uses_local_base(path: &Path) -> io::Result<bool> {
+    let file = fs::File::open(path)?;
+    let reader = BufReader::new(file);
+
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let mut parts = trimmed.split_whitespace();
+        let cmd = parts.next().unwrap_or_default();
+        if !cmd.eq_ignore_ascii_case("FROM") {
+            return Ok(false);
+        }
+        let base = parts.next().unwrap_or_default();
+        return Ok(base.eq_ignore_ascii_case("harness-hat-base:local"));
+    }
+
+    Ok(false)
+}
+
+fn local_template_name(workspace_path: &Path, dockerfile_path: &Path) -> String {
+    let relative = dockerfile_path
+        .strip_prefix(workspace_path)
+        .unwrap_or(dockerfile_path)
+        .with_extension("");
+
+    let raw = relative.to_string_lossy().to_string();
+    if raw.trim().is_empty() {
+        "dockerfile".to_string()
+    } else {
+        raw.replace('\n', "/")
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .trim_start_matches('/')
+            .to_string()
+    }
+}
+
+fn local_image_stem(workspace_path: &Path, dockerfile_path: &Path) -> String {
+    let workspace_name = workspace_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("workspace");
+    let rel_name = local_template_name(workspace_path, dockerfile_path)
+        .replace('/', "_")
+        .replace('\\', "_");
+    let mut raw = format!("local-{}-{}", workspace_name, rel_name);
+    raw.make_ascii_lowercase();
+
+    let mut stem = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            stem.push(ch);
+        } else {
+            stem.push('-');
+        }
+    }
+    if stem.is_empty() {
+        "local".to_string()
+    } else {
+        stem
+    }
 }
 
 #[instrument(skip(config, config_path))]
@@ -474,9 +677,9 @@ fn shared_session_mount(host: &str, container: &str) -> Result<Option<ContainerM
 }
 
 fn shared_container_keyring_mount() -> Result<ContainerMount> {
-    let host = dirs::home_dir()
-        .context("cannot determine home directory")?
-        .join(".local/share/harness-hat/container-keyrings");
+    let host = dirs::data_dir()
+        .context("cannot determine user data directory")?
+        .join("harness-hat/container-keyrings");
     std::fs::create_dir_all(&host)
         .with_context(|| format!("creating container keyring state dir {}", host.display()))?;
     #[cfg(unix)]

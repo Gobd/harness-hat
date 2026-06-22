@@ -23,6 +23,9 @@ use crate::container::helpers::{blend_toward_bg, luma_u8, xterm_256_index_to_rgb
 use tracing::{instrument, warn};
 
 const INPUT_ECHO_GRACE: Duration = Duration::from_millis(350);
+/// Keep enough scrollback for normal terminal review without letting very noisy
+/// commands monopolize PTY processing and rendering.
+pub const TERMINAL_SCROLLBACK_LINES: usize = 10_000;
 
 /// Docker label keys stamped on every harness-hat container so that other
 /// processes (e.g. `hh shell`) can discover and identify running sessions

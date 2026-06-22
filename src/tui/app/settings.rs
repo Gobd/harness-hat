@@ -269,11 +269,6 @@ impl App {
 
     pub(crate) fn open_picker(&mut self) {
         let cfg = self.config.get();
-        if cfg.containers.is_empty() {
-            self.push_log("no container_profiles defined in config", true);
-            return;
-        }
-
         let items = self.sidebar_items();
         let Some(current) = items.get(self.sidebar_idx).cloned() else {
             return;
@@ -291,6 +286,13 @@ impl App {
                 if pi >= cfg.workspaces.len() {
                     return;
                 }
+                if self.workspace_templates_for_project(pi).is_empty() {
+                    self.push_log(
+                        "no container templates available for this workspace",
+                        true,
+                    );
+                    return;
+                }
                 // Skip the workspace step: the workspace is already chosen.
                 self.container_picker = Some(ContainerPickerState::NewSessionTemplate {
                     workspace_idx: pi,
@@ -305,7 +307,12 @@ impl App {
 
     pub(crate) fn handle_picker_key(&mut self, key: KeyEvent) {
         let cfg = self.config.get();
-        let n = cfg.containers.len();
+        let mut n = cfg.containers.len();
+        if let Some(ContainerPickerState::NewSessionTemplate { workspace_idx, .. }) =
+            self.container_picker.as_ref()
+        {
+            n = self.workspace_templates_for_project(*workspace_idx).len();
+        }
         let launch_session_group: Option<usize> = None;
         let mut launch_workspace_idx: Option<usize> = None;
         let mut launch_container_idx: Option<usize> = None;
@@ -475,16 +482,28 @@ impl App {
     }
 
     pub(crate) fn run_build_action(&mut self) {
-        let cfg = self.config.get();
         let Some(ctr_idx) = self.build_container_idx else {
             return;
         };
-        let Some(ctr) = cfg.containers.get(ctr_idx) else {
+        let launch_project_idx = self
+            .build_project_idx
+            .or_else(|| self.selected_project_idx());
+        let Some(launch_project_idx) = launch_project_idx else {
+            self.push_log("cannot start build: no workspace selected", true);
             return;
         };
-        let dockerfile_path = cfg
-            .docker_dir
-            .join(format!("{}.dockerfile", ctr.image_stem));
+
+        let templates = self.workspace_templates_for_project(launch_project_idx);
+        let Some(ctr) = templates.get(ctr_idx) else {
+            self.push_log("selected container template is no longer available", true);
+            return;
+        };
+
+        let cfg = self.config.get();
+        let dockerfile_path = ctr
+            .dockerfile_path
+            .clone()
+            .unwrap_or_else(|| cfg.docker_dir.join(format!("{}.dockerfile", ctr.image_stem)));
         if !dockerfile_path.exists() {
             self.push_log(
                 format!(
@@ -496,7 +515,14 @@ impl App {
             self.focus = Focus::ImageBuild;
             return;
         }
-        let (build_cmd, maybe_base_cmd) = Self::build_commands_for(&cfg.docker_dir, &ctr.image);
+
+        let dockerfile_context = dockerfile_path.parent().unwrap_or(cfg.docker_dir.as_path());
+        let (build_cmd, maybe_base_cmd) = Self::build_commands_for(
+            &dockerfile_path,
+            &ctr.image,
+            dockerfile_context,
+            &cfg.docker_dir,
+        );
 
         let requested = match self.build_cursor {
             0 => Some(("build + launch", shell_command_for_docker_args(&build_cmd))),
@@ -560,16 +586,10 @@ impl App {
                 }
             }
         }
+
         shell_commands.push(build_shell_command);
         let shell_command = shell_commands.join(" && ");
 
-        let launch_project_idx = self
-            .build_project_idx
-            .or_else(|| self.selected_project_idx());
-        let Some(launch_project_idx) = launch_project_idx else {
-            self.push_log("cannot start build: no workspace selected", true);
-            return;
-        };
         self.start_docker_build(label, shell_command, launch_project_idx, ctr_idx);
     }
 

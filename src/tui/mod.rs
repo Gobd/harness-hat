@@ -37,6 +37,9 @@ use crate::server::{
 use crate::shared_config::SharedConfig;
 use crate::state::{AuditEntry, StateManager};
 
+const BUILD_EVENT_CHANNEL_CAPACITY: usize = 512;
+const BUILD_OUTPUT_EVENTS_PER_TICK: usize = 48;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TuiSessionGroup {
     workspace_name: String,
@@ -231,8 +234,8 @@ pub struct App {
     // — the TUI's view is best-effort already.
     pub activity_rx: mpsc::Receiver<ActivityEvent>,
     pub audit_rx: mpsc::Receiver<AuditEntry>,
-    build_event_rx: mpsc::UnboundedReceiver<BuildEvent>,
-    build_event_tx: mpsc::UnboundedSender<BuildEvent>,
+    build_event_rx: mpsc::Receiver<BuildEvent>,
+    build_event_tx: mpsc::Sender<BuildEvent>,
     build_task: Option<BuildTaskState>,
     /// Result of the most recent build, retained so the output pane (and its
     /// pass/fail banner) stays visible after the build task itself has ended.

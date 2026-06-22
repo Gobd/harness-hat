@@ -12,7 +12,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config as TermConfig, Term};
 use alacritty_terminal::vte::ansi::Processor;
 
-use crate::container::TermSize;
+use crate::container::{TERMINAL_SCROLLBACK_LINES, TermSize};
 
 pub type ActivityId = String;
 
@@ -103,7 +103,7 @@ impl fmt::Debug for ActivityTerminal {
 impl ActivityTerminal {
     fn new() -> Self {
         let mut term_cfg = TermConfig::default();
-        term_cfg.scrolling_history = 100_000;
+        term_cfg.scrolling_history = TERMINAL_SCROLLBACK_LINES;
         let term_size = TermSize {
             cols: 80,
             lines: 24,

@@ -89,7 +89,7 @@ impl App {
                 Err(_) => break,
             }
         }
-        for _ in 0..256 {
+        for _ in 0..BUILD_OUTPUT_EVENTS_PER_TICK {
             match self.build_event_rx.try_recv() {
                 Ok(BuildEvent::Output { line, is_error }) => {
                     // Mirror to any in-flight `/workspace/launch` streaming

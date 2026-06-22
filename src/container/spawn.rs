@@ -14,8 +14,8 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::config::ContainerDef;
 use crate::container::core::{
-    LABEL_ALIAS, LABEL_SESSION, LABEL_TEMPLATE, LABEL_WORKSPACE, TermSize, loopback_to_host_docker,
-    mount_mode_arg, parse_docker_label, sanitize_docker_name,
+    LABEL_ALIAS, LABEL_SESSION, LABEL_TEMPLATE, LABEL_WORKSPACE, TERMINAL_SCROLLBACK_LINES,
+    TermSize, loopback_to_host_docker, mount_mode_arg, parse_docker_label, sanitize_docker_name,
 };
 use crate::container::helpers::detect_default_colors;
 use crate::container::{ContainerSession, SessionEventProxy, read_container_id};
@@ -171,6 +171,11 @@ pub fn spawn(
     }
     for (key, value) in extra_env {
         write_env_file_entry(&mut env_file, key, value)?;
+    }
+    if !ctr.env.contains_key("BUILDKIT_PROGRESS")
+        && !extra_env.iter().any(|(key, _)| key == "BUILDKIT_PROGRESS")
+    {
+        write_env_file_entry(&mut env_file, "BUILDKIT_PROGRESS", "plain")?;
     }
     if should_inject_coder_home(&ctr.mounts)
         && !ctr.env.contains_key("HOME")
@@ -358,7 +363,7 @@ pub fn spawn(
     };
 
     let mut term_cfg = TermConfig::default();
-    term_cfg.scrolling_history = 100_000;
+    term_cfg.scrolling_history = TERMINAL_SCROLLBACK_LINES;
     let term_size = TermSize {
         cols: cols as usize,
         lines: rows as usize,

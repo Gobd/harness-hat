@@ -118,7 +118,7 @@ async fn forward_build_stream<R>(
     mark_stderr: bool,
     stderr_tail: Option<Arc<Mutex<VecDeque<String>>>>,
     output_tail: Arc<Mutex<VecDeque<String>>>,
-    tx: mpsc::UnboundedSender<BuildEvent>,
+    tx: mpsc::Sender<BuildEvent>,
 ) where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -147,10 +147,16 @@ async fn forward_build_stream<R>(
                         lines.pop_front();
                     }
                 }
-                let _ = tx.send(BuildEvent::Output {
-                    line: format!("{prefix}{line}"),
-                    is_error,
-                });
+                if tx
+                    .send(BuildEvent::Output {
+                        line: format!("{prefix}{line}"),
+                        is_error,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
             }
             Ok(None) | Err(_) => break,
         }
@@ -164,11 +170,12 @@ pub(crate) async fn run_build_shell_command(
     launch_container_idx: usize,
     launch_session_group: Option<usize>,
     cancel_flag: Arc<AtomicBool>,
-    tx: mpsc::UnboundedSender<BuildEvent>,
+    tx: mpsc::Sender<BuildEvent>,
 ) {
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-lc")
         .arg(&shell_command)
+        .env("BUILDKIT_PROGRESS", "plain")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -187,17 +194,19 @@ pub(crate) async fn run_build_shell_command(
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
-            let _ = tx.send(BuildEvent::Finished {
-                label,
-                launch_project_idx,
-                launch_container_idx,
-                launch_session_group,
-                success: false,
-                cancelled: false,
-                exit_code: None,
-                error: Some(e.to_string()),
-                diagnostic: None,
-            });
+            let _ = tx
+                .send(BuildEvent::Finished {
+                    label,
+                    launch_project_idx,
+                    launch_container_idx,
+                    launch_session_group,
+                    success: false,
+                    cancelled: false,
+                    exit_code: None,
+                    error: Some(e.to_string()),
+                    diagnostic: None,
+                })
+                .await;
             return;
         }
     };
@@ -265,17 +274,19 @@ pub(crate) async fn run_build_shell_command(
     // Prefer lines that looked like errors; otherwise fall back to the tail of
     // raw output so a failure is never reported with an empty diagnostic.
     let diagnostic = join_tail(&stderr_tail).or_else(|| join_tail(&output_tail));
-    let _ = tx.send(BuildEvent::Finished {
-        label,
-        launch_project_idx,
-        launch_container_idx,
-        launch_session_group,
-        success,
-        cancelled,
-        exit_code,
-        error: None,
-        diagnostic,
-    });
+    let _ = tx
+        .send(BuildEvent::Finished {
+            label,
+            launch_project_idx,
+            launch_container_idx,
+            launch_session_group,
+            success,
+            cancelled,
+            exit_code,
+            error: None,
+            diagnostic,
+        })
+        .await;
 }
 
 pub(crate) fn is_scroll_mode_toggle_key(key: KeyEvent) -> bool {

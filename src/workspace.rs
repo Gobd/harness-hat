@@ -66,7 +66,8 @@ pub fn run(
             println!("attaching to running session {}", session.alias);
             return crate::shell::exec_into_container(&session.name, &args);
         }
-        let template = choose_template(&config, template_override.as_deref())?;
+        let template =
+            choose_template(&config, matched.canonical_path.as_path(), template_override.as_deref())?;
         let resp = post_launch(&control_url, &token, &matched.name, &template)?;
         println!(
             "launched session {} ({}); attaching",
@@ -93,7 +94,7 @@ pub fn run(
         canonical_path: pwd.clone(),
         sidebar_hotkey: None,
     });
-    let template = choose_template(&config, template_override.as_deref())?;
+    let template = choose_template(&config, pwd.as_path(), template_override.as_deref())?;
     let resp = post_launch(&control_url, &token, &workspace_name, &template)?;
     println!(
         "launched session {} ({}); attaching",
@@ -199,39 +200,48 @@ fn newest_session_for_workspace(workspace_name: &str) -> Result<Option<crate::sh
 
 // ── Template picker ─────────────────────────────────────────────────────────
 
-fn choose_template(config: &Config, override_name: Option<&str>) -> Result<String> {
+fn choose_template(
+    config: &Config,
+    workspace_path: &Path,
+    override_name: Option<&str>,
+) -> Result<String> {
+    let templates = crate::config::resolve_workspace_container_templates(
+        workspace_path,
+        &config.defaults.containers,
+        &config.containers,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to scan {} templates: {e}", workspace_path.display()))?;
+
     if let Some(name) = override_name {
         let name = name.trim();
-        if config.containers.iter().any(|c| c.name == name) {
+        if templates.iter().any(|c| c.name == name) {
             return Ok(name.to_string());
         }
-        let available = config
-            .containers
+        let available = templates
             .iter()
             .map(|c| c.name.as_str())
             .collect::<Vec<_>>()
             .join(", ");
         bail!("no container template named '{name}' in this config (available: {available})");
     }
-    if config.containers.is_empty() {
+    if templates.is_empty() {
         bail!("config has no [container_profiles.*] entries — add at least one before launching");
     }
-    if config.containers.len() == 1 {
-        return Ok(config.containers[0].name.clone());
+    if templates.len() == 1 {
+        return Ok(templates[0].name.clone());
     }
     if !io::stdin().is_terminal() {
         bail!(
             "multiple container templates configured and stdin is not a TTY; \
              re-run with `--template NAME` (available: {})",
-            config
-                .containers
+            templates
                 .iter()
                 .map(|c| c.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         );
     }
-    prompt_for_template(&config.containers)
+    prompt_for_template(&templates)
 }
 
 fn prompt_for_template(containers: &[ContainerDef]) -> Result<String> {

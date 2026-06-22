@@ -246,6 +246,34 @@ mod tests {
         dir
     }
 
+    fn with_temp_home<R>(home: &std::path::Path, f: impl FnOnce() -> R) -> R {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("test env lock");
+        let original_home = std::env::var_os("HOME");
+        let original_xdg_data_home = std::env::var_os("XDG_DATA_HOME");
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::set_var("XDG_DATA_HOME", home.join(".local/share"));
+        }
+        let result = f();
+        match original_home {
+            Some(value) => unsafe {
+                std::env::set_var("HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("HOME");
+            },
+        }
+        match original_xdg_data_home {
+            Some(value) => unsafe {
+                std::env::set_var("XDG_DATA_HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("XDG_DATA_HOME");
+            },
+        }
+        result
+    }
+
     #[test]
     fn templates_include_expected_network_allowlist() {
         let rules = default_rules(ProjectType::Rust);
@@ -332,7 +360,7 @@ global_rules_file = "{}"
         fs::write(&config_path, raw).expect("write base config");
 
         append_project_block(&config_path, "proj", &canon, Some('p')).expect("append");
-        let cfg: Config = crate::config::load(&config_path).expect("load");
+        let cfg: Config = with_temp_home(&root, || crate::config::load(&config_path)).expect("load");
 
         let proj = cfg.workspaces.first().expect("project");
         assert_eq!(proj.name, "proj");
@@ -365,7 +393,7 @@ global_rules_file = "{}"
         fs::write(&config_path, raw).expect("write base config");
 
         append_project_block(&config_path, "proj", &canon, None).expect("append");
-        let cfg: Config = crate::config::load(&config_path).expect("load");
+        let cfg: Config = with_temp_home(&root, || crate::config::load(&config_path)).expect("load");
 
         let proj = cfg.workspaces.first().expect("project");
         assert_eq!(proj.name, "proj");

@@ -32,3 +32,6 @@ pub mod state;
 pub mod telemetry;
 pub mod tui;
 pub mod workspace;
+
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

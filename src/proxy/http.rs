@@ -15,6 +15,8 @@ use crate::proxy::helpers::{
 use crate::proxy::{NetworkDecision, PendingNetworkItem, ProxyState, SourceIdentityStatus};
 use crate::rules::NetworkPolicy;
 
+const REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+
 // ── Plain HTTP ────────────────────────────────────────────────────────────────
 
 pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) -> Result<()> {
@@ -506,6 +508,9 @@ where
         .first()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(0);
+    if content_length > REQUEST_BODY_LIMIT_BYTES || initial.len() > REQUEST_BODY_LIMIT_BYTES {
+        anyhow::bail!("request body too large");
+    }
     if content_length == 0 {
         return Ok(vec![]);
     }

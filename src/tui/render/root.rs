@@ -112,6 +112,30 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
+fn sidebar_build_image_for_workspace(
+    app: &mut App,
+    cfg: &crate::config::Config,
+    workspace_idx: usize,
+    build_container_idx: Option<usize>,
+) -> String {
+    let templates = if workspace_idx < cfg.workspaces.len() {
+        app.workspace_templates_for_project(workspace_idx)
+    } else {
+        cfg.containers.clone()
+    };
+
+    if let Some(idx) = build_container_idx {
+        if let Some(template) = templates.get(idx).or_else(|| templates.first()) {
+            return template.image.clone();
+        }
+    }
+
+    build_container_idx
+        .and_then(|idx| cfg.containers.get(idx))
+        .map(|template| template.image.clone())
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
 pub(crate) fn log_pane_height(app: &App) -> u16 {
     if app.config.get().defaults.ui.show_log_pane {
         LOG_HEIGHT
@@ -365,12 +389,13 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled(hotkey, Style::default().fg(Color::DarkGray)),
                 ]))
             }
-            SidebarItem::Build(_) => {
-                let image = app
-                    .build_container_idx
-                    .and_then(|idx| cfg.containers.get(idx))
-                    .map(|c| c.image.as_str())
-                    .unwrap_or("<unknown>");
+            SidebarItem::Build(pi) => {
+                let image = sidebar_build_image_for_workspace(
+                    app,
+                    &cfg,
+                    *pi,
+                    app.build_container_idx,
+                );
                 let marker = if app.build_is_running() {
                     loading_spinner_frame()
                 } else {

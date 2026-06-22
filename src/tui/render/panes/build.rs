@@ -2,22 +2,23 @@ use super::*;
 
 pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Rect, dimmed: bool) {
     let cfg = app.config.get();
-    let Some(picker) = app.container_picker.as_ref() else {
+    let Some(picker) = app.container_picker.clone() else {
         return;
     };
 
     let (selected_idx, workspace_name, workspace_path, title): (
         usize,
-        &str,
+        String,
         Option<std::path::PathBuf>,
         String,
-    ) = match picker {
+    ) = match &picker {
         ContainerPickerState::NewSessionWorkspace { cursor } => (
             *cursor,
             app.workspaces
                 .get(*cursor)
                 .map(|ws| ws.name.as_str())
-                .unwrap_or("(select workspace)"),
+                .unwrap_or("(select workspace)")
+                .to_string(),
             cfg.workspaces
                 .get(*cursor)
                 .map(|ws| ws.canonical_path.clone()),
@@ -31,7 +32,8 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
             app.workspaces
                 .get(*workspace_idx)
                 .map(|ws| ws.name.as_str())
-                .unwrap_or("(no workspace)"),
+                .unwrap_or("(no workspace)")
+                .to_string(),
             app.config
                 .get()
                 .workspaces
@@ -39,6 +41,12 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
                 .map(|ws| ws.canonical_path.clone()),
             "Select Container Template".to_string(),
         ),
+    };
+    let workspace_templates = match &picker {
+        ContainerPickerState::NewSessionTemplate { workspace_idx, .. } => {
+            Some((*workspace_idx, app.workspace_templates_for_project(*workspace_idx)))
+        }
+        ContainerPickerState::NewSessionWorkspace { .. } => None,
     };
 
     let tone = |c| maybe_dim(c, dimmed);
@@ -86,7 +94,7 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
         Line::from(""),
     ];
 
-    match picker {
+    match &picker {
         ContainerPickerState::NewSessionWorkspace { .. } => {
             for (i, ws) in app.workspaces.iter().enumerate() {
                 let marker = if i == selected_idx { "▶ " } else { "  " };
@@ -112,7 +120,11 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
             }
         }
         _ => {
-            for (i, c) in cfg.containers.iter().enumerate() {
+            let templates = workspace_templates
+                .as_ref()
+                .map(|(_, templates)| templates.as_slice())
+                .unwrap_or_else(|| cfg.containers.as_slice());
+            for (i, c) in templates.iter().enumerate() {
                 let marker = if i == selected_idx { "▶ " } else { "  " };
                 let name_style = if i == selected_idx {
                     Style::default()
@@ -133,8 +145,17 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
 
                 lines.push(Line::from(Span::styled(
                     format!(
-                        "      image: {}  (dockerfile: {}.dockerfile)",
-                        c.image, c.image_stem
+                        "      image: {}  (dockerfile: {})",
+                        c.image,
+                        c.dockerfile_path
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| {
+                                cfg.docker_dir
+                                    .join(format!("{}.dockerfile", c.image_stem))
+                                    .display()
+                                    .to_string()
+                            })
                     ),
                     Style::default().fg(tone(Color::DarkGray)),
                 )));
@@ -174,19 +195,31 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
 pub(crate) fn render_image_build(frame: &mut Frame, app: &mut App, area: Rect, dimmed: bool) {
     let cfg = app.config.get();
     let ctr_idx = app.build_container_idx.unwrap_or(0);
-    let (image, image_stem) = cfg
-        .containers
-        .get(ctr_idx)
-        .map(|c| (c.image.as_str(), c.image_stem.as_str()))
-        .unwrap_or(("<unknown>", "default"));
+    let templates = if let Some(pi) = app.build_project_idx
+        && pi < cfg.workspaces.len()
+    {
+        app.workspace_templates_for_project(pi)
+    } else {
+        cfg.containers.clone()
+    };
+    let template = templates.get(ctr_idx).or_else(|| templates.get(0));
 
+    let image = template.map(|c| c.image.as_str()).unwrap_or("<unknown>");
+    let image_stem = template.map(|c| c.image_stem.as_str()).unwrap_or("default");
+    let dockerfile_path = template
+        .and_then(|c| c.dockerfile_path.clone())
+        .unwrap_or_else(|| cfg.docker_dir.join(format!("{image_stem}.dockerfile")));
+    let dockerfile_context = dockerfile_path
+        .parent()
+        .unwrap_or(cfg.docker_dir.as_path());
     let docker_dir = cfg.docker_dir.as_path();
-    let (build_cmd, maybe_base_cmd) = App::build_commands_for(docker_dir, image);
+    let (build_cmd, maybe_base_cmd) =
+        App::build_commands_for(dockerfile_path.as_path(), image, dockerfile_context, docker_dir);
     let build_cmd_str = format!("docker {}", build_cmd.join(" "));
     let base_cmd_str = maybe_base_cmd
         .as_ref()
         .map(|cmd| format!("docker {}", cmd.join(" ")));
-    let dockerfile = docker_dir.join(format!("{image_stem}.dockerfile"));
+    let dockerfile = dockerfile_path.to_path_buf();
 
     let tone = |c| maybe_dim(c, dimmed);
     let focused = app.focus == Focus::ImageBuild;
@@ -315,13 +348,25 @@ pub(crate) fn render_image_build(frame: &mut Frame, app: &mut App, area: Rect, d
     );
 }
 
-pub(crate) fn render_build_output(frame: &mut Frame, app: &App, area: Rect, dimmed: bool) {
+pub(crate) fn render_build_output(frame: &mut Frame, app: &mut App, area: Rect, dimmed: bool) {
     let cfg = app.config.get();
+    let templates = if let Some(pi) = app.build_project_idx
+        && pi < cfg.workspaces.len()
+    {
+        app.workspace_templates_for_project(pi)
+    } else {
+        cfg.containers.clone()
+    };
     let image = app
         .build_container_idx
-        .and_then(|idx| cfg.containers.get(idx))
-        .map(|c| c.image.as_str())
-        .unwrap_or("<unknown>");
+        .and_then(|idx| {
+            templates
+                .get(idx)
+                .or_else(|| templates.first())
+                .map(|template| template.image.as_str())
+                .map(std::string::ToString::to_string)
+        })
+        .unwrap_or_else(|| "<unknown>".to_string());
     let tone = |c| maybe_dim(c, dimmed);
     let focused = app.focus == Focus::ImageBuild;
     let border_style = if focused {

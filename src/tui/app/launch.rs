@@ -7,6 +7,77 @@ impl App {
         ctr.command.clone()
     }
 
+    pub(crate) fn workspace_templates_for_project(
+        &mut self,
+        workspace_idx: usize,
+    ) -> Vec<crate::config::ContainerDef> {
+        let cfg = self.config.get();
+        let Some(workspace) = cfg.workspaces.get(workspace_idx) else {
+            return cfg.containers.clone();
+        };
+
+        crate::config::resolve_workspace_container_templates(
+            &workspace.canonical_path,
+            &cfg.defaults.containers,
+            &cfg.containers,
+        )
+        .unwrap_or_else(|e| {
+            self.push_log(
+                format!(
+                    "failed to scan workspace templates for '{}': {}",
+                    workspace.name,
+                    e
+                ),
+                true,
+            );
+            cfg.containers.clone()
+        })
+    }
+
+    pub(crate) fn workspace_template_for_project(
+        &mut self,
+        workspace_idx: usize,
+        template_idx: usize,
+    ) -> Option<crate::config::ContainerDef> {
+        let templates = self.workspace_templates_for_project(workspace_idx);
+        templates.get(template_idx).cloned()
+    }
+
+    pub(crate) fn configured_template_idx(&self, template_idx: usize) -> Option<usize> {
+        let cfg = self.config.get();
+        (template_idx < cfg.containers.len()).then_some(template_idx)
+    }
+
+    pub(crate) fn workspace_templates_for_name(
+        &mut self,
+        workspace_name: &str,
+    ) -> Vec<crate::config::ContainerDef> {
+        let cfg = self.config.get();
+        let workspace_idx = cfg
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.name == workspace_name);
+        let Some(workspace_idx) = workspace_idx else {
+            return cfg.containers.clone();
+        };
+        crate::config::resolve_workspace_container_templates(
+            &cfg.workspaces[workspace_idx].canonical_path,
+            &cfg.defaults.containers,
+            &cfg.containers,
+        )
+        .unwrap_or_else(|e| {
+            self.push_log(
+                format!(
+                    "failed to scan workspace templates for '{}': {}",
+                    cfg.workspaces[workspace_idx].name,
+                    e
+                ),
+                true,
+            );
+            cfg.containers.clone()
+        })
+    }
+
     /// Rebuild `self.workspaces` (the sidebar workspace status list) from the
     /// current `SharedConfig`. Called after a live config reload so a newly
     /// added workspace shows up in the sidebar on the same tick.
@@ -71,14 +142,14 @@ impl App {
                 )),
             );
         };
-        let Some(template_idx) = cfg.containers.iter().position(|c| c.name == template) else {
+        let templates = self.workspace_templates_for_project(workspace_idx);
+        let Some(template_idx) = templates.iter().position(|c| c.name == template) else {
             return finish_launch_stream(
                 &event_tx,
                 Err(format!("no container template named {template:?}")),
             );
         };
-        let image = cfg.containers[template_idx].image.clone();
-        drop(cfg);
+        let image = templates[template_idx].image.clone();
 
         let _ = event_tx.try_send(LaunchEvent::Status {
             message: format!("checking docker image {image}"),
@@ -217,11 +288,11 @@ impl App {
         extra_env: &[(String, String)],
         session_group: Option<usize>,
     ) {
-        let cfg = self.config.get();
-        let ctr = match cfg.containers.get(ctr_idx) {
-            Some(c) => c.clone(),
-            None => return,
+        let Some(ctr) = self.workspace_template_for_project(pi, ctr_idx) else {
+            return;
         };
+
+        let cfg = self.config.get();
 
         let proj = match cfg.workspaces.get(pi) {
             Some(p) => p.clone(),
@@ -265,7 +336,12 @@ impl App {
             }
         };
         let proxy_url = scoped_proxy.proxy_url();
-        let group_idx = self.resolve_or_create_session_group(session_group, pi, ctr_idx);
+        let group_idx = self.resolve_or_create_session_group(
+            session_group,
+            pi,
+            ctr_idx,
+            self.configured_template_idx(ctr_idx),
+        );
 
         self.push_log(
             format!("launching '{}' on '{}'", ctr.name, proj.name),
@@ -363,6 +439,7 @@ mod tests {
             name: "dev".to_string(),
             image: String::new(),
             image_stem: String::new(),
+            dockerfile_path: None,
             profile: None,
             mount_target: default_mount_target(),
             command: Some(vec![
@@ -400,6 +477,7 @@ mod tests {
             name: "dev".to_string(),
             image: String::new(),
             image_stem: String::new(),
+            dockerfile_path: None,
             profile: None,
             mount_target: default_mount_target(),
             command: None,

@@ -139,7 +139,7 @@ impl App {
             timestamp: chrono::Utc::now(),
         });
 
-        let (build_event_tx, build_event_rx) = mpsc::unbounded_channel();
+        let (build_event_tx, build_event_rx) = mpsc::channel(BUILD_EVENT_CHANNEL_CAPACITY);
         let (native_dialog_tx, native_dialog_rx) = mpsc::unbounded_channel();
         let (container_usage_tx, container_usage_rx) = mpsc::unbounded_channel();
         let (rules_scan_tx, rules_scan_rx) = mpsc::unbounded_channel();
@@ -422,6 +422,7 @@ impl App {
         session_group: Option<usize>,
         workspace_idx: usize,
         ctr_idx: usize,
+        configured_ctr_idx: Option<usize>,
     ) -> usize {
         if let Some(group_idx) = session_group
             && group_idx < self.session_groups.len()
@@ -435,8 +436,8 @@ impl App {
             .get(workspace_idx)
             .map(|ws| ws.name.clone())
             .unwrap_or_else(|| format!("workspace-{workspace_idx}"));
-        let template_name = cfg
-            .containers
+        let templates = self.workspace_templates_for_project(workspace_idx);
+        let template_name = templates
             .get(ctr_idx)
             .map(|ctr| ctr.name.clone())
             .unwrap_or_else(|| format!("template-{ctr_idx}"));
@@ -445,7 +446,7 @@ impl App {
             workspace_name,
             workspace_idx: Some(workspace_idx),
             template_name,
-            template_idx: Some(ctr_idx),
+            template_idx: configured_ctr_idx,
             terminal_indices: Vec::new(),
         });
 

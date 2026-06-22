@@ -155,8 +155,8 @@ pub(crate) fn render_session_detail(
         .find(|workspace| workspace.name == project)
         .map(|workspace| workspace.canonical_path.display().to_string())
         .unwrap_or_else(|| "<unknown>".to_string());
-    let template = cfg
-        .containers
+    let templates = app.workspace_templates_for_name(&project);
+    let template = templates
         .iter()
         .find(|template| template.name == container_name);
     let image = template

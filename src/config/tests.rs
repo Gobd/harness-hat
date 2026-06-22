@@ -1,7 +1,63 @@
-use super::{Config, DefaultsConfig, image_tag_for_stem, load, resolve_workspace_sidebar_hotkeys};
+use super::{
+    resolve_workspace_container_templates, Config, ContainerDefaults, ContainerDef, DefaultsConfig,
+    default_mount_target, image_tag_for_stem, load, resolve_workspace_sidebar_hotkeys,
+};
+use std::path::Path;
 
 fn temp_workspace() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
+}
+
+fn container_def_for_test(name: &str, image: &str, image_stem: &str) -> ContainerDef {
+    ContainerDef {
+        name: name.to_string(),
+        profile: None,
+        image: image.to_string(),
+        image_stem: image_stem.to_string(),
+        dockerfile_path: None,
+        mount_target: default_mount_target(),
+        command: None,
+        grayscale_palette: false,
+        starter_network_allowlist: Vec::new(),
+        allowed_hosts: Vec::new(),
+        mcp_log_paths: Vec::new(),
+        mcp_log_pattern: None,
+        mounts: Vec::new(),
+        env: Default::default(),
+        env_passthrough: Vec::new(),
+        localhost_forwards: Vec::new(),
+        memory: None,
+        cpus: None,
+        shm_size: None,
+    }
+}
+
+fn with_temp_home<R>(home: &Path, f: impl FnOnce() -> R) -> R {
+    let _guard = crate::TEST_ENV_LOCK.lock().expect("test env lock");
+    let original_home = std::env::var_os("HOME");
+    let original_xdg_data_home = std::env::var_os("XDG_DATA_HOME");
+    unsafe {
+        std::env::set_var("HOME", home);
+        std::env::set_var("XDG_DATA_HOME", home.join(".local/share"));
+    }
+    let result = f();
+    match original_home {
+        Some(value) => unsafe {
+            std::env::set_var("HOME", value);
+        },
+        None => unsafe {
+            std::env::remove_var("HOME");
+        },
+    }
+    match original_xdg_data_home {
+        Some(value) => unsafe {
+            std::env::set_var("XDG_DATA_HOME", value);
+        },
+        None => unsafe {
+            std::env::remove_var("XDG_DATA_HOME");
+        },
+    }
+    result
 }
 
 #[test]
@@ -54,14 +110,22 @@ image = "default"
         ),
     )
     .expect("write config");
+    std::fs::write(root.path().join(".claude.json"), "{}").expect("write claude json");
+    std::fs::create_dir_all(root.path().join(".claude")).expect("create claude dir");
+    std::fs::write(root.path().join(".claude/.claude.json"), "{}")
+        .expect("write nested claude json");
+    std::fs::create_dir_all(root.path().join(".codex")).expect("create codex dir");
+    std::fs::create_dir_all(root.path().join(".config/codex")).expect("create config codex dir");
+    std::fs::create_dir_all(root.path().join(".gemini")).expect("create gemini dir");
+    std::fs::create_dir_all(root.path().join(".pi")).expect("create pi dir");
 
-    let cfg = load(&config_path).expect("load config");
+    let cfg = with_temp_home(root.path(), || load(&config_path)).expect("load config");
     let template = cfg.containers.iter().find(|ctr| ctr.name == "dev").unwrap();
     assert_eq!(template.image, "harness-hat-default:local");
     assert_eq!(template.memory.as_deref(), Some("2g"));
     assert_eq!(template.cpus.as_deref(), Some("1.5"));
     assert_eq!(template.shm_size.as_deref(), Some("512m"));
-    let home = dirs::home_dir().expect("home dir");
+    let home = root.path();
     let expected_session_mounts = [
         (home.join(".claude.json"), "/home/coder/.claude.json"),
         (
@@ -120,6 +184,137 @@ fn workspace_hotkeys_are_assigned_without_duplicates() {
     let hotkeys = resolve_workspace_sidebar_hotkeys(&workspaces);
     assert_eq!(hotkeys[0], Some('z'));
     assert_ne!(hotkeys[0], hotkeys[1]);
+}
+
+#[test]
+fn workspace_container_templates_include_local_dockerfiles_with_base_tag() {
+    let root = temp_workspace();
+    with_temp_home(root.path(), || {
+        let workspace = root.path().join("repo");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let nested = workspace.join("services");
+        std::fs::create_dir_all(&nested).expect("nested dir");
+
+        let matching_root = workspace.join("custom.dockerfile");
+        std::fs::write(
+            &matching_root,
+            "FROM harness-hat-base:local\nRUN echo hello",
+        )
+        .expect("write matching root dockerfile");
+        let matching_nested = nested.join("nested.dockerfile");
+        std::fs::write(
+            &matching_nested,
+            "  # ignored comment\n\nFROM harness-hat-base:local as nested\nRUN echo nested",
+        )
+        .expect("write matching nested dockerfile");
+        let non_matching = workspace.join("ignored.dockerfile");
+        std::fs::write(
+            &non_matching,
+            "FROM ubuntu:24.04\nRUN echo ignored",
+        )
+        .expect("write non matching dockerfile");
+
+        let configured = vec![
+            container_def_for_test("configured", "harness-hat-configured:local", "configured"),
+        ];
+        let defaults = ContainerDefaults {
+            memory: Some("2g".to_string()),
+            cpus: Some("1.2".to_string()),
+            mount_target: None,
+            grayscale_palette: None,
+            mounts: Vec::new(),
+            mcp_log_paths: Vec::new(),
+            mcp_log_pattern: None,
+            env: Default::default(),
+            env_passthrough: Vec::new(),
+            allowed_hosts: Vec::new(),
+            localhost_forwards: Vec::new(),
+            shm_size: Some("1g".to_string()),
+        };
+
+        let templates = resolve_workspace_container_templates(&workspace, &defaults, &configured)
+            .expect("discover templates");
+
+        assert_eq!(templates.len(), 3);
+        let configured_idx = templates
+            .iter()
+            .position(|c| c.name == "configured")
+            .expect("configured template");
+        let local_root_idx = templates
+            .iter()
+            .position(|c| c.name == "custom")
+            .expect("custom template");
+        let local_nested_idx = templates
+            .iter()
+            .position(|c| c.name == "services/nested")
+            .expect("nested template");
+
+        assert!(configured_idx < local_root_idx);
+        assert!(local_root_idx < local_nested_idx);
+
+        let local_root = templates[local_root_idx].clone();
+        assert_eq!(
+            local_root.dockerfile_path,
+            Some(matching_root.clone()),
+            "local template should remember its dockerfile path"
+        );
+        assert_eq!(local_root.image, "harness-hat-local-repo-custom:local");
+        assert_eq!(local_root.memory.as_deref(), Some("2g"));
+        assert_eq!(local_root.cpus.as_deref(), Some("1.2"));
+        assert_eq!(local_root.shm_size.as_deref(), Some("1g"));
+
+        let local_nested = templates[local_nested_idx].clone();
+        assert_eq!(
+            local_nested.dockerfile_path,
+            Some(matching_nested),
+            "local template should point to nested dockerfile"
+        );
+        assert_eq!(local_nested.image, "harness-hat-local-repo-services_nested:local");
+
+        let ignored_present = templates.iter().any(|c| c.name == "ignored");
+        assert!(!ignored_present, "non-matching dockerfile should be ignored");
+    });
+}
+
+#[test]
+fn workspace_container_templates_merge_deduplicates_matching_names() {
+    let root = temp_workspace();
+    with_temp_home(root.path(), || {
+        let workspace = root.path().join("repo");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let first = workspace.join("same.dockerfile");
+        let second = workspace.join("alt").join("same.dockerfile");
+        std::fs::create_dir_all(&workspace.join("alt")).expect("alt");
+        std::fs::write(&first, "FROM harness-hat-base:local\n").expect("write first");
+        std::fs::write(&second, "FROM harness-hat-base:local\n").expect("write second");
+
+        let configured = vec![
+            container_def_for_test("configured", "harness-hat-configured:local", "configured"),
+            container_def_for_test("same", "harness-hat-same:local", "same"),
+        ];
+        let defaults = ContainerDefaults {
+            memory: None,
+            cpus: None,
+            mount_target: None,
+            grayscale_palette: None,
+            mounts: Vec::new(),
+            mcp_log_paths: Vec::new(),
+            mcp_log_pattern: None,
+            env: Default::default(),
+            env_passthrough: Vec::new(),
+            allowed_hosts: Vec::new(),
+            localhost_forwards: Vec::new(),
+            shm_size: None,
+        };
+
+        let templates =
+            resolve_workspace_container_templates(&workspace, &defaults, &configured).expect("discover templates");
+
+        let names: Vec<_> = templates.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"same"));
+        assert!(names.contains(&"same (local)"));
+        assert!(names.contains(&"alt/same"));
+    });
 }
 
 #[test]

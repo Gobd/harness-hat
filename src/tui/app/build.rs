@@ -84,20 +84,18 @@ impl App {
     }
 
     pub fn build_commands_for(
-        docker_dir: &Path,
+        dockerfile_path: &Path,
         image: &str,
+        dockerfile_context: &Path,
+        base_dockerfile_dir: &Path,
     ) -> (Vec<String>, Option<Vec<String>>) {
-        let dockerfile = docker_dir.join(format!(
-            "{}.dockerfile",
-            Self::dockerfile_stem_for_image(image)
-        ));
         let cmd = vec![
             "build".to_string(),
             "-t".to_string(),
             image.to_string(),
             "-f".to_string(),
-            dockerfile.display().to_string(),
-            docker_dir.display().to_string(),
+            dockerfile_path.display().to_string(),
+            dockerfile_context.display().to_string(),
         ];
         let base_cmd = if image == Self::BASE_IMAGE_TAG {
             None
@@ -107,11 +105,11 @@ impl App {
                 "-t".to_string(),
                 Self::BASE_IMAGE_TAG.to_string(),
                 "-f".to_string(),
-                docker_dir
+                base_dockerfile_dir
                     .join("harness-hat-base.dockerfile")
                     .display()
                     .to_string(),
-                docker_dir.display().to_string(),
+                base_dockerfile_dir.display().to_string(),
             ])
         };
         (cmd, base_cmd)
