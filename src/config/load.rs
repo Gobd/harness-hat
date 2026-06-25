@@ -627,14 +627,35 @@ pub(crate) fn merge_localhost_forwards(
     out
 }
 
+/// Combine mount layers (defaults → session-state → per-profile overrides) into
+/// the final mount set, keyed by **container destination**.
+///
+/// Docker rejects two `-v` mounts that share a container path ("Duplicate mount
+/// point"), which aborts `docker run` before any container is created. So a
+/// destination may appear at most once; when multiple layers target the same
+/// container path the later layer wins (session-state mounts override config
+/// defaults; per-profile overrides win over both). First-seen position is kept
+/// for stable, readable output.
+///
+/// Deduping on the full `(host, container, mode)` tuple - as this once did - is
+/// not enough: the same destination can arrive with different host paths (e.g.
+/// the keyring mount, where a config entry uses `~/.local/share/...` but
+/// `dirs::data_dir()` resolves to `~/Library/Application Support/...` on macOS),
+/// and both would survive into the `docker run` invocation and break it.
 pub(crate) fn merge_mounts(
     base: &[ContainerMount],
     profile: &[ContainerMount],
     override_items: &[ContainerMount],
 ) -> Vec<ContainerMount> {
-    merge_dedup(&[base, profile, override_items], |a, b| {
-        a.host == b.host && a.container == b.container && a.mode == b.mode
-    })
+    let mut out: Vec<ContainerMount> = Vec::new();
+    for item in [base, profile, override_items].into_iter().flatten() {
+        if let Some(existing) = out.iter_mut().find(|m| m.container == item.container) {
+            *existing = item.clone();
+        } else {
+            out.push(item.clone());
+        }
+    }
+    out
 }
 
 fn shared_session_state_mounts() -> Result<Vec<ContainerMount>> {
