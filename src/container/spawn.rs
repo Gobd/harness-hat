@@ -7,7 +7,10 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64},
+};
 use std::time::Instant;
 use tempfile::NamedTempFile;
 use tracing::{debug, info, instrument, warn};
@@ -23,6 +26,11 @@ use crate::fs_util::{is_valid_env_name, write_env_file_entry};
 
 const PRIMARY_PROXY_CONN_LIMIT: usize = 0;
 const CODER_HOME: &str = "/home/coder";
+const CLAUDE_CODE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+const CLAUDE_CODE_OAUTH_SCOPES_ENV: &str = "CLAUDE_CODE_OAUTH_SCOPES";
+const CLAUDE_CODE_HOST_AUTH_ENV_VAR_ENV: &str = "CLAUDE_CODE_HOST_AUTH_ENV_VAR";
+const CLAUDE_CODE_DEFAULT_OAUTH_SCOPES: &str = "user:inference";
+const CLAUDE_CONFIG_CONTAINER_PATH: &str = "/home/coder/.claude.json";
 
 /// Launch `docker run` for a container definition and wire it to a PTY-backed
 /// terminal session.
@@ -242,18 +250,70 @@ pub fn spawn(
     // launch would then start with an expired access token and an invalidated
     // refresh token, breaking auth entirely. Sessions are instead bounded by the
     // access token lifetime; users re-run Claude locally to keep the Keychain fresh.
+    let mut injected_claude_oauth_token = false;
+    let mut injected_claude_oauth_scopes = false;
+    let mut injected_claude_host_auth_env_var = false;
     if let Some(creds) = read_claude_oauth_credentials_full() {
         write_env_file_entry(
             &mut env_file,
-            "CLAUDE_CODE_OAUTH_TOKEN",
+            CLAUDE_CODE_OAUTH_TOKEN_ENV,
             &creds.access_token,
         )?;
-        write_env_file_entry(&mut env_file, "CLAUDE_CODE_OAUTH_SCOPES", &creds.scopes)?;
+        injected_claude_oauth_token = true;
+        write_env_file_entry(&mut env_file, CLAUDE_CODE_OAUTH_SCOPES_ENV, &creds.scopes)?;
+        injected_claude_oauth_scopes = true;
         write_env_file_entry(
             &mut env_file,
-            "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
-            "CLAUDE_CODE_OAUTH_TOKEN",
+            CLAUDE_CODE_HOST_AUTH_ENV_VAR_ENV,
+            CLAUDE_CODE_OAUTH_TOKEN_ENV,
         )?;
+        injected_claude_host_auth_env_var = true;
+    }
+
+    // If the OAuth token is supplied by normal env passthrough instead of the
+    // macOS Keychain path above, Claude still needs the host-auth marker for
+    // interactive container sessions. Supply the minimum scope for setup-token
+    // tokens unless the user already provided explicit scopes.
+    let host_env = |name: &str| std::env::var(name).ok();
+    let claude_oauth_token_available = injected_claude_oauth_token
+        || has_nonempty_env_source(
+            CLAUDE_CODE_OAUTH_TOKEN_ENV,
+            &ctr.env,
+            extra_env,
+            &ctr.env_passthrough,
+            &host_env,
+        );
+    if claude_oauth_token_available {
+        if !injected_claude_host_auth_env_var
+            && !has_nonempty_env_source(
+                CLAUDE_CODE_HOST_AUTH_ENV_VAR_ENV,
+                &ctr.env,
+                extra_env,
+                &ctr.env_passthrough,
+                &host_env,
+            )
+        {
+            write_env_file_entry(
+                &mut env_file,
+                CLAUDE_CODE_HOST_AUTH_ENV_VAR_ENV,
+                CLAUDE_CODE_OAUTH_TOKEN_ENV,
+            )?;
+        }
+        if !injected_claude_oauth_scopes
+            && !has_nonempty_env_source(
+                CLAUDE_CODE_OAUTH_SCOPES_ENV,
+                &ctr.env,
+                extra_env,
+                &ctr.env_passthrough,
+                &host_env,
+            )
+        {
+            write_env_file_entry(
+                &mut env_file,
+                CLAUDE_CODE_OAUTH_SCOPES_ENV,
+                CLAUDE_CODE_DEFAULT_OAUTH_SCOPES,
+            )?;
+        }
     }
 
     docker_args.push("--env-file".to_string());
@@ -276,8 +336,11 @@ pub fn spawn(
     let mut sorted_mounts: Vec<&crate::config::ContainerMount> = ctr.mounts.iter().collect();
     sorted_mounts.sort_by_key(|m| m.container.components().count());
     let mut seed_tempfiles: Vec<NamedTempFile> = Vec::new();
+    let has_top_level_claude_config_mount = sorted_mounts
+        .iter()
+        .any(|mount| mount.container == Path::new(CLAUDE_CONFIG_CONTAINER_PATH));
     for mount in &sorted_mounts {
-        let host_arg = match seed_private_mount(mount)? {
+        let host_arg = match seed_private_mount(mount, claude_oauth_token_available)? {
             Some(tempfile) => {
                 let path = tempfile.path().display().to_string();
                 seed_tempfiles.push(tempfile);
@@ -296,6 +359,15 @@ pub fn spawn(
             container_arg,
             mount_mode_arg(&mount.mode),
         ));
+    }
+    if claude_oauth_token_available && !has_top_level_claude_config_mount {
+        let tempfile = seed_claude_oauth_onboarding_config()?;
+        let host_arg = tempfile.path().display().to_string();
+        seed_tempfiles.push(tempfile);
+        validate_bind_path(&host_arg, "mount.host")?;
+        validate_bind_path(CLAUDE_CONFIG_CONTAINER_PATH, "mount.container")?;
+        docker_args.push("-v".to_string());
+        docker_args.push(format!("{}:{}:rw", host_arg, CLAUDE_CONFIG_CONTAINER_PATH));
     }
 
     for name in &ctr.env_passthrough {
@@ -351,12 +423,14 @@ pub fn spawn(
 
     let exited = Arc::new(AtomicBool::new(false));
     let has_bell = Arc::new(AtomicBool::new(false));
+    let bell_count = Arc::new(AtomicU64::new(0));
 
     let proxy = SessionEventProxy {
         sender: Arc::new(Mutex::new(None)),
         window_size: Arc::clone(&window_size_arc),
         exited: Arc::clone(&exited),
         has_bell: Arc::clone(&has_bell),
+        bell_count: Arc::clone(&bell_count),
         default_fg,
         default_bg,
         grayscale_palette: ctr.grayscale_palette,
@@ -413,6 +487,7 @@ pub fn spawn(
             window_size: window_size_arc,
             exited,
             has_bell,
+            bell_count,
             exit_reported: false,
             _scoped_proxy: scoped_proxy,
             _seed_tempfiles: seed_tempfiles,
@@ -599,6 +674,21 @@ fn should_inject_coder_home(mounts: &[crate::config::ContainerMount]) -> bool {
         .any(|mount| mount.container.starts_with(CODER_HOME))
 }
 
+fn has_nonempty_env_source(
+    name: &str,
+    ctr_env: &HashMap<String, String>,
+    extra_env: &[(String, String)],
+    env_passthrough: &[String],
+    host_env: &dyn Fn(&str) -> Option<String>,
+) -> bool {
+    ctr_env.get(name).is_some_and(|value| !value.is_empty())
+        || extra_env
+            .iter()
+            .any(|(key, value)| key == name && !value.is_empty())
+        || (env_passthrough.iter().any(|entry| entry == name)
+            && host_env(name).is_some_and(|value| !value.is_empty()))
+}
+
 /// If `mount` is configured for seeding and the host path is a regular file,
 /// copy its current contents into a fresh tempfile and return it; the caller
 /// bind-mounts that copy instead of the host's live file and keeps the handle
@@ -611,23 +701,60 @@ fn should_inject_coder_home(mounts: &[crate::config::ContainerMount]) -> bool {
 /// from the system Keychain so that Claude Code can authenticate inside the
 /// Linux container (which has no Keychain access).
 ///
+/// When OAuth token auth is available, a missing seeded `.claude.json` host
+/// file is replaced with a private minimal config so interactive Claude skips
+/// the login-method onboarding screen while still using the env token.
+///
 /// Returns `None` (mount the host path as-is) when the mount isn't flagged for
-/// seeding or the host path is not a regular file — bind-mounting a missing
-/// path would make Docker materialize a directory, and a directory can't be
-/// copied into a single tempfile, so we leave that pre-existing behavior alone.
-fn seed_private_mount(mount: &crate::config::ContainerMount) -> Result<Option<NamedTempFile>> {
-    if !mount.is_seeded() || !mount.host.is_file() {
+/// seeding or the host path is not a regular file and no private Claude config
+/// can be safely synthesized.
+fn seed_private_mount(
+    mount: &crate::config::ContainerMount,
+    claude_oauth_token_available: bool,
+) -> Result<Option<NamedTempFile>> {
+    let is_claude_config =
+        mount.container.file_name() == Some(std::ffi::OsStr::new(".claude.json"));
+    let is_claude_credentials =
+        mount.container.file_name() == Some(std::ffi::OsStr::new(".credentials.json"));
+
+    // When CLAUDE_CODE_OAUTH_TOKEN provides launch auth, the host's stored
+    // .credentials.json holds a subscription OAuth access token that interactive
+    // Claude prefers over the env token whenever an `oauthAccount` is present in
+    // .claude.json (which the seeded config keeps). That stored token is usually
+    // stale/expired, and its refresh token can't be rotated back to the host, so
+    // the TUI's refresh attempt 401s ("Please run /login") even though `claude
+    // -p` works from the env token. Seed an empty credentials file so the TUI
+    // falls back to the env token. (Without an env token we leave the host's
+    // credentials in place so a normally logged-in user still authenticates.)
+    let force_empty_credentials = is_claude_credentials && claude_oauth_token_available;
+
+    if !mount.is_seeded()
+        && !(is_claude_config && claude_oauth_token_available)
+        && !force_empty_credentials
+    {
         return Ok(None);
     }
-    let contents = std::fs::read(&mount.host)
-        .with_context(|| format!("reading {} to seed container copy", mount.host.display()))?;
+
+    let contents = if force_empty_credentials {
+        b"{}".to_vec()
+    } else if mount.host.is_file() {
+        std::fs::read(&mount.host)
+            .with_context(|| format!("reading {} to seed container copy", mount.host.display()))?
+    } else if is_claude_config && claude_oauth_token_available {
+        b"{}".to_vec()
+    } else {
+        return Ok(None);
+    };
 
     // For .claude.json, merge in macOS Keychain credentials so Claude can
     // authenticate inside the Linux container.
-    let is_claude_config =
-        mount.container.file_name() == Some(std::ffi::OsStr::new(".claude.json"));
     let contents = if is_claude_config {
-        inject_keychain_credentials(contents)?
+        let contents = inject_keychain_credentials(contents)?;
+        if claude_oauth_token_available {
+            ensure_claude_interactive_onboarding(contents)?
+        } else {
+            contents
+        }
     } else {
         contents
     };
@@ -643,6 +770,42 @@ fn seed_private_mount(mount: &crate::config::ContainerMount) -> Result<Option<Na
         .flush()
         .with_context(|| format!("flushing private copy of {}", mount.host.display()))?;
     Ok(Some(tempfile))
+}
+
+fn seed_claude_oauth_onboarding_config() -> Result<NamedTempFile> {
+    let contents = ensure_claude_interactive_onboarding(b"{}".to_vec())?;
+    let mut tempfile = tempfile::Builder::new()
+        .prefix("harness-hat-claude-config-")
+        .suffix(".claude.json")
+        .tempfile()
+        .context("creating private Claude onboarding config")?;
+    tempfile
+        .write_all(&contents)
+        .context("writing private Claude onboarding config")?;
+    tempfile
+        .flush()
+        .context("flushing private Claude onboarding config")?;
+    Ok(tempfile)
+}
+
+fn ensure_claude_interactive_onboarding(contents: Vec<u8>) -> Result<Vec<u8>> {
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&contents).unwrap_or_else(|_| serde_json::json!({}));
+    if !config.is_object() {
+        config = serde_json::json!({});
+    }
+    if let Some(obj) = config.as_object_mut() {
+        // When CLAUDE_CODE_OAUTH_TOKEN is the launch auth source, stale
+        // claudeAiOauth access tokens in the copied host config can take
+        // precedence in interactive Claude and produce 401s even though
+        // `claude -p` works from the env token.
+        obj.remove("claudeAiOauth");
+        obj.insert(
+            "hasCompletedOnboarding".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+    serde_json::to_vec(&config).context("serializing Claude onboarding config")
 }
 
 /// Reads the Claude Code OAuth credentials from the macOS Keychain and merges
@@ -733,10 +896,12 @@ fn read_claude_oauth_credentials_full() -> Option<ClaudeOAuthCredentials> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_localhost_forwards,
-        proxy_addr_without_auth, seed_private_mount, should_inject_coder_home,
+        ensure_claude_interactive_onboarding, format_localhost_forwards, has_nonempty_env_source,
+        proxy_addr_without_auth, seed_claude_oauth_onboarding_config, seed_private_mount,
+        should_inject_coder_home,
     };
     use crate::config::{ContainerMount, LocalhostForward, MountMode};
+    use std::collections::HashMap;
     use std::io::Write as _;
     use std::path::PathBuf;
 
@@ -787,7 +952,7 @@ mod tests {
             None,
         );
         assert!(
-            seed_private_mount(&not_seeded)
+            seed_private_mount(&not_seeded, false)
                 .expect("seed non-config")
                 .is_none()
         );
@@ -807,7 +972,7 @@ mod tests {
             "/home/coder/.claude.json",
             None,
         );
-        let seeded = seed_private_mount(&config)
+        let seeded = seed_private_mount(&config, false)
             .expect("seed config")
             .expect("config file should be privatized");
         assert_ne!(seeded.path(), source.path());
@@ -819,25 +984,191 @@ mod tests {
             "source fields must be preserved in seeded copy"
         );
 
-        // `seed = false` forces the shared live bind mount even for `.claude.json`.
+        // `seed = false` forces the shared live bind mount when no OAuth token
+        // auth is involved.
         let shared = mount(
             source.path().to_str().unwrap(),
             "/home/coder/.claude.json",
             Some(false),
         );
         assert!(
-            seed_private_mount(&shared)
+            seed_private_mount(&shared, false)
                 .expect("seed disabled")
                 .is_none()
         );
 
-        // A missing host file is left as-is (don't let Docker create a dir).
+        // A missing host file is left as-is when no OAuth token is available.
         let missing = mount("/no/such/.claude.json", "/home/coder/.claude.json", None);
         assert!(
-            seed_private_mount(&missing)
+            seed_private_mount(&missing, false)
                 .expect("seed missing")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn claude_oauth_seed_marks_interactive_onboarding_complete() {
+        let mut source = tempfile::Builder::new()
+            .suffix(".claude.json")
+            .tempfile()
+            .expect("create temp source");
+        source
+            .write_all(br#"{"numStartups": 7, "claudeAiOauth": {"accessToken": "stale-token"}}"#)
+            .expect("write source");
+        source.flush().expect("flush source");
+        let config = mount(
+            source.path().to_str().unwrap(),
+            "/home/coder/.claude.json",
+            None,
+        );
+
+        let seeded = seed_private_mount(&config, true)
+            .expect("seed config")
+            .expect("config file should be privatized");
+        let seeded_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(seeded.path()).expect("read seeded"))
+                .expect("seeded file is valid JSON");
+
+        assert_eq!(seeded_json["numStartups"], 7);
+        assert_eq!(seeded_json["hasCompletedOnboarding"], true);
+        assert!(seeded_json.get("claudeAiOauth").is_none());
+    }
+
+    #[test]
+    fn claude_oauth_forces_private_onboarding_copy_even_when_seed_is_false() {
+        let mut source = tempfile::Builder::new()
+            .suffix(".claude.json")
+            .tempfile()
+            .expect("create temp source");
+        source
+            .write_all(br#"{"numStartups": 9}"#)
+            .expect("write source");
+        source.flush().expect("flush source");
+        let shared = mount(
+            source.path().to_str().unwrap(),
+            "/home/coder/.claude.json",
+            Some(false),
+        );
+
+        let seeded = seed_private_mount(&shared, true)
+            .expect("seed config")
+            .expect("OAuth token auth should force a private Claude config");
+        let seeded_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(seeded.path()).expect("read seeded"))
+                .expect("seeded file is valid JSON");
+
+        assert_eq!(seeded_json["numStartups"], 9);
+        assert_eq!(seeded_json["hasCompletedOnboarding"], true);
+    }
+
+    #[test]
+    fn missing_claude_config_is_synthesized_for_oauth_token_auth() {
+        let missing = mount("/no/such/.claude.json", "/home/coder/.claude.json", None);
+
+        let seeded = seed_private_mount(&missing, true)
+            .expect("seed missing config")
+            .expect("missing Claude config should be synthesized");
+        let seeded_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(seeded.path()).expect("read seeded"))
+                .expect("seeded file is valid JSON");
+
+        assert_eq!(seeded_json["hasCompletedOnboarding"], true);
+    }
+
+    #[test]
+    fn claude_credentials_seeded_empty_when_oauth_token_auth_active() {
+        let mut source = tempfile::Builder::new()
+            .suffix(".credentials.json")
+            .tempfile()
+            .expect("create temp source");
+        source
+            .write_all(br#"{"claudeAiOauth":{"accessToken":"stale-and-expired"}}"#)
+            .expect("write source");
+        source.flush().expect("flush source");
+        let shared = mount(
+            source.path().to_str().unwrap(),
+            "/home/coder/.claude/.credentials.json",
+            None,
+        );
+
+        let seeded = seed_private_mount(&shared, true)
+            .expect("seed credentials")
+            .expect("OAuth token auth should shadow the host credentials file");
+        let seeded_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(seeded.path()).expect("read seeded"))
+                .expect("seeded file is valid JSON");
+
+        // Host's stale token must not leak through; the TUI then falls back to
+        // the CLAUDE_CODE_OAUTH_TOKEN env var (matching `claude -p`).
+        assert_eq!(seeded_json, serde_json::json!({}));
+    }
+
+    #[test]
+    fn claude_credentials_left_intact_without_oauth_token_auth() {
+        let mut source = tempfile::Builder::new()
+            .suffix(".credentials.json")
+            .tempfile()
+            .expect("create temp source");
+        source
+            .write_all(br#"{"claudeAiOauth":{"accessToken":"real"}}"#)
+            .expect("write source");
+        source.flush().expect("flush source");
+        let shared = mount(
+            source.path().to_str().unwrap(),
+            "/home/coder/.claude/.credentials.json",
+            None,
+        );
+
+        // No env token: a normally logged-in user keeps their host credentials,
+        // so the unseeded mount is passed through as-is.
+        assert!(
+            seed_private_mount(&shared, false)
+                .expect("seed credentials")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn standalone_claude_onboarding_seed_contains_minimal_config() {
+        let seeded = seed_claude_oauth_onboarding_config().expect("seed onboarding config");
+        let seeded_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(seeded.path()).expect("read seeded"))
+                .expect("seeded file is valid JSON");
+
+        assert_eq!(
+            seeded_json,
+            serde_json::json!({"hasCompletedOnboarding": true})
+        );
+    }
+
+    #[test]
+    fn onboarding_patch_strips_stale_claude_oauth_tokens() {
+        let patched = ensure_claude_interactive_onboarding(
+            br#"{"claudeAiOauth":{"accessToken":"stale"},"oauthAccount":{"emailAddress":"a@b.c"}}"#
+                .to_vec(),
+        )
+        .expect("patch onboarding");
+        let patched_json: serde_json::Value =
+            serde_json::from_slice(&patched).expect("patched file is valid JSON");
+
+        assert_eq!(patched_json["hasCompletedOnboarding"], true);
+        assert_eq!(patched_json["oauthAccount"]["emailAddress"], "a@b.c");
+        assert!(patched_json.get("claudeAiOauth").is_none());
+    }
+
+    #[test]
+    fn onboarding_patch_recovers_from_invalid_or_non_object_json() {
+        for input in [b"not json".as_slice(), b"[]".as_slice()] {
+            let patched =
+                ensure_claude_interactive_onboarding(input.to_vec()).expect("patch onboarding");
+            let patched_json: serde_json::Value =
+                serde_json::from_slice(&patched).expect("patched file is valid JSON");
+
+            assert_eq!(
+                patched_json,
+                serde_json::json!({"hasCompletedOnboarding": true})
+            );
+        }
     }
 
     #[test]
@@ -896,5 +1227,59 @@ mod tests {
             "/workspace/cache",
             None
         )]));
+    }
+
+    #[test]
+    fn env_source_detection_includes_host_passthrough_only_when_set() {
+        let mut ctr_env = HashMap::new();
+        let extra_env = vec![("EXTRA_TOKEN".to_string(), "extra".to_string())];
+        let passthrough = vec![
+            "HOST_TOKEN".to_string(),
+            "MISSING_TOKEN".to_string(),
+            "EMPTY_TOKEN".to_string(),
+        ];
+        let host_env = |name: &str| match name {
+            "HOST_TOKEN" => Some("host".to_string()),
+            "EMPTY_TOKEN" => Some(String::new()),
+            _ => None,
+        };
+
+        assert!(has_nonempty_env_source(
+            "EXTRA_TOKEN",
+            &ctr_env,
+            &extra_env,
+            &passthrough,
+            &host_env,
+        ));
+        assert!(has_nonempty_env_source(
+            "HOST_TOKEN",
+            &ctr_env,
+            &extra_env,
+            &passthrough,
+            &host_env,
+        ));
+        assert!(!has_nonempty_env_source(
+            "MISSING_TOKEN",
+            &ctr_env,
+            &extra_env,
+            &passthrough,
+            &host_env,
+        ));
+        assert!(!has_nonempty_env_source(
+            "EMPTY_TOKEN",
+            &ctr_env,
+            &extra_env,
+            &passthrough,
+            &host_env,
+        ));
+
+        ctr_env.insert("CONFIG_TOKEN".to_string(), "config".to_string());
+        assert!(has_nonempty_env_source(
+            "CONFIG_TOKEN",
+            &ctr_env,
+            &extra_env,
+            &passthrough,
+            &host_env,
+        ));
     }
 }

@@ -20,6 +20,7 @@ impl App {
                 self.cancel_docker_build();
                 return;
             }
+            self.should_quit = true;
             return;
         }
 

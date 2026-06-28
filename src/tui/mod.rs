@@ -435,6 +435,7 @@ async fn event_loop(
     let tick = tokio::time::Duration::from_millis(50);
     let mut mouse_capture_enabled = false;
     let mut approval_bell_rung = false;
+    let mut session_bell_counts = Vec::new();
     crate::notifications::init();
 
     loop {
@@ -455,6 +456,7 @@ async fn event_loop(
         } else if !modal_visible {
             approval_bell_rung = false;
         }
+        ring_new_session_bells(terminal.backend_mut(), app, &mut session_bell_counts)?;
         terminal.draw(|frame| render::render(frame, app))?;
 
         if app.should_quit {
@@ -501,6 +503,32 @@ async fn event_loop(
 fn ring_terminal_bell<W: std::io::Write>(writer: &mut W) -> std::io::Result<()> {
     writer.write_all(b"\x07")?;
     writer.flush()
+}
+
+fn ring_new_session_bells<W: std::io::Write>(
+    writer: &mut W,
+    app: &App,
+    last_seen: &mut Vec<u64>,
+) -> std::io::Result<()> {
+    if last_seen.len() < app.sessions.len() {
+        last_seen.resize(app.sessions.len(), 0);
+    } else if last_seen.len() > app.sessions.len() {
+        last_seen.truncate(app.sessions.len());
+    }
+
+    let mut has_new_bell = false;
+    for (idx, session) in app.sessions.iter().enumerate() {
+        let current = session.bell_count();
+        if current > last_seen[idx] {
+            has_new_bell = true;
+        }
+        last_seen[idx] = current;
+    }
+
+    if has_new_bell {
+        ring_terminal_bell(writer)?;
+    }
+    Ok(())
 }
 
 fn should_enable_mouse_capture(app: &App) -> bool {

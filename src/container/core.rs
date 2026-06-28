@@ -12,7 +12,7 @@ use alacritty_terminal::term::Term;
 /// real-time by a background reader thread.
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Duration;
 use std::time::Instant;
@@ -78,6 +78,7 @@ pub struct ContainerSession {
     pub(crate) window_size: Arc<Mutex<WindowSize>>,
     pub exited: Arc<AtomicBool>,
     pub has_bell: Arc<AtomicBool>,
+    pub bell_count: Arc<AtomicU64>,
     pub exit_reported: bool,
     pub(crate) _scoped_proxy: Option<crate::proxy::ScopedProxyListener>,
     /// Private per-session copies of seeded mounts (e.g. `.claude.json`), kept
@@ -96,6 +97,7 @@ pub struct SessionEventProxy {
     pub(crate) window_size: Arc<Mutex<WindowSize>>,
     pub(crate) exited: Arc<AtomicBool>,
     pub(crate) has_bell: Arc<AtomicBool>,
+    pub(crate) bell_count: Arc<AtomicU64>,
     pub(crate) default_fg: alacritty_terminal::vte::ansi::Rgb,
     pub(crate) default_bg: alacritty_terminal::vte::ansi::Rgb,
     pub(crate) grayscale_palette: bool,
@@ -107,6 +109,7 @@ impl EventListener for SessionEventProxy {
         match event {
             Event::Bell => {
                 self.has_bell.store(true, Ordering::Relaxed);
+                self.bell_count.fetch_add(1, Ordering::Relaxed);
             }
             Event::Exit | Event::ChildExit(_) => {
                 self.exited.store(true, Ordering::Relaxed);
@@ -200,6 +203,10 @@ impl ContainerSession {
     /// Checks if the terminal has received a bell event.
     pub fn has_bell(&self) -> bool {
         self.has_bell.load(Ordering::Relaxed)
+    }
+    /// Monotonic count of terminal bell events emitted by this session.
+    pub fn bell_count(&self) -> u64 {
+        self.bell_count.load(Ordering::Relaxed)
     }
     /// Resets the bell status for the terminal.
     pub fn clear_bell(&self) {
@@ -490,7 +497,7 @@ mod tests {
     use alacritty_terminal::vte::ansi::Rgb;
     use std::sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     };
 
     #[test]
@@ -554,19 +561,23 @@ mod tests {
     #[test]
     fn session_event_proxy_sets_bell_only_on_terminal_bell_event() {
         let has_bell = Arc::new(AtomicBool::new(false));
+        let bell_count = Arc::new(AtomicU64::new(0));
         let proxy = super::SessionEventProxy {
             sender: Arc::new(Mutex::new(None)),
             window_size: Arc::new(Mutex::new(super::window_size(24, 80))),
             exited: Arc::new(AtomicBool::new(false)),
             has_bell: has_bell.clone(),
+            bell_count: bell_count.clone(),
             default_fg: Rgb { r: 0, g: 0, b: 0 },
             default_bg: Rgb { r: 0, g: 0, b: 0 },
             grayscale_palette: false,
         };
 
         assert!(!has_bell.load(Ordering::Relaxed));
+        assert_eq!(bell_count.load(Ordering::Relaxed), 0);
         proxy.send_event(Event::Bell);
         assert!(has_bell.load(Ordering::Relaxed));
+        assert_eq!(bell_count.load(Ordering::Relaxed), 1);
     }
 
     #[derive(Clone)]

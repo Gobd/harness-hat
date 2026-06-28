@@ -90,6 +90,20 @@ container = "/home/coder/.claude/.claude.json"
 mode = "rw"
 seed = true
 
+# The full `~/.claude` mount below shares the host's `.credentials.json`, which
+# holds the subscription OAuth access/refresh token. When the container is
+# launched with a CLAUDE_CODE_OAUTH_TOKEN (the default), interactive Claude
+# prefers that stored token over the env var, but it's usually expired and its
+# refresh token can't be rotated back to the host, so the TUI 401s ("Please run
+# /login") even though `claude -p` works. Seeding shadows it with an empty file
+# so the TUI falls back to the env token. (harness-hat empties seeded
+# `.credentials.json` whenever env-token auth is active.)
+[[defaults.containers.mounts]]
+host = "~/.claude/.credentials.json"
+container = "/home/coder/.claude/.credentials.json"
+mode = "rw"
+seed = true
+
 [[defaults.containers.mounts]]
 host = "~/.claude"
 container = "/home/coder/.claude"
