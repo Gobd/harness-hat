@@ -513,12 +513,23 @@ RUN set -eu; \
     test -x /usr/local/bin/antigravity; \
     test -x /usr/local/bin/agy
 
-# Claude Code: install the native standalone binary from Anthropic's signed apt
-# repository rather than npm. This lands a system-wide /usr/bin/claude (on PATH
-# for every user and the gosu-exec'd entrypoint), is GPG-verified, and does not
-# run the background auto-updater, so the image stays deterministic — bump the
-# version by rebuilding. Swap `stable` for `latest` (in both the URL and the
-# suite) to track the rolling channel.
+# jq — required by the default Claude Code statusLine script
+# (~/.claude/statusline-command.sh parses the status JSON via jq) and broadly
+# useful for in-container tooling.
+RUN apt-get update -o APT::Update::Error-Mode=any \
+    && apt-get install -y --no-install-recommends jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Claude Code — TWO coexisting builds, so a session runs the newest model by
+# default but can fall back if a `latest` release regresses:
+#   * `claude-stable` → the `stable` apt build (GPG-verified, ~1 week delayed).
+#     Installed here as root at /usr/bin/claude and exposed as
+#     /usr/local/bin/claude-stable.
+#   * `claude` (default) → the `latest` build, installed via the native
+#     installer in the `USER coder` section below into ~/.local/bin; the ENV
+#     PATH there puts ~/.local/bin first so bare `claude` is always latest.
+# Both are pinned at build time (DISABLE_AUTOUPDATER=1 + strict-network egress);
+# bump either by rebuilding the image.
 RUN set -eu; \
     install -d -m 0755 /etc/apt/keyrings; \
     curl -fsSL https://downloads.claude.ai/keys/claude-code.asc \
@@ -527,7 +538,9 @@ RUN set -eu; \
       > /etc/apt/sources.list.d/claude-code.list; \
     apt-get update -o APT::Update::Error-Mode=any \
     && apt-get install -y --no-install-recommends claude-code \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/claude /usr/local/bin/claude-stable
+ENV DISABLE_AUTOUPDATER=1
 
 # Coder-compatible user at uid/gid 1000.
 USER coder
@@ -541,6 +554,15 @@ RUN mkdir -p /home/coder/.local/bin \
     && chmod 755 /home/coder/.local/bin/claude-yolo \
                  /home/coder/.local/bin/codex-yolo \
                  /home/coder/.local/bin/agy-yolo
+
+# Latest Claude Code via the native installer → ~/.local/bin/claude (a symlink
+# into ~/.local/share/claude/versions/<ver>). Neither ~/.local/bin nor
+# ~/.local/share is bind-mounted at runtime, so this baked-in build persists.
+RUN curl -fsSL https://claude.ai/install.sh | bash -s latest \
+    && /home/coder/.local/bin/claude --version
+# Put ~/.local/bin first for EVERY shell (login or not), so bare `claude`
+# resolves to the latest build above rather than the stable /usr/bin/claude.
+ENV PATH="/home/coder/.local/bin:${PATH}"
 WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/harness-hat-init.sh"]
