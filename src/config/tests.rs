@@ -126,6 +126,16 @@ image = "default"
     assert_eq!(template.cpus.as_deref(), Some("1.5"));
     assert_eq!(template.shm_size.as_deref(), Some("512m"));
     let home = root.path();
+    // The keyring mount host is `dirs::data_dir()` joined under the (temp) home,
+    // matching `shared_container_keyring_mount`. This resolves differently per
+    // platform (`~/.local/share` on Linux via XDG, `~/Library/Application
+    // Support` on macOS), so derive it the same way the code does rather than
+    // hardcoding a Linux path.
+    let keyring_host = with_temp_home(home, || {
+        dirs::data_dir()
+            .expect("data dir")
+            .join("harness-hat/container-keyrings")
+    });
     let expected_session_mounts = [
         (home.join(".claude.json"), "/home/coder/.claude.json"),
         (
@@ -137,10 +147,7 @@ image = "default"
         (home.join(".config/codex"), "/home/coder/.config/codex"),
         (home.join(".gemini"), "/home/coder/.gemini"),
         (home.join(".pi"), "/home/coder/.pi"),
-        (
-            home.join(".local/share/harness-hat/container-keyrings"),
-            "/home/coder/.local/share/keyrings",
-        ),
+        (keyring_host.clone(), "/home/coder/.local/share/keyrings"),
     ];
     for (host, container) in &expected_session_mounts {
         assert!(
@@ -322,4 +329,90 @@ fn empty_config_default_is_valid_structurally() {
     let cfg = Config::default();
     assert!(cfg.containers.is_empty());
     assert!(cfg.workspaces.is_empty());
+}
+
+#[test]
+fn merge_mounts_collapses_duplicate_container_destinations() {
+    use crate::config::{ContainerMount, MountMode};
+    use std::path::PathBuf;
+
+    // Docker rejects two mounts that share a container destination with
+    // "Duplicate mount point", which aborts the whole `docker run` before any
+    // container is created. This is exactly what happens on macOS when a
+    // config-defined keyring mount (host `~/.local/share/...`) collides with
+    // the code-injected one (`dirs::data_dir()` = `~/Library/Application
+    // Support/...`): same container path, different hosts. `merge_mounts` must
+    // collapse them to a single mount, with the later (session-state/code)
+    // layer winning.
+    let dest = PathBuf::from("/home/coder/.local/share/keyrings");
+    let config_mount = ContainerMount {
+        host: PathBuf::from("/Users/me/.local/share/harness-hat/container-keyrings"),
+        container: dest.clone(),
+        mode: MountMode::Rw,
+        seed: None,
+    };
+    let code_mount = ContainerMount {
+        host: PathBuf::from("/Users/me/Library/Application Support/harness-hat/container-keyrings"),
+        container: dest.clone(),
+        mode: MountMode::Rw,
+        seed: None,
+    };
+
+    let merged = super::merge_mounts(
+        std::slice::from_ref(&config_mount),
+        std::slice::from_ref(&code_mount),
+        &[],
+    );
+
+    let at_dest: Vec<_> = merged.iter().filter(|m| m.container == dest).collect();
+    assert_eq!(
+        at_dest.len(),
+        1,
+        "duplicate container destination must collapse to a single mount, got {at_dest:?}"
+    );
+    assert_eq!(
+        at_dest[0].host, code_mount.host,
+        "later layer (session-state/code mount) must win the destination"
+    );
+
+    // General invariant: no two resulting mounts may share a container path.
+    let mut dests: Vec<&PathBuf> = merged.iter().map(|m| &m.container).collect();
+    dests.sort();
+    let unique = dests.len();
+    dests.dedup();
+    assert_eq!(unique, dests.len(), "merge_mounts must not emit duplicate container destinations");
+}
+
+#[test]
+fn merge_mounts_lets_later_layers_override_same_destination() {
+    use crate::config::{ContainerMount, MountMode};
+    use std::path::PathBuf;
+
+    // A per-profile override mount for a destination already provided by the
+    // defaults layer should replace it, not stack a second mount on the same
+    // container path.
+    let dest = PathBuf::from("/home/coder/.config/tool");
+    let base = ContainerMount {
+        host: PathBuf::from("/host/base/tool"),
+        container: dest.clone(),
+        mode: MountMode::Ro,
+        seed: None,
+    };
+    let override_mount = ContainerMount {
+        host: PathBuf::from("/host/override/tool"),
+        container: dest.clone(),
+        mode: MountMode::Rw,
+        seed: None,
+    };
+
+    let merged = super::merge_mounts(
+        std::slice::from_ref(&base),
+        &[],
+        std::slice::from_ref(&override_mount),
+    );
+
+    let at_dest: Vec<_> = merged.iter().filter(|m| m.container == dest).collect();
+    assert_eq!(at_dest.len(), 1, "override must replace, not duplicate");
+    assert_eq!(at_dest[0].host, override_mount.host);
+    assert_eq!(at_dest[0].mode, MountMode::Rw);
 }
