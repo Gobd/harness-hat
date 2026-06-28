@@ -122,14 +122,12 @@ mode = "rw"
 [[defaults.containers.mounts]]
 # Antigravity CLI uses ~/.gemini/antigravity-cli for settings/history. Login
 # tokens live in the OS keyring, so the base image starts a Linux Secret Service
-# and persists it through the dedicated keyrings mount below.
+# and persists it through a dedicated keyrings mount. harness-hat injects that
+# keyrings mount automatically (host: <user data dir>/harness-hat/container-keyrings
+# -> /home/coder/.local/share/keyrings) - do not add it here, or the duplicate
+# container destination will fail `docker run` with "Duplicate mount point".
 host = "~/.gemini"
 container = "/home/coder/.gemini"
-mode = "rw"
-
-[[defaults.containers.mounts]]
-host = "~/.local/share/harness-hat/container-keyrings"
-container = "/home/coder/.local/share/keyrings"
 mode = "rw"
 
 [[defaults.containers.mounts]]

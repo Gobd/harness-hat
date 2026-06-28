@@ -340,25 +340,20 @@ pub fn spawn(
         .iter()
         .any(|mount| mount.container == Path::new(CLAUDE_CONFIG_CONTAINER_PATH));
     for mount in &sorted_mounts {
-        let host_arg = match seed_private_mount(mount, claude_oauth_token_available)? {
-            Some(tempfile) => {
-                let path = tempfile.path().display().to_string();
-                seed_tempfiles.push(tempfile);
-                path
-            }
+        let seeded = seed_private_mount(mount, claude_oauth_token_available)?;
+        let host_arg = match &seeded {
+            Some(tempfile) => tempfile.path().display().to_string(),
             None => mount.host.display().to_string(),
         };
         let container_arg = mount.container.display().to_string();
         // Same `-v`-injection guard as the primary workspace bind above.
         validate_bind_path(&host_arg, "mount.host")?;
         validate_bind_path(&container_arg, "mount.container")?;
-        docker_args.push("-v".to_string());
-        docker_args.push(format!(
-            "{}:{}:{}",
-            host_arg,
-            container_arg,
-            mount_mode_arg(&mount.mode),
-        ));
+        docker_args.extend(mount_bind_args(&host_arg, mount, seeded.is_some()));
+
+        if let Some(tempfile) = seeded {
+            seed_tempfiles.push(tempfile);
+        }
     }
     if claude_oauth_token_available && !has_top_level_claude_config_mount {
         let tempfile = seed_claude_oauth_onboarding_config()?;
@@ -687,6 +682,38 @@ fn has_nonempty_env_source(
             .any(|(key, value)| key == name && !value.is_empty())
         || (env_passthrough.iter().any(|entry| entry == name)
             && host_env(name).is_some_and(|value| !value.is_empty()))
+}
+
+/// Build the `docker run -v` arguments for one configured mount.
+///
+/// Emits the primary `host_arg:container:mode` bind, plus — for NON-SEEDED
+/// mounts whose host path differs from the container path — a "plugin-path
+/// shim": a second bind that re-exposes the host directory at its OWN
+/// host-absolute path (`/Users/<you>/...:/Users/<you>/...`).
+///
+/// Why the shim exists: Claude Code and the other agent CLIs record absolute
+/// host paths in their config metadata (e.g. `installed_plugins.json`'s
+/// `installPath`). In the container `$HOME` is `/home/coder`, so a stored
+/// `/Users/<you>/.claude/plugins/...` doesn't resolve, and every marketplace
+/// plugin — including pgsd and its `/pgsd:*` slash commands — shows
+/// "✘ failed to load". Re-exposing the directory at its host path makes those
+/// stored strings resolve. It adds no new content/egress/auth surface — it is
+/// the same already-mounted directory reachable under a second path.
+///
+/// Seeded mounts keep their private per-session copy and are NOT re-exposed.
+/// `host_arg` is the already-resolved host source (a private tempfile path for
+/// seeded mounts, otherwise `mount.host`). The workspace bind is emitted
+/// elsewhere and never passes through here.
+fn mount_bind_args(host_arg: &str, mount: &crate::config::ContainerMount, seeded: bool) -> Vec<String> {
+    let mode = mount_mode_arg(&mount.mode);
+    let container_arg = mount.container.display().to_string();
+    let mut args = vec!["-v".to_string(), format!("{host_arg}:{container_arg}:{mode}")];
+    if !seeded && mount.host != mount.container {
+        let host_path = mount.host.display().to_string();
+        args.push("-v".to_string());
+        args.push(format!("{host_path}:{host_path}:{mode}"));
+    }
+    args
 }
 
 /// If `mount` is configured for seeding and the host path is a regular file,
@@ -1281,5 +1308,41 @@ mod tests {
             &passthrough,
             &host_env,
         ));
+    }
+
+    #[test]
+    fn mount_bind_args_adds_plugin_path_shim_for_nonseeded_differing_mounts() {
+        let mode = super::mount_mode_arg(&MountMode::Rw);
+
+        // Non-seeded ~/.claude (host != container): primary bind + host-path shim
+        // so stored absolute plugin paths (/Users/me/.claude/plugins/...) resolve.
+        let claude = mount("/Users/me/.claude", "/home/coder/.claude", None);
+        assert_eq!(
+            super::mount_bind_args("/Users/me/.claude", &claude, false),
+            vec![
+                "-v".to_string(),
+                format!("/Users/me/.claude:/home/coder/.claude:{mode}"),
+                "-v".to_string(),
+                format!("/Users/me/.claude:/Users/me/.claude:{mode}"),
+            ],
+        );
+
+        // Seeded mount: primary bind only — the private per-session copy must
+        // NOT be re-exposed at the host path.
+        let seeded = mount("/Users/me/.claude.json", "/home/coder/.claude.json", None);
+        assert_eq!(
+            super::mount_bind_args("/tmp/seed-xyz", &seeded, true),
+            vec![
+                "-v".to_string(),
+                format!("/tmp/seed-xyz:/home/coder/.claude.json:{mode}"),
+            ],
+        );
+
+        // host == container: nothing to shim, it already resolves.
+        let same = mount("/Users/me/.claude", "/Users/me/.claude", None);
+        assert_eq!(
+            super::mount_bind_args("/Users/me/.claude", &same, false).len(),
+            2
+        );
     }
 }
