@@ -8,9 +8,8 @@ use tracing::warn;
 use crate::activity::{Activity, ActivityState, wait_cancelled};
 use crate::config;
 use crate::proxy::helpers::{
-    connection_hop_tokens, extract_host_port,
-    is_hop_by_hop_with_extra, parse_source_from_headers, proxy_authorization_matches_token,
-    strip_scheme_and_host, write_error_any, write_response_any,
+    connection_hop_tokens, extract_host_port, is_hop_by_hop_with_extra, parse_source_from_headers,
+    proxy_authorization_matches_token, strip_scheme_and_host, write_error_any, write_response_any,
 };
 use crate::proxy::{NetworkDecision, PendingNetworkItem, ProxyState, SourceIdentityStatus};
 use crate::rules::NetworkPolicy;
@@ -124,23 +123,20 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
             return Ok(());
         }
     };
-    let policy = if crate::proxy::helpers::is_host_allowed(
-        &cfg,
-        source_container.as_deref(),
-        &host,
-    ) {
-        state.activity_line(&activity.id, format!("host in allowed_hosts list"));
+    // Deny wins over allow: consult the denylist first so an explicit deny rule
+    // cannot be overridden by an `allowed_hosts` entry (H2).
+    let rule_policy = rules.match_network_for_port(&method, &host, &path, Some(port));
+    let policy = if rule_policy == NetworkPolicy::Deny {
+        NetworkPolicy::Deny
+    } else if crate::proxy::helpers::is_host_allowed(&cfg, source_container.as_deref(), &host) {
+        state.activity_line(&activity.id, "host in allowed_hosts list".to_string());
+        NetworkPolicy::Auto
+    } else if state.has_configured_localhost_forward(&host, port) {
+        let note = format!("configured localhost_forward for {host}:{port}");
+        state.activity_line(&activity.id, note);
         NetworkPolicy::Auto
     } else {
-        match rules.match_network_for_port(&method, &host, &path, Some(port)) {
-            NetworkPolicy::Deny => NetworkPolicy::Deny,
-            _policy if state.has_configured_localhost_forward(&host, port) => {
-                let note = format!("configured localhost_forward for {host}:{port}");
-                state.activity_line(&activity.id, note);
-                NetworkPolicy::Auto
-            }
-            policy => policy,
-        }
+        rule_policy
     };
 
     if policy != NetworkPolicy::Deny {

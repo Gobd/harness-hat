@@ -343,6 +343,7 @@ impl App {
                 cwd: Some(cwd.to_string()),
                 timeout_secs,
                 approval_mode,
+                env_allowlist: None,
             });
             changed = true;
         }

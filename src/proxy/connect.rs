@@ -6,13 +6,12 @@ use tracing::{info, warn};
 use crate::activity::{Activity, ActivityState};
 use crate::config;
 use crate::proxy::helpers::{
-    proxy_authorization_matches_token,
-    tunnel_with_activity, write_error_any,
+    proxy_authorization_matches_token, tunnel_with_activity, write_error_any,
 };
 use crate::proxy::http::{
-    connect_head_has_proxy_authorization, finish_blocked_network_activity,
-    network_policy_allows, parse_connect_target,
-    parse_request_line_and_headers, parse_source_from_connect_head, read_request_head_any,
+    connect_head_has_proxy_authorization, finish_blocked_network_activity, network_policy_allows,
+    parse_connect_target, parse_request_line_and_headers, parse_source_from_connect_head,
+    read_request_head_any,
 };
 use crate::proxy::{ProxyState, SourceIdentityStatus};
 use crate::rules::NetworkPolicy;
@@ -99,8 +98,19 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
     let (head, connect_remainder) = read_request_head_any(&mut stream).await?;
     let head_str = std::str::from_utf8(&head).unwrap_or("");
 
-    let (host, port) = parse_connect_target(head_str)
+    let (raw_host, port) = parse_connect_target(head_str)
         .ok_or_else(|| anyhow::anyhow!("malformed CONNECT request"))?;
+    // Canonicalize exactly like the plain-HTTP path (IDNA/punycode folding,
+    // trailing-dot strip, control-char and mixed-script rejection). Without
+    // this, an HTTPS CONNECT could evade an ASCII/punycode denylist entry via a
+    // Unicode homoglyph or trailing-dot form (H1).
+    let host = match crate::proxy::helpers::canonicalize_host(&raw_host) {
+        Ok(h) => h,
+        Err(_) => {
+            write_error_any(&mut stream, 400, "Bad Request").await?;
+            return Ok(());
+        }
+    };
     let (_, _, connect_headers) = parse_request_line_and_headers(head_str)
         .ok_or_else(|| anyhow::anyhow!("malformed CONNECT request"))?;
     let (source_project, source_container, source_status, connect_has_proxy_authorization): (
@@ -172,14 +182,19 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
             return Ok(());
         }
     };
-    let preflight_policy = if crate::proxy::helpers::is_host_allowed(&cfg, source_container.as_deref(), &host) {
+    // Deny wins over allow: consult the denylist first so an explicit deny rule
+    // cannot be overridden by an `allowed_hosts` entry (H2).
+    let rule_policy = rules.match_connect(&host, port);
+    let preflight_policy = if rule_policy == NetworkPolicy::Deny {
+        NetworkPolicy::Deny
+    } else if crate::proxy::helpers::is_host_allowed(&cfg, source_container.as_deref(), &host) {
         info!(
             host = %host,
             "CONNECT request for allowed host"
         );
         NetworkPolicy::Auto
     } else {
-        rules.match_connect(&host, port)
+        rule_policy
     };
     if preflight_policy != NetworkPolicy::Deny {
         if let Err(e) = state.resolve_request_addrs(&host, port).await {

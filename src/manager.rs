@@ -93,11 +93,8 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
         );
     }
     let proxy_addr = format!("{proxy_host}:{proxy_port}");
-    let proxy_state = crate::proxy::ProxyState::new(
-        shared_config.clone(),
-        net_pending_tx,
-        activity_tx,
-    )?;
+    let proxy_state =
+        crate::proxy::ProxyState::new(shared_config.clone(), net_pending_tx, activity_tx)?;
     let proxy_addr_display = proxy_addr.clone();
     let proxy_state_for_server = proxy_state.clone();
     let proxy_handle = tokio::spawn(async move {

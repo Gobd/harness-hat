@@ -76,6 +76,14 @@ pub struct HostdoCommand {
     pub timeout_secs: u64,
     #[serde(default)]
     pub approval_mode: NetworkPolicy,
+    /// When set, the host command runs from a cleared environment containing
+    /// only a small base set (PATH, HOME, ...) plus the variables named here,
+    /// instead of inheriting the manager's full environment (M3). Only valid
+    /// for direct (non-`image`) rules: Docker runners already start from a
+    /// clean container environment, and forwarding host variables into them
+    /// would widen exposure rather than narrow it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_allowlist: Option<Vec<String>>,
 }
 
 fn default_hostdo_timeout_secs() -> u64 {
@@ -91,6 +99,7 @@ impl Default for HostdoCommand {
             cwd: None,
             timeout_secs: default_hostdo_timeout_secs(),
             approval_mode: NetworkPolicy::Prompt,
+            env_allowlist: None,
         }
     }
 }
@@ -151,7 +160,17 @@ impl ComposedRules {
                     .iter()
                     .any(|c| c.argv == cmd.argv && c.image == cmd.image)
                 {
-                    hostdo.push(cmd.clone());
+                    // SECURITY: project (workspace) rule files live inside the
+                    // read-write workspace bind mount, so a process in the
+                    // container can edit them. They must never be able to grant
+                    // passwordless host execution. Downgrade any `auto` from a
+                    // workspace file to `prompt`; only the host-owned global
+                    // rules file may auto-approve. Tightening (`deny`) is kept.
+                    let mut cmd = cmd.clone();
+                    if cmd.approval_mode == NetworkPolicy::Auto {
+                        cmd.approval_mode = NetworkPolicy::Prompt;
+                    }
+                    hostdo.push(cmd);
                 }
             }
             network_allowlist.extend(proj.network.allowlist.clone());
@@ -590,6 +609,22 @@ fn validate_hostdo_rules(entries: &[HostdoCommand], path: &Path) -> Result<()> {
             entry.argv.join(" "),
             path.display()
         );
+        if let Some(allowlist) = &entry.env_allowlist {
+            anyhow::ensure!(
+                entry.image.is_none(),
+                "invalid [hostdo].commands entry '{}' in {}: env_allowlist is not supported on image rules (the runner container already starts with a clean environment)",
+                entry.argv.join(" "),
+                path.display()
+            );
+            for name in allowlist {
+                anyhow::ensure!(
+                    crate::fs_util::is_valid_env_name(name),
+                    "invalid [hostdo].commands entry '{}' in {}: env_allowlist entry {name:?} is not a valid POSIX env variable name",
+                    entry.argv.join(" "),
+                    path.display()
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -633,6 +668,7 @@ pub fn append_hostdo_auto_approval(
             cwd: Some("$WORKSPACE".to_string()),
             timeout_secs,
             approval_mode: NetworkPolicy::Auto,
+            env_allowlist: None,
         });
         changed = true;
     }
@@ -715,6 +751,15 @@ const RULES_FILE_HEADER: &str = "\
 #   approval_mode = \"auto\"
 #
 # $WORKSPACE = workspace path on the host.
+#
+# Environment scrubbing (optional, passthrough commands only):
+#   env_allowlist = [\"CARGO_TERM_COLOR\", \"CI\"]
+# When env_allowlist is present the command runs from a cleared environment
+# containing only a small base set (PATH, HOME, USER, LOGNAME, SHELL, TMPDIR,
+# LANG, LC_ALL, LC_CTYPE, TERM) plus the variables listed, instead of
+# inheriting the manager's full host environment. An empty list grants just
+# the base set. Not supported on image rules — the runner container already
+# starts with a clean environment.
 #
 # Network (HTTP/HTTPS proxy policy)
 #

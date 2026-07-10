@@ -390,12 +390,8 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                 ]))
             }
             SidebarItem::Build(pi) => {
-                let image = sidebar_build_image_for_workspace(
-                    app,
-                    &cfg,
-                    *pi,
-                    app.build_container_idx,
-                );
+                let image =
+                    sidebar_build_image_for_workspace(app, &cfg, *pi, app.build_container_idx);
                 let marker = if app.build_is_running() {
                     loading_spinner_frame()
                 } else {

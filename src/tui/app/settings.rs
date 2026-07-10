@@ -286,18 +286,9 @@ impl App {
                 if pi >= cfg.workspaces.len() {
                     return;
                 }
-                if self.workspace_templates_for_project(pi).is_empty() {
-                    self.push_log(
-                        "no container templates available for this workspace",
-                        true,
-                    );
+                if !self.open_template_picker_for_workspace(pi) {
                     return;
                 }
-                // Skip the workspace step: the workspace is already chosen.
-                self.container_picker = Some(ContainerPickerState::NewSessionTemplate {
-                    workspace_idx: pi,
-                    cursor: 0,
-                });
             }
             _ => return,
         }
@@ -305,17 +296,30 @@ impl App {
         self.focus = Focus::ContainerPicker;
     }
 
-    pub(crate) fn handle_picker_key(&mut self, key: KeyEvent) {
-        let cfg = self.config.get();
-        let mut n = cfg.containers.len();
-        if let Some(ContainerPickerState::NewSessionTemplate { workspace_idx, .. }) =
-            self.container_picker.as_ref()
-        {
-            n = self.workspace_templates_for_project(*workspace_idx).len();
+    fn open_template_picker_for_workspace(&mut self, workspace_idx: usize) -> bool {
+        if workspace_idx >= self.config.get().workspaces.len() {
+            return false;
         }
+
+        let templates = self.workspace_templates_for_project(workspace_idx);
+        if templates.is_empty() {
+            self.push_log("no container templates available for this workspace", true);
+            return false;
+        }
+
+        self.container_picker = Some(ContainerPickerState::NewSessionTemplate {
+            workspace_idx,
+            cursor: 0,
+            templates,
+        });
+        true
+    }
+
+    pub(crate) fn handle_picker_key(&mut self, key: KeyEvent) {
         let launch_session_group: Option<usize> = None;
         let mut launch_workspace_idx: Option<usize> = None;
         let mut launch_container_idx: Option<usize> = None;
+        let mut next_workspace_idx: Option<usize> = None;
 
         match self.container_picker.as_mut() {
             Some(ContainerPickerState::NewSessionWorkspace { cursor }) => match key.code {
@@ -325,29 +329,22 @@ impl App {
                     return;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if *cursor > 0 {
-                        *cursor -= 1;
-                    }
+                    crate::tui::move_wrapping_cursor(cursor, self.workspaces.len(), -1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    let max = self.workspaces.len();
-                    if *cursor + 1 < max {
-                        *cursor += 1;
-                    }
+                    crate::tui::move_wrapping_cursor(cursor, self.workspaces.len(), 1);
                 }
                 KeyCode::Enter | KeyCode::Char('l') => {
-                    let workspace_idx = *cursor;
-                    self.container_picker = Some(ContainerPickerState::NewSessionTemplate {
-                        workspace_idx,
-                        cursor: 0,
-                    });
-                    return;
+                    if !self.workspaces.is_empty() {
+                        next_workspace_idx = Some((*cursor).min(self.workspaces.len() - 1));
+                    }
                 }
                 _ => {}
             },
             Some(ContainerPickerState::NewSessionTemplate {
                 workspace_idx,
                 cursor,
+                templates,
             }) => match key.code {
                 KeyCode::Esc | KeyCode::Char('h') => {
                     self.container_picker = None;
@@ -355,23 +352,26 @@ impl App {
                     return;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if *cursor > 0 {
-                        *cursor -= 1;
-                    }
+                    crate::tui::move_wrapping_cursor(cursor, templates.len(), -1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if *cursor + 1 < n {
-                        *cursor += 1;
-                    }
+                    crate::tui::move_wrapping_cursor(cursor, templates.len(), 1);
                 }
                 KeyCode::Enter | KeyCode::Char('l') => {
                     launch_workspace_idx = Some(*workspace_idx);
-                    launch_container_idx = Some(*cursor);
+                    if !templates.is_empty() {
+                        launch_container_idx = Some((*cursor).min(templates.len() - 1));
+                    }
                 }
                 _ => {}
             },
             None => return,
         };
+
+        if let Some(workspace_idx) = next_workspace_idx {
+            self.open_template_picker_for_workspace(workspace_idx);
+            return;
+        }
 
         if let (Some(workspace_idx), Some(ctr_idx)) = (launch_workspace_idx, launch_container_idx) {
             self.container_picker = None;
@@ -500,10 +500,10 @@ impl App {
         };
 
         let cfg = self.config.get();
-        let dockerfile_path = ctr
-            .dockerfile_path
-            .clone()
-            .unwrap_or_else(|| cfg.docker_dir.join(format!("{}.dockerfile", ctr.image_stem)));
+        let dockerfile_path = ctr.dockerfile_path.clone().unwrap_or_else(|| {
+            cfg.docker_dir
+                .join(format!("{}.dockerfile", ctr.image_stem))
+        });
         if !dockerfile_path.exists() {
             self.push_log(
                 format!(

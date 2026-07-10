@@ -22,8 +22,8 @@ use tracing::{debug, error, warn};
 use crate::activity::{Activity, ActivityEvent, ActivityKind, ActivityState, payload_preview};
 use crate::proxy::connect::handle_connect;
 use crate::proxy::helpers::{
-    connect_public_tcp_with_priority,
-    is_expected_disconnect, resolve_public_addrs_with_priority, write_error_any,
+    connect_public_tcp_with_priority, is_expected_disconnect, resolve_public_addrs_with_priority,
+    write_error_any,
 };
 use crate::proxy::http::handle_plain_http;
 use crate::shared_config::SharedConfig;
@@ -333,7 +333,6 @@ impl ProxyState {
         }
         Ok(client)
     }
-
 }
 
 fn is_container_host_alias(host: &str) -> bool {

@@ -30,12 +30,34 @@ const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const APPROVAL_TIMEOUT_SECS: u64 = 300;
 const IMAGE_PULL_TIMEOUT_SECS: u64 = 30 * 60;
 const EXEC_JOB_CAPTURE_BYTES: usize = 1024 * 1024;
+/// Absolute ceiling on a hostdo command's wall-clock time. A container-supplied
+/// `timeout_secs` cannot exceed this or the matched rule's own value (M4).
+const MAX_TIMEOUT_SECS: u64 = 6 * 60 * 60;
+
+/// 503 returned when the exec-job registry is at its active-job ceiling (H3).
+fn job_capacity_exceeded_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse {
+            error: "too_many_jobs".into(),
+            reason: "too many concurrent host commands are running; retry shortly".into(),
+        }),
+    )
+        .into_response()
+}
 
 pub(super) async fn exec_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     Json(req): Json<ExecRequest>,
 ) -> Response {
+    // In-flight cap so a container cannot flood the exec path and spawn
+    // unbounded concurrent host commands. Fast-fail with 503 rather than
+    // queueing, mirroring the control endpoints (H3).
+    let _exec_permit = match crate::server::handlers::hostdo_exec_semaphore().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => return job_capacity_exceeded_response(),
+    };
     let supports_jobs = supports_exec_jobs(&headers);
     let wants_detached = req.detach || supports_jobs;
 
@@ -112,6 +134,7 @@ pub(super) async fn exec_handler(
 
     let matched_rule = rules.find_hostdo(&req.argv, req.image.as_deref());
     let matched_command = matched_rule.and_then(|entry| entry.name.clone());
+    let env_allowlist = matched_rule.and_then(|entry| entry.env_allowlist.clone());
     let approval_mode = matched_rule
         .map(|entry| entry.approval_mode)
         .unwrap_or(rules.hostdo.default_policy);
@@ -126,11 +149,17 @@ pub(super) async fn exec_handler(
         .await;
     }
 
+    // The matched rule's timeout is a ceiling, not just a fallback: a
+    // container-supplied `timeout_secs` may lower it but never raise it, and an
+    // absolute cap applies regardless (M4).
+    let rule_ceiling = matched_rule
+        .map(|entry| entry.timeout_secs)
+        .unwrap_or(DEFAULT_TIMEOUT_SECS);
     let timeout_secs = req
         .timeout_secs
-        .or_else(|| matched_rule.map(|entry| entry.timeout_secs))
-        .unwrap_or(DEFAULT_TIMEOUT_SECS)
-        .max(1);
+        .map(|requested| requested.min(rule_ceiling))
+        .unwrap_or(rule_ceiling)
+        .clamp(1, MAX_TIMEOUT_SECS);
     let runner_mount_target = PathBuf::from(&identity.mount_target);
     let runner_cwd = resolve_runner_container_cwd(
         &request_cwd,
@@ -179,6 +208,7 @@ pub(super) async fn exec_handler(
         activity_id,
         cancel_flag: cancel_flag.clone(),
         decision_kind: DecisionKind::Auto,
+        env_allowlist,
     };
 
     if approval_mode == NetworkPolicy::Auto {
@@ -405,6 +435,9 @@ struct CommandRun {
     activity_id: String,
     cancel_flag: Arc<AtomicBool>,
     decision_kind: DecisionKind,
+    /// From the matched rule (M3): when set, the child runs from a cleared
+    /// environment containing only `HOSTDO_BASE_ENV` plus these variables.
+    env_allowlist: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -519,7 +552,7 @@ fn start_approval_wait_job(
     response_rx: oneshot::Receiver<ApprovalDecision>,
 ) -> Response {
     let (stdin_tx, stdin_rx) = mpsc::unbounded_channel();
-    let status = run.state.exec_jobs.insert(ExecJobStatus {
+    let Some(status) = run.state.exec_jobs.insert(ExecJobStatus {
         state: ExecJobState::Running,
         job_id: String::new(),
         project: run.project.clone(),
@@ -538,7 +571,9 @@ fn start_approval_wait_job(
         reason: None,
         cancel_flag: Some(run.cancel_flag.clone()),
         stdin_tx: Some(stdin_tx),
-    });
+    }) else {
+        return job_capacity_exceeded_response();
+    };
     let job_id = status.job_id.clone();
     let run_clone = run;
     tokio::spawn(async move {
@@ -655,7 +690,7 @@ fn start_execution_job(run: CommandRun) -> Response {
         format!("Starting {}.", run.argv.join(" "))
     };
     let (stdin_tx, stdin_rx) = mpsc::unbounded_channel();
-    let status = run.state.exec_jobs.insert(ExecJobStatus {
+    let Some(status) = run.state.exec_jobs.insert(ExecJobStatus {
         state: ExecJobState::Running,
         job_id: String::new(),
         project: run.project.clone(),
@@ -674,7 +709,9 @@ fn start_execution_job(run: CommandRun) -> Response {
         reason: None,
         cancel_flag: Some(run.cancel_flag.clone()),
         stdin_tx: Some(stdin_tx),
-    });
+    }) else {
+        return job_capacity_exceeded_response();
+    };
     let job_id = status.job_id.clone();
     tokio::spawn(async move {
         run_job_after_approval(run, job_id, stdin_rx).await;
@@ -961,14 +998,15 @@ async fn ensure_image_present(
         true,
     );
 
-    let status = match wait_for_child(&mut child, run.cancel_flag.clone(), IMAGE_PULL_TIMEOUT_SECS).await {
-        Ok(s) => s,
-        Err(err) => {
-            stdout_task.abort();
-            stderr_task.abort();
-            return Err(err);
-        }
-    };
+    let status =
+        match wait_for_child(&mut child, run.cancel_flag.clone(), IMAGE_PULL_TIMEOUT_SECS).await {
+            Ok(s) => s,
+            Err(err) => {
+                stdout_task.abort();
+                stderr_task.abort();
+                return Err(err);
+            }
+        };
     let _ = stdout_task
         .await
         .map_err(|e| ExecFailure::Message(format!("docker pull stdout task failed: {e}")))??;
@@ -989,6 +1027,7 @@ fn build_command(run: &CommandRun) -> Result<TokioCommand, ExecFailure> {
         return Err(ExecFailure::Message("command argv is empty".into()));
     }
     let mut cmd = if let Some(image) = &run.image {
+        validate_hostdo_image(image)?;
         let mut cmd = TokioCommand::new("docker");
         cmd.arg("run")
             .arg("--rm")
@@ -1001,6 +1040,11 @@ fn build_command(run: &CommandRun) -> Result<TokioCommand, ExecFailure> {
             ))
             .arg("-w")
             .arg(run.runner_cwd.display().to_string())
+            // `--` terminates option parsing so a crafted image/argv value
+            // beginning with `-` cannot be reinterpreted as a `docker run` flag
+            // (M2). validate_hostdo_image already rejects a leading `-`; this is
+            // belt-and-suspenders.
+            .arg("--")
             .arg(image);
         for arg in &run.argv {
             cmd.arg(arg);
@@ -1011,11 +1055,91 @@ fn build_command(run: &CommandRun) -> Result<TokioCommand, ExecFailure> {
         cmd.args(&run.argv[1..]).current_dir(&run.host_cwd);
         cmd
     };
+    // Strip harness-hat's own control-plane secrets from the child environment.
+    // A hostdo command is a host build/test tool and has no business reading the
+    // control token, session token, or scoped-proxy credential it would
+    // otherwise inherit from the manager process (M3).
+    for (name, _) in std::env::vars() {
+        if name.starts_with("HARNESS_HAT_") {
+            cmd.env_remove(name);
+        }
+    }
+    // When the matched rule opts in via env_allowlist, go further: start from a
+    // cleared environment and pass through only the base set plus the
+    // allowlisted variables (M3). Rust resolves argv[0] against the PATH set on
+    // the command itself, so lookup still works after env_clear.
+    if let Some(vars) = hostdo_child_env(run.env_allowlist.as_deref(), &|name| {
+        std::env::var(name).ok()
+    }) {
+        cmd.env_clear();
+        cmd.envs(vars);
+    }
     // Place each spawned process in its own process group so kill_child_and_group
     // can reach all descendants, not just the direct child.
     #[cfg(unix)]
     cmd.process_group(0);
     Ok(cmd)
+}
+
+/// Variables every hostdo child keeps when a rule's `env_allowlist` triggers an
+/// environment scrub: enough for shells and build tools to locate binaries,
+/// caches, and temp space without leaking the rest of the manager's env (M3).
+const HOSTDO_BASE_ENV: [&str; 10] = [
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+];
+
+/// Compute the full environment for a hostdo child when the matched rule set
+/// an `env_allowlist` (M3). Returns `None` when no allowlist applies — the
+/// child then inherits the manager environment (minus `HARNESS_HAT_*`, stripped
+/// separately). With an allowlist, the child gets exactly the base set plus the
+/// allowlisted names, each only if present in the host environment.
+/// `HARNESS_HAT_*` control-plane variables are never passed, even if listed.
+fn hostdo_child_env(
+    allowlist: Option<&[String]>,
+    host_env: &dyn Fn(&str) -> Option<String>,
+) -> Option<Vec<(String, String)>> {
+    let allowlist = allowlist?;
+    let mut vars: Vec<(String, String)> = Vec::new();
+    let push = |name: &str, vars: &mut Vec<(String, String)>| {
+        if name.starts_with("HARNESS_HAT_") || vars.iter().any(|(existing, _)| existing == name) {
+            return;
+        }
+        if let Some(value) = host_env(name) {
+            vars.push((name.to_string(), value));
+        }
+    };
+    for name in HOSTDO_BASE_ENV {
+        push(name, &mut vars);
+    }
+    for name in allowlist {
+        push(name, &mut vars);
+    }
+    Some(vars)
+}
+
+/// Reject an obviously unsafe container image reference before it reaches the
+/// `docker run` argument vector (M2). A value beginning with `-` would be parsed
+/// as a flag; empty/whitespace or control characters indicate a malformed or
+/// hostile request. The character set matches a Docker image reference
+/// (`registry/name:tag@digest`).
+fn validate_hostdo_image(image: &str) -> Result<(), ExecFailure> {
+    if image.is_empty() {
+        return Err(ExecFailure::Message("image reference is empty".into()));
+    }
+    if image.starts_with('-') {
+        return Err(ExecFailure::Message(format!(
+            "image reference must not begin with '-': {image:?}"
+        )));
+    }
+    if !image
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':' | '@'))
+    {
+        return Err(ExecFailure::Message(format!(
+            "image reference contains invalid characters: {image:?}"
+        )));
+    }
+    Ok(())
 }
 
 async fn docker_image_present(image: &str) -> Result<bool, ExecFailure> {
@@ -1285,4 +1409,54 @@ fn tail_lines(text: &str, count: usize) -> String {
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hostdo_child_env;
+
+    fn host_env(name: &str) -> Option<String> {
+        match name {
+            "PATH" => Some("/usr/bin:/bin".to_string()),
+            "HOME" => Some("/Users/dev".to_string()),
+            "LANG" => Some("en_US.UTF-8".to_string()),
+            "AWS_SECRET_ACCESS_KEY" => Some("hunter2".to_string()),
+            "CARGO_TERM_COLOR" => Some("always".to_string()),
+            "HARNESS_HAT_TOKEN" => Some("control-plane-secret".to_string()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn no_allowlist_means_inherit() {
+        assert_eq!(hostdo_child_env(None, &host_env), None);
+    }
+
+    #[test]
+    fn empty_allowlist_grants_only_the_base_set() {
+        let vars = hostdo_child_env(Some(&[]), &host_env).expect("scrub applies");
+        let names: Vec<&str> = vars.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["PATH", "HOME", "LANG"]);
+        // Host secrets outside the base set must not leak through.
+        assert!(!names.contains(&"AWS_SECRET_ACCESS_KEY"));
+    }
+
+    #[test]
+    fn allowlist_adds_named_vars_but_never_control_plane_secrets() {
+        let allowlist = [
+            "CARGO_TERM_COLOR".to_string(),
+            "HARNESS_HAT_TOKEN".to_string(),
+            "MISSING_VAR".to_string(),
+            "PATH".to_string(),
+        ];
+        let vars = hostdo_child_env(Some(&allowlist), &host_env).expect("scrub applies");
+        let names: Vec<&str> = vars.iter().map(|(name, _)| name.as_str()).collect();
+        // Allowlisted var present in the host env is passed through once.
+        assert!(names.contains(&"CARGO_TERM_COLOR"));
+        // HARNESS_HAT_* is stripped even when explicitly listed (M3).
+        assert!(!names.contains(&"HARNESS_HAT_TOKEN"));
+        // Unset host vars are skipped, duplicates of the base set deduped.
+        assert!(!names.contains(&"MISSING_VAR"));
+        assert_eq!(names.iter().filter(|n| **n == "PATH").count(), 1);
+    }
 }

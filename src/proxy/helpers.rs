@@ -246,16 +246,16 @@ pub(crate) fn decode_source_from_proxy_authorization(
     (Some(project), Some(container), SourceIdentityStatus::Ok)
 }
 
-pub(crate) fn is_host_allowed(
-    config: &Config,
-    source_container: Option<&str>,
-    host: &str,
-) -> bool {
+pub(crate) fn is_host_allowed(config: &Config, source_container: Option<&str>, host: &str) -> bool {
     let source_container = match source_container {
         Some(name) => name,
         None => return false,
     };
-    let container = match config.containers.iter().find(|c| c.name == source_container) {
+    let container = match config
+        .containers
+        .iter()
+        .find(|c| c.name == source_container)
+    {
         Some(c) => c,
         None => return false,
     };
@@ -733,7 +733,6 @@ fn is_restricted_ipv6(ip: Ipv6Addr) -> bool {
     }
 
     let segments = ip.segments();
-    let octets = ip.octets();
     // ::ffff:0:0/96 — IPv4-translated (RFC 8215). Distinct from `::ffff:0:0/96`
     // IPv4-mapped which `to_ipv4_mapped` already handles; here we cover the
     // newer "translated" form some stacks emit.
@@ -747,13 +746,10 @@ fn is_restricted_ipv6(ip: Ipv6Addr) -> bool {
     // 100::/64 — discard-only address block (RFC 6666).
     let is_discard = segments[0] == 0x0100 && segments[1..4] == [0; 3];
     // 2002::/16 — 6to4 (RFC 3056) encapsulates an IPv4 address in bytes 2..6.
-    let is_6to4 = segments[0] == 0x2002 && {
-        let inner = Ipv4Addr::new(octets[2], octets[3], octets[4], octets[5]);
-        // Treat any 6to4 as restricted whenever the embedded v4 is restricted,
-        // and conservatively restrict all 6to4 to avoid IPv4 bypass via this
-        // tunnel (real public traffic should be native v6 or v4).
-        is_restricted_ipv4(inner) || true
-    };
+    // Conservatively restrict all 6to4 to avoid an IPv4 SSRF bypass via this
+    // tunnel (real public traffic should be native v6 or v4), which necessarily
+    // also covers the case where the embedded IPv4 is itself restricted.
+    let is_6to4 = segments[0] == 0x2002;
 
     ip == Ipv6Addr::LOCALHOST
         || ip == Ipv6Addr::UNSPECIFIED

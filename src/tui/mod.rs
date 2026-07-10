@@ -65,14 +65,32 @@ pub(crate) struct ContainerUsageUpdate {
     pub stats: Option<crate::container::ContainerUsageStats>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ContainerPickerState {
     /// First step: choose workspace for a new session.
     NewSessionWorkspace { cursor: usize },
     /// Second step: choose a template for a new session. Reached either via the
     /// workspace step (NewSession flow) or directly from a sidebar workspace
     /// entry. Esc/^B returns to the sidebar in both cases.
-    NewSessionTemplate { workspace_idx: usize, cursor: usize },
+    NewSessionTemplate {
+        workspace_idx: usize,
+        cursor: usize,
+        templates: Vec<crate::config::ContainerDef>,
+    },
+}
+
+pub(crate) fn move_wrapping_cursor(cursor: &mut usize, len: usize, direction: i8) {
+    if len == 0 {
+        *cursor = 0;
+        return;
+    }
+
+    *cursor = (*cursor).min(len - 1);
+    if direction < 0 {
+        *cursor = if *cursor == 0 { len - 1 } else { *cursor - 1 };
+    } else if direction > 0 {
+        *cursor = (*cursor + 1) % len;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

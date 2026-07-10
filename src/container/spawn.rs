@@ -107,8 +107,20 @@ pub fn spawn(
     #[cfg(target_os = "linux")]
     docker_args.push("--add-host=host.docker.internal:host-gateway".to_string());
 
+    // Block privilege escalation via setuid binaries / file capabilities. This
+    // does not impede the init's downward `gosu` drop from root to uid 1000
+    // (dropping privileges is always allowed), it only prevents *gaining* them
+    // (M1).
+    docker_args.extend_from_slice(&[
+        "--security-opt".to_string(),
+        "no-new-privileges".to_string(),
+    ]);
+
     #[cfg(target_os = "linux")]
     if !strict_network {
+        // Non-strict containers run unprivileged from the start and need no
+        // Linux capabilities at all — drop the ~14 Docker grants by default (M1).
+        docker_args.extend_from_slice(&["--cap-drop".to_string(), "ALL".to_string()]);
         docker_args.extend_from_slice(&["--user".to_string(), "1000:1000".to_string()]);
     }
 
@@ -123,7 +135,16 @@ pub fn spawn(
 
         #[cfg(target_os = "linux")]
         {
-            docker_args.extend_from_slice(&["--cap-add".to_string(), "NET_ADMIN".to_string()]);
+            // Strict mode runs as root only for the init script's setup phase.
+            // Drop every capability and re-add the empirically-verified minimal
+            // set (M1): NET_ADMIN for the iptables egress chain and tun0
+            // creation/routing (tun2proxy --setup), SETUID + SETGID for the
+            // downward `gosu 1000:1000` drop. Each was confirmed necessary by
+            // removing it and watching the corresponding init step fail.
+            docker_args.extend_from_slice(&["--cap-drop".to_string(), "ALL".to_string()]);
+            for cap in ["NET_ADMIN", "SETUID", "SETGID"] {
+                docker_args.extend_from_slice(&["--cap-add".to_string(), cap.to_string()]);
+            }
             if Path::new("/dev/net/tun").exists() {
                 docker_args.extend_from_slice(&[
                     "--device".to_string(),
@@ -704,14 +725,26 @@ fn has_nonempty_env_source(
 /// `host_arg` is the already-resolved host source (a private tempfile path for
 /// seeded mounts, otherwise `mount.host`). The workspace bind is emitted
 /// elsewhere and never passes through here.
-fn mount_bind_args(host_arg: &str, mount: &crate::config::ContainerMount, seeded: bool) -> Vec<String> {
+fn mount_bind_args(
+    host_arg: &str,
+    mount: &crate::config::ContainerMount,
+    seeded: bool,
+) -> Vec<String> {
     let mode = mount_mode_arg(&mount.mode);
     let container_arg = mount.container.display().to_string();
-    let mut args = vec!["-v".to_string(), format!("{host_arg}:{container_arg}:{mode}")];
+    let mut args = vec![
+        "-v".to_string(),
+        format!("{host_arg}:{container_arg}:{mode}"),
+    ];
     if !seeded && mount.host != mount.container {
+        // The plugin-path shim re-exposes the same directory at its host path so
+        // stored absolute paths resolve. It is always read-only regardless of the
+        // primary mount's mode: the shim exists only for path resolution, never
+        // for writes, and defaulting it to rw needlessly widens write exposure of
+        // whatever the user mounted (H4).
         let host_path = mount.host.display().to_string();
         args.push("-v".to_string());
-        args.push(format!("{host_path}:{host_path}:{mode}"));
+        args.push(format!("{host_path}:{host_path}:ro"));
     }
     args
 }
@@ -1316,6 +1349,7 @@ mod tests {
 
         // Non-seeded ~/.claude (host != container): primary bind + host-path shim
         // so stored absolute plugin paths (/Users/me/.claude/plugins/...) resolve.
+        // The shim is always read-only regardless of the primary mode (H4).
         let claude = mount("/Users/me/.claude", "/home/coder/.claude", None);
         assert_eq!(
             super::mount_bind_args("/Users/me/.claude", &claude, false),
@@ -1323,7 +1357,7 @@ mod tests {
                 "-v".to_string(),
                 format!("/Users/me/.claude:/home/coder/.claude:{mode}"),
                 "-v".to_string(),
-                format!("/Users/me/.claude:/Users/me/.claude:{mode}"),
+                "/Users/me/.claude:/Users/me/.claude:ro".to_string(),
             ],
         );
 

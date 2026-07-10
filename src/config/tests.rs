@@ -1,6 +1,7 @@
 use super::{
-    resolve_workspace_container_templates, Config, ContainerDefaults, ContainerDef, DefaultsConfig,
-    default_mount_target, image_tag_for_stem, load, resolve_workspace_sidebar_hotkeys,
+    Config, ContainerDef, ContainerDefaults, DefaultsConfig, default_mount_target,
+    image_tag_for_stem, load, resolve_workspace_container_templates,
+    resolve_workspace_sidebar_hotkeys,
 };
 use std::path::Path;
 
@@ -215,15 +216,14 @@ fn workspace_container_templates_include_local_dockerfiles_with_base_tag() {
         )
         .expect("write matching nested dockerfile");
         let non_matching = workspace.join("ignored.dockerfile");
-        std::fs::write(
-            &non_matching,
-            "FROM ubuntu:24.04\nRUN echo ignored",
-        )
-        .expect("write non matching dockerfile");
+        std::fs::write(&non_matching, "FROM ubuntu:24.04\nRUN echo ignored")
+            .expect("write non matching dockerfile");
 
-        let configured = vec![
-            container_def_for_test("configured", "harness-hat-configured:local", "configured"),
-        ];
+        let configured = vec![container_def_for_test(
+            "configured",
+            "harness-hat-configured:local",
+            "configured",
+        )];
         let defaults = ContainerDefaults {
             memory: Some("2g".to_string()),
             cpus: Some("1.2".to_string()),
@@ -276,10 +276,16 @@ fn workspace_container_templates_include_local_dockerfiles_with_base_tag() {
             Some(matching_nested),
             "local template should point to nested dockerfile"
         );
-        assert_eq!(local_nested.image, "harness-hat-local-repo-services_nested:local");
+        assert_eq!(
+            local_nested.image,
+            "harness-hat-local-repo-services_nested:local"
+        );
 
         let ignored_present = templates.iter().any(|c| c.name == "ignored");
-        assert!(!ignored_present, "non-matching dockerfile should be ignored");
+        assert!(
+            !ignored_present,
+            "non-matching dockerfile should be ignored"
+        );
     });
 }
 
@@ -314,8 +320,8 @@ fn workspace_container_templates_merge_deduplicates_matching_names() {
             shm_size: None,
         };
 
-        let templates =
-            resolve_workspace_container_templates(&workspace, &defaults, &configured).expect("discover templates");
+        let templates = resolve_workspace_container_templates(&workspace, &defaults, &configured)
+            .expect("discover templates");
 
         let names: Vec<_> = templates.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"same"));
@@ -380,7 +386,11 @@ fn merge_mounts_collapses_duplicate_container_destinations() {
     dests.sort();
     let unique = dests.len();
     dests.dedup();
-    assert_eq!(unique, dests.len(), "merge_mounts must not emit duplicate container destinations");
+    assert_eq!(
+        unique,
+        dests.len(),
+        "merge_mounts must not emit duplicate container destinations"
+    );
 }
 
 #[test]

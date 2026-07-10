@@ -79,9 +79,19 @@ pub fn prompt_network_approval(req: &ApprovalRequest) -> Outcome {
 
 fn format_body(req: &ApprovalRequest) -> String {
     let mut body = String::new();
-    body.push_str(&format!("Method: {}\n", if req.method.is_empty() { "-" } else { &req.method }));
+    body.push_str(&format!(
+        "Method: {}\n",
+        if req.method.is_empty() {
+            "-"
+        } else {
+            &req.method
+        }
+    ));
     body.push_str(&format!("Host: {}\n", req.host));
-    body.push_str(&format!("Path: {}\n", if req.path.is_empty() { "-" } else { &req.path }));
+    body.push_str(&format!(
+        "Path: {}\n",
+        if req.path.is_empty() { "-" } else { &req.path }
+    ));
     if let Some(port) = req.port {
         body.push_str(&format!("Port: {port}\n"));
     }

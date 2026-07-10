@@ -1,13 +1,16 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::{fs, io::{self, BufRead, BufReader}};
+use std::{
+    fs,
+    io::{self, BufRead, BufReader},
+};
 use toml_edit::{DocumentMut, value};
 use tracing::instrument;
 
 use crate::config::{
-    Config, ContainerMount, LocalhostForward, WorkspaceConfig, default_mount_target,
-    ContainerDefaults, ContainerProfile,
+    Config, ContainerDefaults, ContainerMount, ContainerProfile, LocalhostForward, WorkspaceConfig,
+    default_mount_target,
 };
 
 const WORKSPACE_SIDEBAR_HOTKEY_POOL: &[char] = &[
@@ -547,7 +550,45 @@ fn canonicalize_workspace_paths(config: &mut Config) -> Result<()> {
 /// system-config directories. Mounting these into a container as `/workspace`
 /// rw would let any agent CLI exfiltrate or rewrite the host's credentials.
 fn reject_sensitive_workspace_path(name: &str, canonical: &Path) -> Result<()> {
-    let mut sensitive: Vec<PathBuf> = vec![PathBuf::from("/etc")];
+    if let Some(hit) = sensitive_path_hit(canonical) {
+        anyhow::bail!(
+            "project '{}': canonical_path {} resolves under a sensitive path ({}); refusing to mount",
+            name,
+            canonical.display(),
+            hit.display()
+        );
+    }
+    Ok(())
+}
+
+/// Refuse a configured bind-mount source that resolves under a sensitive
+/// directory or is the Docker socket. The workspace check above only covers
+/// `canonical_path`; without this, a `[[*.mounts]]` entry could mount `~/.ssh`,
+/// `/etc`, or `/var/run/docker.sock` (the last being a full host-root escape)
+/// straight into the container (H4).
+fn reject_sensitive_mount_source(context: &str, host: &Path) -> Result<()> {
+    // Compare against the resolved form when the path exists (defeats symlink /
+    // `..` tricks); fall back to the literal path when it does not yet exist.
+    let resolved = host.canonicalize();
+    let candidate: &Path = resolved.as_deref().unwrap_or(host);
+    if let Some(hit) = sensitive_path_hit(candidate) {
+        anyhow::bail!(
+            "{context}: mount.host {} resolves under a sensitive path ({}); refusing to mount",
+            host.display(),
+            hit.display()
+        );
+    }
+    Ok(())
+}
+
+/// Return the sensitive root a path equals or lives under, if any. Covers
+/// `/etc`, `~/.ssh`, `~/.gnupg`, and the Docker socket at its common locations.
+fn sensitive_path_hit(candidate: &Path) -> Option<PathBuf> {
+    let mut sensitive: Vec<PathBuf> = vec![
+        PathBuf::from("/etc"),
+        PathBuf::from("/var/run/docker.sock"),
+        PathBuf::from("/run/docker.sock"),
+    ];
     if let Some(home) = dirs::home_dir() {
         sensitive.push(home.join(".ssh"));
         sensitive.push(home.join(".gnupg"));
@@ -557,16 +598,16 @@ fn reject_sensitive_workspace_path(name: &str, canonical: &Path) -> Result<()> {
         // (e.g. `/etc` may itself be a symlink on some distros).
         let s_can = s.canonicalize();
         let s_ref: &Path = s_can.as_deref().unwrap_or(s.as_path());
-        if canonical == s_ref || canonical.starts_with(s_ref) {
-            anyhow::bail!(
-                "project '{}': canonical_path {} resolves under a sensitive directory ({}); refusing to mount",
-                name,
-                canonical.display(),
-                s_ref.display()
-            );
+        if candidate == s_ref || candidate.starts_with(s_ref) {
+            return Some(s_ref.to_path_buf());
         }
     }
-    Ok(())
+    // Catch the Docker socket regardless of directory (e.g. a rootless socket
+    // under XDG_RUNTIME_DIR) by its filename.
+    if candidate.file_name().is_some_and(|n| n == "docker.sock") {
+        return Some(candidate.to_path_buf());
+    }
+    None
 }
 
 /// Concatenate `parts` in order, keeping the first item for which `eq` finds no
@@ -829,6 +870,7 @@ fn validate(config: &Config) -> Result<()> {
                 ctr.name,
                 mount.container.display()
             );
+            reject_sensitive_mount_source(&format!("container '{}'", ctr.name), &mount.host)?;
         }
         for (key, value) in &ctr.env {
             anyhow::ensure!(

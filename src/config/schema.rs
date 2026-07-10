@@ -27,7 +27,7 @@ impl Default for WorkspaceConfig {
 
 /// Internal resolved container launch definition synthesized from
 /// `[container_profiles.<name>]` entries.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ContainerDef {
     /// Human-readable identifier shown in the TUI tab bar.
     pub name: String,

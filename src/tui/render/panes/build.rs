@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Rect, dimmed: bool) {
     let cfg = app.config.get();
-    let Some(picker) = app.container_picker.clone() else {
+    let Some(picker) = app.container_picker.as_ref() else {
         return;
     };
 
@@ -27,6 +27,7 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
         ContainerPickerState::NewSessionTemplate {
             workspace_idx,
             cursor,
+            ..
         } => (
             *cursor,
             app.workspaces
@@ -41,12 +42,6 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
                 .map(|ws| ws.canonical_path.clone()),
             "Select Container Template".to_string(),
         ),
-    };
-    let workspace_templates = match &picker {
-        ContainerPickerState::NewSessionTemplate { workspace_idx, .. } => {
-            Some((*workspace_idx, app.workspace_templates_for_project(*workspace_idx)))
-        }
-        ContainerPickerState::NewSessionWorkspace { .. } => None,
     };
 
     let tone = |c| maybe_dim(c, dimmed);
@@ -119,11 +114,7 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
                 ]));
             }
         }
-        _ => {
-            let templates = workspace_templates
-                .as_ref()
-                .map(|(_, templates)| templates.as_slice())
-                .unwrap_or_else(|| cfg.containers.as_slice());
+        ContainerPickerState::NewSessionTemplate { templates, .. } => {
             for (i, c) in templates.iter().enumerate() {
                 let marker = if i == selected_idx { "▶ " } else { "  " };
                 let name_style = if i == selected_idx {
@@ -209,12 +200,14 @@ pub(crate) fn render_image_build(frame: &mut Frame, app: &mut App, area: Rect, d
     let dockerfile_path = template
         .and_then(|c| c.dockerfile_path.clone())
         .unwrap_or_else(|| cfg.docker_dir.join(format!("{image_stem}.dockerfile")));
-    let dockerfile_context = dockerfile_path
-        .parent()
-        .unwrap_or(cfg.docker_dir.as_path());
+    let dockerfile_context = dockerfile_path.parent().unwrap_or(cfg.docker_dir.as_path());
     let docker_dir = cfg.docker_dir.as_path();
-    let (build_cmd, maybe_base_cmd) =
-        App::build_commands_for(dockerfile_path.as_path(), image, dockerfile_context, docker_dir);
+    let (build_cmd, maybe_base_cmd) = App::build_commands_for(
+        dockerfile_path.as_path(),
+        image,
+        dockerfile_context,
+        docker_dir,
+    );
     let build_cmd_str = format!("docker {}", build_cmd.join(" "));
     let base_cmd_str = maybe_base_cmd
         .as_ref()

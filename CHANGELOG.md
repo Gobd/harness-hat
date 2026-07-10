@@ -19,7 +19,11 @@
 - Automated macOS Keychain OAuth credentials injection: on macOS, reads the Claude Code OAuth credentials from the system Keychain and merges them into the seeded `.claude.json` and `~/.claude/.claude.json` container files on startup, allowing Claude Code to authenticate seamlessly without manual token config.
 - `[defaults.control].allow_remote_control` opt-in required to bind the control server or proxy to non-loopback addresses.
 - Persistent build pane: failed/cancelled builds keep their output and a banner with an `[r] Rebuild` shortcut.
-- `api.github.com` and `downloads.claude.ai` added to the default network allowlist to support Dockerfile template fetch and the apt-based Claude Code install.
+- `api.github.com` (starter network allowlists) and `downloads.claude.ai` (default `allowed_hosts`) added for in-container GitHub API access and the apt-based Claude Code install.
+- Workspace-local `*.dockerfile` files are auto-discovered as launch templates when their first non-comment instruction is `FROM harness-hat-base:local`, alongside the built-in templates under `docker_dir`.
+- `jq` in the base image (the default Claude Code statusLine script parses its status JSON with jq, which previously rendered blank in-container).
+- Claude Code setup-token env auth: when `CLAUDE_CODE_OAUTH_TOKEN` is supplied (config env, passthrough, or Keychain injection), containers automatically receive `CLAUDE_CODE_HOST_AUTH_ENV_VAR` and default `CLAUDE_CODE_OAUTH_SCOPES`, and a minimal onboarding-complete `.claude.json` is seeded, so interactive Claude works without a manual `/login`.
+- Hostdo rules can now set `env_allowlist = ["NAME", ...]` to run their command from a cleared environment containing only a small base set (`PATH`, `HOME`, locale, etc.) plus the listed variables, instead of inheriting the manager's full host environment. Not supported on `image` rules, which already start from a clean container environment.
 
 ### Changed
 - **Breaking:** `bypass_proxy` configuration has been replaced by `allowed_hosts` for specifying hosts that are automatically allowed without network approval. The field is now supported at the defaults level and per-container profile in `harness-hat.toml`, and no longer requires setting `NO_PROXY` environment variables.
@@ -30,11 +34,10 @@
 - Workspace `harness-rules.toml` hostdo entries now support exact `image` and `timeout_secs` fields in addition to `argv`, `cwd`, and `approval_mode`, so remembered allow/deny decisions can persist image-backed and custom-timeout hostdo requests exactly.
 - **Breaking:** example container profiles are reorganized from agent-centric names (`claude`, `codex`, `gemini`, `pi`) to language/size templates (`typescript`, `go`, `rust`, `php`, `base`, `large`).
 - **Breaking:** the example config now ships with `server_host = "127.0.0.1"` and `proxy_host = "127.0.0.1"`. The manager refuses non-loopback binds unless `allow_remote_control = true` is set explicitly.
-- **Breaking:** the base Docker image now installs Claude Code from Anthropic's signed apt repository (`downloads.claude.ai`) instead of npm. Image rebuilds are now the only upgrade path for Claude Code.
+- **Breaking:** the base Docker image no longer installs Claude Code from npm. It now ships two coexisting builds: the GPG-verified apt `stable` build (`downloads.claude.ai`) exposed as `claude-stable`, and the `latest` native-installer build as the default `claude` (with `~/.local/bin` first on `PATH`), so a session runs the newest model by default but can fall back if a `latest` release regresses. Both are pinned at build time (`DISABLE_AUTOUPDATER=1`); image rebuilds are the only upgrade path.
 - The base image installs Antigravity CLI (`agy`) from the official GitHub release artifacts instead of installing Gemini CLI from npm, and includes an `agy-yolo` wrapper for `agy --dangerously-skip-permissions`.
 - Containers now run as user `coder` (uid 1000) across all templates.
 - Mount-seed detection consolidated onto `ContainerMount::is_seeded()`, shared by container launch and the TUI.
-- Transparent-TLS and TLS-MITM request handling consolidated into a single `handle_tls_inner_request` helper, reducing duplication across the proxy.
 - Top-level config structs now reject unknown fields (`#[serde(deny_unknown_fields)]`), surfacing typos and removed options instead of silently defaulting.
 - README rewritten around the new workspace/template/shell workflow.
 
@@ -48,18 +51,22 @@
 
 ### Security
 - Bearer-token and proxy-authorization comparisons now use constant-time equality.
-- HTTP request parsing rejects `Content-Length` + `Transfer-Encoding` conflicts, duplicate `Content-Length` headers, bare-LF line terminators, obs-fold continuations, and bytes past the advertised body length.
-- Incoming hostnames are now canonicalized (lowercase, trailing-dot strip, IDNA) before rule matching; deny rules can no longer be bypassed via case, trailing dot, or punycode.
+- Incoming hostnames are now canonicalized (lowercase, trailing-dot strip, IDNA) before rule matching on the plain-HTTP, CONNECT, and SNI paths; deny rules can no longer be bypassed via case, trailing dot, or punycode. CONNECT requests whose host fails canonicalization are rejected with 400.
 - Path matching now strips the query string, percent-decodes, and collapses `..`/`//` before evaluation.
-- TLS MITM leaf-cert cache is now bounded (LRU 1024) with key generation moved off the async runtime; concurrent first-misses are de-duplicated.
-- CONNECT MITM now replays bytes pipelined after the CONNECT head into the TLS acceptor.
 - `Connection:`-listed header tokens are stripped before forwarding.
 - Plain-HTTP `Host:` validation rejects duplicate and missing Host headers.
-- Unknown HTTP methods are rejected with 400 instead of silently rewritten to `GET`.
-- CA certificate now sets explicit key usages (`keyCertSign`, `cRLSign`) and a bounded 10-year validity window; leaf certs carry a `serverAuth` EKU.
-- SNI host names that are non-ASCII or invalid UTF-8 are rejected instead of being lossily decoded into a bogus policy key and certificate subject.
-- CONNECT/SNI hosts are syntactically validated before reaching the leaf-cert signer, so attacker-controlled strings can't become cache keys or subjects.
+- SNI host names that are non-ASCII or invalid UTF-8 are rejected instead of being lossily decoded into a bogus policy key.
 - Shared session-state mounts (`~/.claude`, `~/.codex`, …) are skipped when the host source does not exist instead of asking Docker to bind a missing path.
+- Workspace `harness-rules.toml` files can no longer grant host execution: any per-command `approval_mode = "auto"` coming from a workspace (container-writable) rules file is downgraded to `prompt` when rules compose; only the host-owned global rules file may auto-approve hostdo commands. (`default_policy` was already clamped the same way.)
+- An explicit network denylist match now wins over `allowed_hosts` on both proxy paths; previously `allowed_hosts` silently outranked the denylist.
+- The `/exec` endpoint is gated by a dedicated concurrency semaphore (cap 32, fast-fail 503), and the exec-job registry enforces an active-job ceiling (64) with eviction of finished jobs past a total cap (512), so a container cannot flood the host with concurrent commands or unbounded job state.
+- The sensitive-path refusal (`~/.ssh`, `~/.gnupg`, `/etc`, and now the Docker socket) applies to every configured `mount.host`, not just workspace paths; the plugin-path shim mount is always read-only regardless of the primary mount's mode.
+- Container-supplied hostdo `--image` references are validated (non-empty, no leading `-`, Docker-reference charset) and a `--` separator precedes the image in the `docker run` argv, so crafted values can't be parsed as flags.
+- Hostdo children never inherit harness-hat's control-plane secrets: all `HARNESS_HAT_*` variables (bearer token, session token, scoped-proxy auth) are stripped from the child environment.
+- A container-supplied hostdo `timeout_secs` is now clamped to the matched rule's own timeout (the rule value is a ceiling, not just a fallback) and to an absolute 6-hour maximum.
+- Supply-chain hardening across the Docker images: the Composer installer is verified against its published sha384 signature before execution; the Claude Code `latest` installer is downloaded to a file before executing (no pipe-to-bash of a possibly-truncated script), with the GPG-verified apt build as the trusted fallback; Bun, rustup-init, and the Go toolchain are downloaded as pinned releases verified against their published sha256 checksums; and all `npm -g`, `go install`, `cargo install`, and `composer global` tools are pinned to exact versions.
+- Container capability lockdown: every launch sets `--security-opt no-new-privileges`; non-strict Linux launches run with `--cap-drop ALL`; strict-mode Linux launches now also run `--cap-drop ALL` and re-add only the verified minimal set (`NET_ADMIN` for iptables/tun setup, `SETUID`/`SETGID` for the init's downward `gosu` drop).
+- Fixed the IPv6 6to4 SSRF check, which previously matched all addresses due to a tautological predicate; all `2002::/16` (6to4) destinations are now correctly restricted.
 - IPv6 SSRF predicate extended to cover NAT64, 6to4, IPv4-translated, and discard-only prefixes.
 - DNS cache bounded (LRU) and case-normalized.
 - Config `instance_id` write-back and workspace-block append are now atomic (tmp + fsync + rename) under an advisory file lock.
@@ -88,6 +95,11 @@
 - Hostdo strict-network startup path discovery now avoids virtual DNS relay IPs (`198.18.x.x`) and prefers direct route/gateway targets from `/proc/net/route` first, preventing connection failures before the first request is made.
 - Hostdo exec-job URLs are now wired to Axum 0.7 route syntax, resolving `/exec/jobs/{id}` correctly again.
 - Added regression tests that lock in both behaviors: Axum 0.7 route compatibility for `/exec/jobs/<uuid>` responses and hostdo candidate base URL ordering/filtering in strict-network mode.
+- Removed a duplicate container-keyrings mount point from the default mounts that broke container launch on macOS.
+- Workspace and template scanning no longer freezes the TUI.
+- The container-template picker now caches its template list while open and wraps Up/Down navigation at the top and bottom, eliminating the laggy boundary key-repeat behavior.
+- Marketplace plugins (e.g. pgsd and its slash commands) load in-container again: non-seeded mounts whose host path differs from the container path are re-exposed read-only at their own host-absolute path, so the absolute `installPath` strings agent CLIs record (e.g. `/Users/<you>/.claude/plugins/...`) resolve under the container's `/home/coder` home. Seeded mounts stay private and are not re-exposed.
+- Interactive Claude Code no longer 401s ("Please run /login") when launch auth comes from `CLAUDE_CODE_OAUTH_TOKEN`: the host's stale `.credentials.json` is shadowed with an empty seed and stale `claudeAiOauth` blocks are stripped from the seeded `.claude.json`, so the TUI falls back to the env token like `claude -p` does.
 
 
 ## 0.7.0 Jun 1, 2026

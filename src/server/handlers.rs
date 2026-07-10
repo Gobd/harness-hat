@@ -149,14 +149,51 @@ pub struct ExecJobRegistry {
     inner: Arc<Mutex<HashMap<String, ExecJobStatus>>>,
 }
 
+/// Ceiling on concurrently running (non-terminal) exec jobs across the whole
+/// manager. A container flooding `/exec --detach` cannot spawn unbounded host
+/// processes; once this many jobs are running, new job creation is refused (H3).
+const MAX_ACTIVE_EXEC_JOBS: usize = 64;
+/// Ceiling on total tracked jobs (running + finished). When exceeded, finished
+/// jobs are evicted to bound the registry's memory footprint (H3).
+const MAX_TOTAL_EXEC_JOBS: usize = 512;
+
 impl ExecJobRegistry {
-    pub fn insert(&self, mut status: ExecJobStatus) -> ExecJobStatus {
+    /// Insert a new job, enforcing the active-job ceiling and pruning finished
+    /// jobs to bound memory. Returns `None` when the active-job ceiling is
+    /// reached, which callers surface as a 503 (H3).
+    pub fn insert(&self, mut status: ExecJobStatus) -> Option<ExecJobStatus> {
         if status.job_id.is_empty() {
             status.job_id = uuid::Uuid::new_v4().to_string();
         }
         let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+
+        let active = map
+            .values()
+            .filter(|job| job.state == ExecJobState::Running)
+            .count();
+        if active >= MAX_ACTIVE_EXEC_JOBS {
+            return None;
+        }
+
+        // Evict finished jobs if we are at the total ceiling. Only terminal jobs
+        // are dropped, so a running job is never lost; the worst case is that a
+        // client can no longer fetch the output of an old, completed job.
+        if map.len() >= MAX_TOTAL_EXEC_JOBS {
+            let finished: Vec<String> = map
+                .iter()
+                .filter(|(_, job)| job.state != ExecJobState::Running)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in finished
+                .into_iter()
+                .take(map.len().saturating_sub(MAX_TOTAL_EXEC_JOBS) + 1)
+            {
+                map.remove(&id);
+            }
+        }
+
         map.insert(status.job_id.clone(), status.clone());
-        status
+        Some(status)
     }
 
     pub fn update(&self, job_id: &str, f: impl FnOnce(&mut ExecJobStatus)) {
@@ -363,6 +400,21 @@ fn control_concurrency_semaphore() -> Arc<Semaphore> {
         .clone()
 }
 
+/// Max concurrent `/exec` handler invocations. Separate from the control
+/// semaphore so a burst of long-running host commands cannot starve container
+/// lifecycle endpoints (stop/launch), and vice versa. A synchronous exec holds
+/// a permit for the command's duration; a detached exec holds it only briefly
+/// while it spawns, with the running-job ceiling (`MAX_ACTIVE_EXEC_JOBS`)
+/// bounding detached concurrency (H3).
+const HOSTDO_EXEC_CONCURRENCY_LIMIT: usize = 32;
+
+pub(crate) fn hostdo_exec_semaphore() -> Arc<Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEMAPHORE
+        .get_or_init(|| Arc::new(Semaphore::new(HOSTDO_EXEC_CONCURRENCY_LIMIT)))
+        .clone()
+}
+
 /// Runs the manager control server.
 ///
 /// The server intentionally exposes only container lifecycle control.
@@ -384,10 +436,7 @@ pub async fn run_with_listener(
             "/exec/jobs",
             get(crate::server::core::exec_jobs_list_handler),
         )
-        .route(
-            "/exec/jobs/:id",
-            get(crate::server::core::exec_job_handler),
-        )
+        .route("/exec/jobs/:id", get(crate::server::core::exec_job_handler))
         .route(
             "/exec/jobs/:id/output",
             get(crate::server::core::exec_job_output_handler),
@@ -717,10 +766,7 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
 
-    fn test_server_state(
-        registry: SessionRegistry,
-        exec_jobs: ExecJobRegistry,
-    ) -> ServerState {
+    fn test_server_state(registry: SessionRegistry, exec_jobs: ExecJobRegistry) -> ServerState {
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (stop_tx, _stop_rx) = mpsc::channel(1);
         let (launch_tx, _launch_rx) = mpsc::channel(1);
@@ -841,8 +887,7 @@ mod tests {
             .await
             .expect("job status request");
         assert_eq!(status_response.status(), StatusCode::OK);
-        let status_body: serde_json::Value =
-            status_response.json().await.expect("job status json");
+        let status_body: serde_json::Value = status_response.json().await.expect("job status json");
         assert_eq!(status_body["job_id"], job_id);
 
         let output_response = client
@@ -853,8 +898,7 @@ mod tests {
             .await
             .expect("job output request");
         assert_eq!(output_response.status(), StatusCode::OK);
-        let output_body: serde_json::Value =
-            output_response.json().await.expect("job output json");
+        let output_body: serde_json::Value = output_response.json().await.expect("job output json");
         assert_eq!(output_body["job_id"], job_id);
         assert_eq!(output_body["stdout"], "ok\n");
 

@@ -3,9 +3,8 @@ mod tests {
     use crate::proxy::connect::parse_sni_from_tls_client_hello;
     use crate::proxy::core::{NetworkDecision, ProxyState, SourceIdentityStatus, SourcePriority};
     use crate::proxy::helpers::{
-        canonicalize_host,
-        decode_source_from_proxy_authorization, ensure_host_header_matches_target,
-        format_byte_count, proxy_authorization_matches_token,
+        canonicalize_host, decode_source_from_proxy_authorization,
+        ensure_host_header_matches_target, format_byte_count, proxy_authorization_matches_token,
         resolve_public_addrs, split_host_port,
     };
     use crate::proxy::http::{prompt_network, read_body_any};
@@ -86,12 +85,8 @@ global_rules_file = "/tmp/global.toml""#;
         let cfg: crate::config::Config = toml::from_str(raw).unwrap();
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
-        let state = ProxyState::new(
-            SharedConfig::new(Arc::new(cfg)),
-            pending_tx,
-            activity_tx,
-        )
-        .unwrap();
+        let state =
+            ProxyState::new(SharedConfig::new(Arc::new(cfg)), pending_tx, activity_tx).unwrap();
 
         let permits = (0..32)
             .map(|_| {
@@ -127,12 +122,8 @@ global_rules_file = "/tmp/global.toml""#;
         let cfg: crate::config::Config = toml::from_str(raw).unwrap();
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
-        let state = ProxyState::new(
-            SharedConfig::new(Arc::new(cfg)),
-            pending_tx,
-            activity_tx,
-        )
-        .unwrap();
+        let state =
+            ProxyState::new(SharedConfig::new(Arc::new(cfg)), pending_tx, activity_tx).unwrap();
         let first = state.with_fixed_source("p", "tool", "session-a", SourcePriority::Limited);
         let second = state.with_fixed_source("p", "tool", "session-b", SourcePriority::Limited);
 
@@ -166,12 +157,8 @@ global_rules_file = "/tmp/global.toml""#;
         let cfg: crate::config::Config = toml::from_str(raw).unwrap();
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
-        let state = ProxyState::new(
-            SharedConfig::new(Arc::new(cfg)),
-            pending_tx,
-            activity_tx,
-        )
-        .unwrap();
+        let state =
+            ProxyState::new(SharedConfig::new(Arc::new(cfg)), pending_tx, activity_tx).unwrap();
         let primary =
             state.with_fixed_source("p", "primary", "primary-session", SourcePriority::Primary);
 
@@ -200,12 +187,8 @@ global_rules_file = "/tmp/global.toml""#;
         let cfg: crate::config::Config = toml::from_str(raw).unwrap();
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
-        let state = ProxyState::new(
-            SharedConfig::new(Arc::new(cfg)),
-            pending_tx,
-            activity_tx,
-        )
-        .unwrap();
+        let state =
+            ProxyState::new(SharedConfig::new(Arc::new(cfg)), pending_tx, activity_tx).unwrap();
         let limited =
             state.with_fixed_source("p", "tool", "limited-session", SourcePriority::Limited);
 
@@ -233,12 +216,8 @@ global_rules_file = "/tmp/global.toml""#;
         let cfg: crate::config::Config = toml::from_str(raw).unwrap();
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
-        let state = ProxyState::new(
-            SharedConfig::new(Arc::new(cfg)),
-            pending_tx,
-            activity_tx,
-        )
-        .unwrap();
+        let state =
+            ProxyState::new(SharedConfig::new(Arc::new(cfg)), pending_tx, activity_tx).unwrap();
         let primary =
             state.with_fixed_source("p", "primary", "primary-session", SourcePriority::Primary);
         let limited =
@@ -312,13 +291,9 @@ host_port = 18081
         let cfg = with_temp_home(&root, || crate::config::load(&config_path)).expect("load config");
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
-        let state = ProxyState::new(
-            SharedConfig::new(Arc::new(cfg)),
-            pending_tx,
-            activity_tx,
-        )
-        .unwrap()
-        .with_fixed_source("workspace", "pi", "session", SourcePriority::Primary);
+        let state = ProxyState::new(SharedConfig::new(Arc::new(cfg)), pending_tx, activity_tx)
+            .unwrap()
+            .with_fixed_source("workspace", "pi", "session", SourcePriority::Primary);
 
         assert!(state.has_configured_localhost_forward("localhost", 8081));
         assert!(state.has_configured_localhost_forward("host.docker.internal", 8081));
@@ -434,12 +409,8 @@ docker_dir = "/tmp"
 global_rules_file = "/tmp/global.toml""#;
         let cfg: crate::config::Config = toml::from_str(raw).unwrap();
         let (activity_tx, _activity_rx) = mpsc::channel(16);
-        let state = ProxyState::new(
-            SharedConfig::new(Arc::new(cfg)),
-            pending_tx,
-            activity_tx,
-        )
-        .unwrap();
+        let state =
+            ProxyState::new(SharedConfig::new(Arc::new(cfg)), pending_tx, activity_tx).unwrap();
 
         let prompt_task = tokio::spawn(async move {
             prompt_network(

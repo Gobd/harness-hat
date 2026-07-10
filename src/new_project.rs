@@ -360,7 +360,8 @@ global_rules_file = "{}"
         fs::write(&config_path, raw).expect("write base config");
 
         append_project_block(&config_path, "proj", &canon, Some('p')).expect("append");
-        let cfg: Config = with_temp_home(&root, || crate::config::load(&config_path)).expect("load");
+        let cfg: Config =
+            with_temp_home(&root, || crate::config::load(&config_path)).expect("load");
 
         let proj = cfg.workspaces.first().expect("project");
         assert_eq!(proj.name, "proj");
@@ -393,7 +394,8 @@ global_rules_file = "{}"
         fs::write(&config_path, raw).expect("write base config");
 
         append_project_block(&config_path, "proj", &canon, None).expect("append");
-        let cfg: Config = with_temp_home(&root, || crate::config::load(&config_path)).expect("load");
+        let cfg: Config =
+            with_temp_home(&root, || crate::config::load(&config_path)).expect("load");
 
         let proj = cfg.workspaces.first().expect("project");
         assert_eq!(proj.name, "proj");

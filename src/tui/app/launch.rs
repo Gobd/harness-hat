@@ -25,8 +25,7 @@ impl App {
             self.push_log(
                 format!(
                     "failed to scan workspace templates for '{}': {}",
-                    workspace.name,
-                    e
+                    workspace.name, e
                 ),
                 true,
             );
@@ -69,8 +68,7 @@ impl App {
             self.push_log(
                 format!(
                     "failed to scan workspace templates for '{}': {}",
-                    cfg.workspaces[workspace_idx].name,
-                    e
+                    cfg.workspaces[workspace_idx].name, e
                 ),
                 true,
             );

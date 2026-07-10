@@ -66,8 +66,11 @@ pub fn run(
             println!("attaching to running session {}", session.alias);
             return crate::shell::exec_into_container(&session.name, &args);
         }
-        let template =
-            choose_template(&config, matched.canonical_path.as_path(), template_override.as_deref())?;
+        let template = choose_template(
+            &config,
+            matched.canonical_path.as_path(),
+            template_override.as_deref(),
+        )?;
         let resp = post_launch(&control_url, &token, &matched.name, &template)?;
         println!(
             "launched session {} ({}); attaching",

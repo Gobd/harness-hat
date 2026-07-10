@@ -11,6 +11,30 @@
 # - Use `killme` only when the user explicitly asks you to end this container.
 # """
 #
+# Hostdo (host-side command execution)
+#
+# default_policy: what happens when a command doesn't match any rule below.
+#   auto   — run without prompting (use with caution)
+#   prompt — ask the developer in the TUI (default)
+#   deny   — reject silently
+#
+# Passthrough command (exact argv match, auto-approved):
+#   [[hostdo.commands]]
+#   argv = ["cargo", "test"] # run inside container with `hostdo run cargo test`
+#   cwd = "$WORKSPACE"         # execution cwd only, not part of approval matching
+#   timeout_secs = 60
+#   approval_mode = "auto"
+#
+# Short-lived Docker runner (exact argv + image match, auto-approved):
+#   [[hostdo.commands]]
+#   argv = ["npm", "test"]   # run with `hostdo run --image node:20 npm test`
+#   image = "node:20"
+#   cwd = "$WORKSPACE"
+#   timeout_secs = 60
+#   approval_mode = "auto"
+#
+# $WORKSPACE = workspace path on the host.
+#
 # Network (HTTP/HTTPS proxy policy)
 #
 # Coder-style network rules. Deny matches win over allow matches; if no rule
@@ -36,6 +60,10 @@
 
 version = 1
 
+[hostdo]
+default_policy = "prompt"
+commands = []
+
 [network]
 allowlist = [
     "domain=chatgpt.com",
@@ -59,5 +87,7 @@ allowlist = [
     "domain=playwright-akamai.azureedge.net",
     "domain=playwright-verizon.azureedge.net",
     "domain=static.rust-lang.org",
+    "domain=sdmntprnorthcentralus.oaiusercontent.com",
+    "domain=crates.io",
 ]
 denylist = ["domain=160.79.104.10"]
