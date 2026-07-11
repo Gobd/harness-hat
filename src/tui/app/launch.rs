@@ -363,7 +363,7 @@ impl App {
             crate::server::SessionIdentity {
                 project: proj.name.clone(),
                 container_id: String::new(),
-                mount_target: ctr.mount_target.display().to_string(),
+                mount_target: crate::config::container_path_string(&ctr.mount_target),
             },
         );
 

@@ -163,117 +163,115 @@ async fn forward_build_stream<R>(
     }
 }
 
-pub(crate) async fn run_build_shell_command(
+pub(crate) async fn run_build_docker_commands(
     label: String,
-    shell_command: String,
+    docker_commands: Vec<Vec<String>>,
     launch_project_idx: usize,
     launch_container_idx: usize,
     launch_session_group: Option<usize>,
     cancel_flag: Arc<AtomicBool>,
     tx: mpsc::Sender<BuildEvent>,
 ) {
-    let mut cmd = tokio::process::Command::new("sh");
-    cmd.arg("-lc")
-        .arg(&shell_command)
-        .env("BUILDKIT_PROGRESS", "plain")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    #[cfg(unix)]
-    unsafe {
-        cmd.pre_exec(|| {
-            let rc = libc::setpgid(0, 0);
-            if rc == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
+    if docker_commands.is_empty() {
+        let _ = tx
+            .send(BuildEvent::Finished {
+                label,
+                launch_project_idx,
+                launch_container_idx,
+                launch_session_group,
+                success: false,
+                cancelled: false,
+                exit_code: None,
+                error: Some("no docker build commands were provided".to_string()),
+                diagnostic: None,
+            })
+            .await;
+        return;
     }
-
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            let _ = tx
-                .send(BuildEvent::Finished {
-                    label,
-                    launch_project_idx,
-                    launch_container_idx,
-                    launch_session_group,
-                    success: false,
-                    cancelled: false,
-                    exit_code: None,
-                    error: Some(e.to_string()),
-                    diagnostic: None,
-                })
-                .await;
-            return;
-        }
-    };
 
     let stderr_tail: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
     let output_tail: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
-    let stdout_task = child.stdout.take().map(|stdout| {
-        let tx = tx.clone();
-        let output_tail = output_tail.clone();
-        tokio::spawn(async move {
-            forward_build_stream(stdout, "build: ", false, None, output_tail, tx).await;
-        })
-    });
-    let stderr_task = child.stderr.take().map(|stderr| {
-        let tx = tx.clone();
-        let stderr_tail = stderr_tail.clone();
-        let output_tail = output_tail.clone();
-        tokio::spawn(async move {
-            forward_build_stream(stderr, "build: ", true, Some(stderr_tail), output_tail, tx).await;
-        })
-    });
 
     let mut cancelled = false;
-    let status = loop {
-        if cancel_flag.load(Ordering::SeqCst) {
-            cancelled = true;
-            #[cfg(unix)]
-            if let Some(pid) = child.id() {
-                let pgid = format!("-{}", pid);
-                let _ = tokio::process::Command::new("kill")
-                    .args(["-TERM", &pgid])
-                    .status()
-                    .await;
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                let _ = tokio::process::Command::new("kill")
-                    .args(["-KILL", &pgid])
-                    .status()
-                    .await;
+    let mut final_status = None;
+    let mut spawn_error = None;
+
+    for docker_args in docker_commands {
+        let mut cmd = tokio::process::Command::new("docker");
+        cmd.args(&docker_args)
+            .env("BUILDKIT_PROGRESS", "plain")
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        #[cfg(unix)]
+        cmd.process_group(0);
+
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                spawn_error = Some(e.to_string());
+                break;
             }
-            let _ = child.start_kill();
-            break child.wait().await.ok();
+        };
+
+        let stdout_task = child.stdout.take().map(|stdout| {
+            let tx = tx.clone();
+            let output_tail = output_tail.clone();
+            tokio::spawn(async move {
+                forward_build_stream(stdout, "build: ", false, None, output_tail, tx).await;
+            })
+        });
+        let stderr_task = child.stderr.take().map(|stderr| {
+            let tx = tx.clone();
+            let stderr_tail = stderr_tail.clone();
+            let output_tail = output_tail.clone();
+            tokio::spawn(async move {
+                forward_build_stream(stderr, "build: ", true, Some(stderr_tail), output_tail, tx)
+                    .await;
+            })
+        });
+
+        let (status, command_cancelled) =
+            wait_for_build_child(&mut child, Arc::clone(&cancel_flag)).await;
+        cancelled = command_cancelled;
+
+        if let Some(task) = stdout_task {
+            let _ = task.await;
+        }
+        if let Some(task) = stderr_task {
+            let _ = task.await;
         }
 
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
-            Err(_) => break None,
+        final_status = status;
+        if cancelled || !final_status.as_ref().map(|s| s.success()).unwrap_or(false) {
+            break;
         }
-    };
-
-    if let Some(task) = stdout_task {
-        let _ = task.await;
-    }
-    if let Some(task) = stderr_task {
-        let _ = task.await;
     }
 
-    let success = !cancelled && status.map(|s| s.success()).unwrap_or(false);
-    let exit_code = status.and_then(|s| s.code());
-    let join_tail = |tail: &Arc<Mutex<VecDeque<String>>>| {
-        tail.lock().ok().and_then(|lines| {
-            (!lines.is_empty()).then(|| lines.iter().cloned().collect::<Vec<_>>().join(" | "))
-        })
-    };
+    if let Some(error) = spawn_error {
+        let diagnostic = join_build_tail(&stderr_tail).or_else(|| join_build_tail(&output_tail));
+        let _ = tx
+            .send(BuildEvent::Finished {
+                label,
+                launch_project_idx,
+                launch_container_idx,
+                launch_session_group,
+                success: false,
+                cancelled: false,
+                exit_code: None,
+                error: Some(error),
+                diagnostic,
+            })
+            .await;
+        return;
+    }
+
+    let success = !cancelled && final_status.as_ref().map(|s| s.success()).unwrap_or(false);
+    let exit_code = final_status.and_then(|s| s.code());
     // Prefer lines that looked like errors; otherwise fall back to the tail of
     // raw output so a failure is never reported with an empty diagnostic.
-    let diagnostic = join_tail(&stderr_tail).or_else(|| join_tail(&output_tail));
+    let diagnostic = join_build_tail(&stderr_tail).or_else(|| join_build_tail(&output_tail));
     let _ = tx
         .send(BuildEvent::Finished {
             label,
@@ -287,6 +285,56 @@ pub(crate) async fn run_build_shell_command(
             diagnostic,
         })
         .await;
+}
+
+async fn wait_for_build_child(
+    child: &mut tokio::process::Child,
+    cancel_flag: Arc<AtomicBool>,
+) -> (Option<std::process::ExitStatus>, bool) {
+    loop {
+        if cancel_flag.load(Ordering::SeqCst) {
+            kill_build_child_tree(child).await;
+            return (child.wait().await.ok(), true);
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => return (Some(status), false),
+            Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            Err(_) => return (None, false),
+        }
+    }
+}
+
+async fn kill_build_child_tree(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
+    }
+
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let pid = pid.to_string();
+        let _ = tokio::process::Command::new("taskkill")
+            .args(["/PID", pid.as_str(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+    }
+
+    let _ = child.start_kill();
+}
+
+fn join_build_tail(tail: &Arc<Mutex<VecDeque<String>>>) -> Option<String> {
+    tail.lock().ok().and_then(|lines| {
+        (!lines.is_empty()).then(|| lines.iter().cloned().collect::<Vec<_>>().join(" | "))
+    })
 }
 
 pub(crate) fn is_scroll_mode_toggle_key(key: KeyEvent) -> bool {

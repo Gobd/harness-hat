@@ -426,3 +426,21 @@ fn merge_mounts_lets_later_layers_override_same_destination() {
     assert_eq!(at_dest[0].host, override_mount.host);
     assert_eq!(at_dest[0].mode, MountMode::Rw);
 }
+
+#[test]
+fn container_path_helpers_use_posix_semantics() {
+    use crate::config::{container_path_string, is_absolute_container_path, join_container_path};
+    use std::path::Path;
+
+    assert_eq!(
+        container_path_string(Path::new("\\home\\coder\\project")),
+        "/home/coder/project"
+    );
+    assert!(is_absolute_container_path(Path::new("\\home\\coder")));
+    assert!(!is_absolute_container_path(Path::new("C:\\Users\\dev")));
+    assert_eq!(
+        join_container_path("/workspace", Path::new("nested\\crate")),
+        "/workspace/nested/crate"
+    );
+    assert_eq!(join_container_path("/", Path::new("nested")), "/nested");
+}

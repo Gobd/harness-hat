@@ -10,7 +10,7 @@ use tracing::instrument;
 
 use crate::config::{
     Config, ContainerDefaults, ContainerMount, ContainerProfile, LocalhostForward, WorkspaceConfig,
-    default_mount_target,
+    container_path_string, default_mount_target, is_absolute_container_path,
 };
 
 const WORKSPACE_SIDEBAR_HOTKEY_POOL: &[char] = &[
@@ -210,16 +210,10 @@ fn expand_config_paths(config: &mut Config) -> Result<()> {
             mount.host = expand_path(&mount.host)?;
         }
     }
-    if let Some(p) = &config.defaults.containers.mount_target {
-        config.defaults.containers.mount_target = Some(expand_path(p)?);
-    }
     for mount in &mut config.defaults.containers.mounts {
         mount.host = expand_path(&mount.host)?;
     }
     for profile in config.container_profiles.values_mut() {
-        if let Some(p) = &profile.mount_target {
-            profile.mount_target = Some(expand_path(p)?);
-        }
         for mount in &mut profile.mounts {
             mount.host = expand_path(&mount.host)?;
         }
@@ -828,6 +822,12 @@ fn validate(config: &Config) -> Result<()> {
             &format!("container profile '{}': command", ctr.name),
             ctr.command.as_deref(),
         )?;
+        anyhow::ensure!(
+            is_absolute_container_path(&ctr.mount_target),
+            "container '{}': mount_target must be an absolute container path: {}",
+            ctr.name,
+            container_path_string(&ctr.mount_target)
+        );
         for path in &ctr.mcp_log_paths {
             anyhow::ensure!(
                 !path.as_os_str().is_empty(),
@@ -835,10 +835,10 @@ fn validate(config: &Config) -> Result<()> {
                 ctr.name
             );
             anyhow::ensure!(
-                path.is_absolute(),
+                is_absolute_container_path(path),
                 "container '{}': mcp_log_paths must be absolute container paths: {}",
                 ctr.name,
-                path.display()
+                container_path_string(path)
             );
         }
         if let Some(pattern) = &ctr.mcp_log_pattern {
@@ -865,10 +865,10 @@ fn validate(config: &Config) -> Result<()> {
                 ctr.name
             );
             anyhow::ensure!(
-                mount.container.is_absolute(),
+                is_absolute_container_path(&mount.container),
                 "container '{}': mount.container must be an absolute path: {}",
                 ctr.name,
-                mount.container.display()
+                container_path_string(&mount.container)
             );
             reject_sensitive_mount_source(&format!("container '{}'", ctr.name), &mount.host)?;
         }

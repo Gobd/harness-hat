@@ -118,7 +118,7 @@ impl App {
                     let command = self
                         .build_task
                         .take()
-                        .map(|task| task.shell_command)
+                        .map(|task| task.command_display)
                         .unwrap_or_default();
                     if let Some(error) = error {
                         self.build_project_idx = None;

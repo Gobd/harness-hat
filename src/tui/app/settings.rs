@@ -525,7 +525,7 @@ impl App {
         );
 
         let requested = match self.build_cursor {
-            0 => Some(("build + launch", shell_command_for_docker_args(&build_cmd))),
+            0 => Some(("build + launch", build_cmd)),
             1 => {
                 self.build_container_idx = None;
                 self.build_project_idx = None;
@@ -535,11 +535,11 @@ impl App {
             _ => None,
         };
 
-        let Some((label, build_shell_command)) = requested else {
+        let Some((label, build_command)) = requested else {
             return;
         };
 
-        let mut shell_commands: Vec<String> = Vec::new();
+        let mut docker_commands: Vec<Vec<String>> = Vec::new();
         if let Some(base_cmd) = maybe_base_cmd {
             let base_image = Self::BASE_IMAGE_TAG;
             match docker_image_exists(base_image) {
@@ -561,7 +561,7 @@ impl App {
                         format!("base image '{base_image}' not found; building it first"),
                         false,
                     );
-                    shell_commands.push(shell_command_for_docker_args(&base_cmd));
+                    docker_commands.push(base_cmd);
                 }
                 Err(e) => {
                     let base_dockerfile = cfg.docker_dir.join("harness-hat-base.dockerfile");
@@ -582,15 +582,25 @@ impl App {
                         ),
                         true,
                     );
-                    shell_commands.push(shell_command_for_docker_args(&base_cmd));
+                    docker_commands.push(base_cmd);
                 }
             }
         }
 
-        shell_commands.push(build_shell_command);
-        let shell_command = shell_commands.join(" && ");
+        docker_commands.push(build_command);
+        let command_display = docker_commands
+            .iter()
+            .map(|cmd| shell_command_for_docker_args(cmd))
+            .collect::<Vec<_>>()
+            .join(" && ");
 
-        self.start_docker_build(label, shell_command, launch_project_idx, ctr_idx);
+        self.start_docker_build(
+            label,
+            docker_commands,
+            command_display,
+            launch_project_idx,
+            ctr_idx,
+        );
     }
 
     pub fn build_is_running(&self) -> bool {
@@ -600,7 +610,7 @@ impl App {
     pub fn active_build_command(&self) -> Option<&str> {
         self.build_task
             .as_ref()
-            .map(|task| task.shell_command.as_str())
+            .map(|task| task.command_display.as_str())
             .or_else(|| {
                 self.build_finished
                     .as_ref()

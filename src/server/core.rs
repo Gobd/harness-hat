@@ -17,6 +17,8 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::activity::{Activity, ActivityEvent, ActivityKind, ActivityState};
+use crate::config::{MountMode, container_path_string, join_container_path};
+use crate::container::docker_bind_mount_args;
 use crate::rules::NetworkPolicy;
 use crate::server::{
     ApprovalDecision, ErrorResponse, ExecJobKillResponse, ExecJobListResponse, ExecJobOutputQuery,
@@ -103,9 +105,8 @@ pub(super) async fn exec_handler(
         .await;
     };
 
-    let request_cwd = PathBuf::from(&req.cwd);
     let host_cwd = match resolve_host_cwd_in_workspace(
-        &request_cwd,
+        &req.cwd,
         Some(identity.mount_target.as_str()),
         &project.canonical_path,
     ) {
@@ -160,9 +161,9 @@ pub(super) async fn exec_handler(
         .map(|requested| requested.min(rule_ceiling))
         .unwrap_or(rule_ceiling)
         .clamp(1, MAX_TIMEOUT_SECS);
-    let runner_mount_target = PathBuf::from(&identity.mount_target);
+    let runner_mount_target = container_path_string(Path::new(&identity.mount_target));
     let runner_cwd = resolve_runner_container_cwd(
-        &request_cwd,
+        &req.cwd,
         &host_cwd,
         &runner_mount_target,
         &project.canonical_path,
@@ -229,7 +230,7 @@ pub(super) async fn exec_handler(
         image: req.image.clone(),
         timeout_secs,
         cwd: host_cwd.clone(),
-        rule_cwd: request_cwd,
+        rule_cwd: PathBuf::from(&req.cwd),
         matched_command,
         response_tx: Some(response_tx),
     };
@@ -430,8 +431,8 @@ struct CommandRun {
     request_cwd: String,
     timeout_secs: u64,
     workspace_path: PathBuf,
-    mount_target: PathBuf,
-    runner_cwd: PathBuf,
+    mount_target: String,
+    runner_cwd: String,
     activity_id: String,
     cancel_flag: Arc<AtomicBool>,
     decision_kind: DecisionKind,
@@ -1029,17 +1030,18 @@ fn build_command(run: &CommandRun) -> Result<TokioCommand, ExecFailure> {
     let mut cmd = if let Some(image) = &run.image {
         validate_hostdo_image(image)?;
         let mut cmd = TokioCommand::new("docker");
-        cmd.arg("run")
-            .arg("--rm")
-            .arg("-i")
-            .arg("-v")
-            .arg(format!(
-                "{}:{}",
-                run.workspace_path.display(),
-                run.mount_target.display()
-            ))
-            .arg("-w")
-            .arg(run.runner_cwd.display().to_string())
+        cmd.arg("run").arg("--rm").arg("-i");
+        for arg in docker_bind_mount_args(
+            &run.workspace_path.display().to_string(),
+            &run.mount_target,
+            &MountMode::Rw,
+        )
+        .map_err(|e| ExecFailure::Message(e.to_string()))?
+        {
+            cmd.arg(arg);
+        }
+        cmd.arg("-w")
+            .arg(&run.runner_cwd)
             // `--` terminates option parsing so a crafted image/argv value
             // beginning with `-` cannot be reinterpreted as a `docker run` flag
             // (M2). validate_hostdo_image already rejects a leading `-`; this is
@@ -1161,6 +1163,16 @@ async fn kill_child_and_group(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
         unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+    }
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let pid = pid.to_string();
+        let _ = TokioCommand::new("taskkill")
+            .args(["/PID", pid.as_str(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
     }
     let _ = child.kill().await;
     let _ = child.wait().await;
@@ -1319,7 +1331,7 @@ fn supports_exec_jobs(headers: &HeaderMap) -> bool {
 }
 
 fn resolve_host_cwd_in_workspace(
-    request_cwd: &Path,
+    request_cwd: &str,
     mount_target: Option<&str>,
     workspace_host_path: &Path,
 ) -> Result<PathBuf, String> {
@@ -1327,15 +1339,17 @@ fn resolve_host_cwd_in_workspace(
         .canonicalize()
         .unwrap_or_else(|_| workspace_host_path.to_path_buf());
     if let Some(mount_target) = mount_target {
-        let mount_target = Path::new(mount_target);
-        if request_cwd == mount_target {
+        let mount_target = mount_target.replace('\\', "/");
+        let request_cwd_posix = request_cwd.replace('\\', "/");
+        if request_cwd_posix == mount_target {
             return Ok(workspace_root);
         }
-        if let Ok(rel) = request_cwd.strip_prefix(mount_target) {
-            return confine_host_cwd_to_workspace(&workspace_root.join(rel), &workspace_root);
+        if let Some(rel) = strip_container_path_prefix(&request_cwd_posix, &mount_target) {
+            let host_rel = posix_relative_to_host_path(rel);
+            return confine_host_cwd_to_workspace(&workspace_root.join(host_rel), &workspace_root);
         }
     }
-    confine_host_cwd_to_workspace(request_cwd, &workspace_root)
+    confine_host_cwd_to_workspace(Path::new(request_cwd), &workspace_root)
 }
 
 pub(super) fn confine_host_cwd_to_workspace(
@@ -1360,24 +1374,43 @@ pub(super) fn confine_host_cwd_to_workspace(
 }
 
 fn resolve_runner_container_cwd(
-    request_cwd: &Path,
+    request_cwd: &str,
     host_cwd: &Path,
-    mount_target: &Path,
+    mount_target: &str,
     workspace_host_path: &Path,
-) -> PathBuf {
+) -> String {
     let workspace_root = workspace_host_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_host_path.to_path_buf());
     if host_cwd == workspace_root.as_path() || host_cwd.starts_with(&workspace_root) {
         if let Ok(rel) = host_cwd.strip_prefix(&workspace_root) {
-            return mount_target.join(rel);
+            return join_container_path(mount_target, rel);
         }
     }
-    if request_cwd.is_absolute() {
-        request_cwd.to_path_buf()
+    let request_cwd = request_cwd.replace('\\', "/");
+    if request_cwd.starts_with('/') {
+        request_cwd
     } else {
-        mount_target.to_path_buf()
+        mount_target.to_string()
     }
+}
+
+fn strip_container_path_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return path.strip_prefix('/');
+    }
+    if path == prefix {
+        return Some("");
+    }
+    path.strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('/'))
+}
+
+fn posix_relative_to_host_path(rel: &str) -> PathBuf {
+    rel.split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<PathBuf>()
 }
 
 fn append_captured_output(output: &mut String, line: &str) {
@@ -1413,7 +1446,7 @@ fn tail_lines(text: &str, count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::hostdo_child_env;
+    use super::{hostdo_child_env, resolve_host_cwd_in_workspace, resolve_runner_container_cwd};
 
     fn host_env(name: &str) -> Option<String> {
         match name {
@@ -1458,5 +1491,33 @@ mod tests {
         // Unset host vars are skipped, duplicates of the base set deduped.
         assert!(!names.contains(&"MISSING_VAR"));
         assert_eq!(names.iter().filter(|n| **n == "PATH").count(), 1);
+    }
+
+    #[test]
+    fn hostdo_cwd_maps_posix_container_paths_to_host_workspace() {
+        let root = tempfile::tempdir().expect("temp workspace");
+        let nested = root.path().join("src");
+        std::fs::create_dir_all(&nested).expect("nested dir");
+
+        let host_cwd =
+            resolve_host_cwd_in_workspace("/workspace/src", Some("/workspace"), root.path())
+                .expect("host cwd");
+        assert_eq!(host_cwd, nested.canonicalize().expect("canonical nested"));
+
+        let runner_cwd =
+            resolve_runner_container_cwd("/workspace/src", &host_cwd, "/workspace", root.path());
+        assert_eq!(runner_cwd, "/workspace/src");
+    }
+
+    #[test]
+    fn hostdo_cwd_normalizes_windows_style_mount_identity() {
+        let root = tempfile::tempdir().expect("temp workspace");
+        let nested = root.path().join("src");
+        std::fs::create_dir_all(&nested).expect("nested dir");
+
+        let host_cwd =
+            resolve_host_cwd_in_workspace("\\workspace\\src", Some("\\workspace"), root.path())
+                .expect("host cwd");
+        assert_eq!(host_cwd, nested.canonicalize().expect("canonical nested"));
     }
 }

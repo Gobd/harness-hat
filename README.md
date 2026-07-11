@@ -33,9 +33,9 @@ Harness Hat overlaps with several development-environment, agent-sandbox, and co
 
 ## Requirements
 
-- A macOS or Linux host with Docker — Docker Desktop on macOS, Docker Engine or Docker Desktop on Linux — and the `docker` CLI on your `PATH`.
+- A macOS, Linux, or Windows 11 host with Docker and the `docker` CLI on your `PATH`. Windows support targets Docker Desktop with the WSL2 backend running Linux containers; Windows containers are not supported.
 - A Rust toolchain, for `cargo install`.
-- For strict-network mode: `/dev/net/tun` on the host. See [Container privileges](#container-privileges) for what this implies — it matters if your organization restricts privileged containers.
+- For strict-network mode: `/dev/net/tun` inside the Linux container. See [Container privileges](#container-privileges) for what this implies — it matters if your organization restricts privileged containers.
 
 ## Quick start
 
@@ -144,7 +144,7 @@ The result: an application that "doesn't honor `HTTPS_PROXY`" still gets its pac
 Strict mode changes how the container is started:
 
 - **Linux**: the container starts with `--cap-drop ALL` and re-adds only `NET_ADMIN` (iptables + TUN setup), `SETUID`, and `SETGID` (the init's downward `gosu` drop to uid 1000), plus a `--device /dev/net/tun` passthrough — not full `--privileged`. If `/dev/net/tun` is missing on the host, the launch fails with an error instead of silently escalating.
-- **macOS (Docker Desktop)**: the container is started `--privileged`, because that is the only way Docker Desktop exposes `/dev/net/tun`.
+- **macOS and Windows 11 (Docker Desktop)**: the container is started `--privileged`, because Docker Desktop exposes `/dev/net/tun` to Linux containers through that mode.
 
 ## Localhost port passthrough
 

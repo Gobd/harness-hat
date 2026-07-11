@@ -305,10 +305,10 @@ enum BuildEvent {
 
 #[derive(Debug)]
 struct BuildTaskState {
-    shell_command: String,
+    command_display: String,
     /// Flipped to request cooperative cancellation of the spawned build task.
     cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Handle to the spawned build task so it can be aborted on quit.
+    /// Handle to the spawned build task so shutdown can wait for cleanup.
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -325,6 +325,86 @@ pub(crate) struct BuildFinished {
 
 // ── Event loop ────────────────────────────────────────────────────────────────
 
+/// Frames the stdout writer thread may hold before new frames are dropped.
+/// The writer normally drains a frame in well under one 50ms tick, so any
+/// backlog means the terminal emulator has stopped reading the pty.
+const FRAME_QUEUE_CAPACITY: usize = 4;
+
+/// Non-blocking `Write` sink for the ratatui backend.
+///
+/// Bytes accumulate in `buf` until `flush()` — crossterm batches each frame
+/// (and each `execute!`) into exactly one flush — then the complete batch is
+/// handed to a dedicated writer thread over a bounded channel. If the channel
+/// is full, the terminal emulator has stopped draining stdout (e.g. stalled
+/// by screen capture); the frame is dropped whole and `dropped` is flagged so
+/// the event loop forces a full repaint once the terminal recovers. Only
+/// whole batches are ever dropped, so escape sequences never tear. This keeps
+/// the TUI thread from ever blocking in `write(2)`, which previously froze
+/// input handling for as long as the terminal was stalled.
+struct FrameWriter {
+    buf: Vec<u8>,
+    tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    dropped: Arc<AtomicBool>,
+    /// Set once the event loop has exited. The writes after that point are
+    /// the terminal restore sequences (leave alternate screen, show cursor),
+    /// which must never be dropped — a blocking send here can only stall if
+    /// the terminal emulator still isn't draining stdout, in which case the
+    /// restore lands as soon as it recovers. Shared with `run()` via an Arc
+    /// because the writer is owned by the ratatui backend after construction.
+    shutdown_blocking: Arc<AtomicBool>,
+}
+
+impl std::io::Write for FrameWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let frame = std::mem::take(&mut self.buf);
+        if self.shutdown_blocking.load(Ordering::Relaxed) {
+            return self.tx.send(frame).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "stdout writer thread exited",
+                )
+            });
+        }
+        match self.tx.try_send(frame) {
+            Ok(()) => Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                self.dropped.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "stdout writer thread exited",
+            )),
+        }
+    }
+}
+
+/// Owns the only blocking writes to the real stdout. Exits when every
+/// `FrameWriter` clone of the sender is dropped (after draining the queue).
+fn spawn_stdout_writer(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("tui-stdout-writer".into())
+        .spawn(move || {
+            use std::io::Write;
+            let mut stdout = std::io::stdout();
+            while let Ok(frame) = rx.recv() {
+                if stdout.write_all(&frame).is_err() {
+                    break;
+                }
+                let _ = stdout.flush();
+            }
+        })
+        .expect("failed to spawn tui-stdout-writer thread")
+}
+
 pub async fn run(mut app: App) -> Result<()> {
     // Must run *before* `enable_raw_mode()`: the guard restores full termios on
     // drop, so capturing termios while already in raw mode would "restore" the
@@ -339,14 +419,30 @@ pub async fn run(mut app: App) -> Result<()> {
         cursor::Hide
     )?;
     let mut restore_guard = TerminalRestoreGuard::new();
-    let backend = CrosstermBackend::new(stdout);
+    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel(FRAME_QUEUE_CAPACITY);
+    let frames_dropped = Arc::new(AtomicBool::new(false));
+    let shutdown_blocking = Arc::new(AtomicBool::new(false));
+    let writer_handle = spawn_stdout_writer(frame_rx);
+    let backend = CrosstermBackend::new(FrameWriter {
+        buf: Vec::new(),
+        tx: frame_tx,
+        dropped: Arc::clone(&frames_dropped),
+        shutdown_blocking: Arc::clone(&shutdown_blocking),
+    });
     let mut terminal = Terminal::new(backend)?;
 
-    let result = event_loop(&mut terminal, &mut app).await;
+    let result = event_loop(&mut terminal, &mut app, &frames_dropped).await;
 
     disable_raw_mode()?;
+    shutdown_blocking.store(true, Ordering::Relaxed);
     restore_terminal_output(terminal.backend_mut())?;
     terminal.show_cursor()?;
+    // Dropping the terminal drops the FrameWriter, which closes the frame
+    // channel; the writer thread drains the queued restore sequences above
+    // and exits, so joining it guarantees the terminal is restored before we
+    // return.
+    drop(terminal);
+    let _ = writer_handle.join();
     restore_guard.disarm();
 
     result
@@ -446,8 +542,9 @@ impl Drop for TermiosGuard {
 }
 
 async fn event_loop(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    terminal: &mut Terminal<CrosstermBackend<FrameWriter>>,
     app: &mut App,
+    frames_dropped: &AtomicBool,
 ) -> Result<()> {
     let mut events = EventStream::new();
     let tick = tokio::time::Duration::from_millis(50);
@@ -475,10 +572,18 @@ async fn event_loop(
             approval_bell_rung = false;
         }
         ring_new_session_bells(terminal.backend_mut(), app, &mut session_bell_counts)?;
+        // A frame was dropped because the terminal emulator stopped draining
+        // stdout (e.g. stalled by a screen share), so ratatui's back buffer
+        // no longer matches what's on screen. Force a full repaint; clear()
+        // goes through the same drop-instead-of-block writer, so this cannot
+        // wedge the loop and converges once the terminal drains again.
+        if frames_dropped.swap(false, Ordering::Relaxed) {
+            terminal.clear()?;
+        }
         terminal.draw(|frame| render::render(frame, app))?;
 
         if app.should_quit {
-            app.cancel_docker_build();
+            app.cancel_docker_build_for_shutdown().await;
             app.terminate_all_sessions();
             break;
         }

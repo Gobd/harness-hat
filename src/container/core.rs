@@ -5,6 +5,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Term;
+use anyhow::Result;
 /// Container session management.
 ///
 /// Each running container gets a `ContainerSession` that owns a PTY process
@@ -489,6 +490,35 @@ pub(crate) fn mount_mode_arg(mode: &MountMode) -> &'static str {
         MountMode::Ro => "ro",
         MountMode::Rw => "rw",
     }
+}
+
+pub(crate) fn docker_bind_mount_args(
+    source: &str,
+    target: &str,
+    mode: &MountMode,
+) -> Result<Vec<String>> {
+    validate_docker_mount_value(source, "mount source")?;
+    validate_docker_mount_value(target, "mount target")?;
+
+    let mut spec = format!("type=bind,source={source},target={target}");
+    if matches!(mode, MountMode::Ro) {
+        spec.push_str(",readonly");
+    }
+
+    Ok(vec!["--mount".to_string(), spec])
+}
+
+fn validate_docker_mount_value(value: &str, label: &str) -> Result<()> {
+    anyhow::ensure!(!value.trim().is_empty(), "{label} must not be empty");
+    anyhow::ensure!(
+        !value.contains(','),
+        "{label} contains ',' which cannot be represented safely in docker --mount: {value:?}"
+    );
+    anyhow::ensure!(
+        !value.contains('\n') && !value.contains('\r') && !value.contains('\0'),
+        "{label} contains a control character: {value:?}"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

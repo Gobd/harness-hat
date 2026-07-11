@@ -3,6 +3,7 @@
 ## 0.8.0 Unreleased
 
 ### Added
+- MVP Windows 11 host support for Docker Desktop Linux containers. Runtime bind mounts now use Docker `--mount` syntax so Windows drive-letter paths work, strict-network Docker Desktop launches use `--privileged`, Docker image builds no longer depend on `sh -lc`, and Windows cancellation paths use `taskkill /T /F`.
 - `allowed_hosts` configuration field in `harness-hat.toml` (at defaults and per-container level) for hosts that bypass network approval prompts without needing `harness-rules.toml` entries. Supports wildcard patterns matching.
 - New `hh shell [ID] [COMMAND...]` subcommand: open an interactive shell in a running session, or run a one-off command in it. With no ID it lists running sessions and their IDs. Any args after the ID are passed verbatim to `docker exec` (e.g. `hh shell 0042 claude --resume`). Works as a thin Docker attach, independent of the manager TUI; falls back to `docker exec -i` (no `-t`) when stdin is not a terminal so piped commands like `echo prompt | hh shell ID cat` work.
 - Restored the in-container `hostdo` command and tracked hostdo jobs (`run`/`list`/`status`/`tail`/`send`/`stop`) on top of the new `/exec` and `/exec/jobs/*` control-server endpoints.
@@ -80,6 +81,7 @@
 - The Claude Code OAuth refresh token is no longer injected into containers — neither as `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` nor inside the seeded `~/.claude.json`'s `claudeAiOauth` block. Containers can't write a refreshed token back to the host's macOS Keychain, so allowing in-container refresh would rotate (and invalidate) the host's refresh token while the new token died with the container, breaking auth on the next launch. Sessions in the container are now bounded by the access token lifetime; re-run Claude locally to refresh the Keychain.
 
 ### Fixed
+- The TUI no longer hard-freezes when the terminal emulator stops draining output (e.g. stalled by Teams/Zoom screen sharing). Rendering now goes through a dedicated stdout writer thread that drops frames instead of blocking when the terminal stalls, then forces a full repaint on recovery; and the TUI runs on its own thread with a dedicated runtime, so the control server and network proxy keep serving containers even while the TUI is stalled or busy in a synchronous docker call.
 - Generated starter `harness-rules.toml` files once again document the hostdo rule model, including exact command examples and image-backed hostdo examples.
 - Build tasks can now be cancelled (cooperative flag + task abort) on TUI quit.
 - Pressing Esc or `h` on the build pane while a build is running now returns to the sidebar without canceling the build; press `C` to cancel a running build.

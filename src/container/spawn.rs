@@ -15,10 +15,11 @@ use std::time::Instant;
 use tempfile::NamedTempFile;
 use tracing::{debug, info, instrument, warn};
 
-use crate::config::ContainerDef;
+use crate::config::{ContainerDef, MountMode, container_path_file_name, container_path_string};
 use crate::container::core::{
     LABEL_ALIAS, LABEL_SESSION, LABEL_TEMPLATE, LABEL_WORKSPACE, TERMINAL_SCROLLBACK_LINES,
-    TermSize, loopback_to_host_docker, mount_mode_arg, parse_docker_label, sanitize_docker_name,
+    TermSize, docker_bind_mount_args, loopback_to_host_docker, parse_docker_label,
+    sanitize_docker_name,
 };
 use crate::container::helpers::detect_default_colors;
 use crate::container::{ContainerSession, SessionEventProxy, read_container_id};
@@ -52,7 +53,7 @@ pub fn spawn(
     rows: u16,
     cols: u16,
 ) -> Result<(ContainerSession, Vec<String>)> {
-    let mount_str = ctr.mount_target.display().to_string();
+    let mount_str = container_path_string(&ctr.mount_target);
 
     let cidfile =
         std::env::temp_dir().join(format!("harness-hat-cid-{}.txt", uuid::Uuid::new_v4()));
@@ -126,7 +127,7 @@ pub fn spawn(
 
     if strict_network {
         docker_args.extend_from_slice(&["--user".to_string(), "0:0".to_string()]);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             // Docker Desktop exposes `/dev/net/tun` for strict mode only when the
             // container is privileged.
@@ -162,18 +163,12 @@ pub fn spawn(
     push_opt_flag(&mut docker_args, "--cpus", ctr.cpus.as_deref());
     push_opt_flag(&mut docker_args, "--shm-size", ctr.shm_size.as_deref());
 
-    // Reject embedded `:` / `,` in any path that goes through `-v host:container:mode`.
-    // Without this, `host=/tmp/a:ro,/etc/shadow` would silently change the mount
-    // mode or add a second mount via Docker's option parser.
-    validate_bind_path(&workspace_path.display().to_string(), "workspace_path")?;
-    validate_bind_path(&mount_str, "container mount target")?;
-
-    docker_args.extend_from_slice(&[
-        "-v".to_string(),
-        format!("{}:{}:rw", workspace_path.display(), mount_str),
-        "-w".to_string(),
-        mount_str.clone(),
-    ]);
+    docker_args.extend(docker_bind_mount_args(
+        &workspace_path.display().to_string(),
+        &mount_str,
+        &MountMode::Rw,
+    )?);
+    docker_args.extend_from_slice(&["-w".to_string(), mount_str.clone()]);
 
     let hostdo_tempfile = match hostdo_script_host_path {
         Some(path) => Some(prepare_executable_helper_script(
@@ -183,10 +178,11 @@ pub fn spawn(
         None => None,
     };
     if let Some(hostdo) = hostdo_tempfile.as_ref() {
-        docker_args.extend_from_slice(&[
-            "-v".to_string(),
-            format!("{}:/usr/local/bin/hostdo:ro", hostdo.path().display()),
-        ]);
+        docker_args.extend(docker_bind_mount_args(
+            &hostdo.path().display().to_string(),
+            "/usr/local/bin/hostdo",
+            &MountMode::Ro,
+        )?);
     }
 
     // Prepare secure env file to prevent token leakage via `ps`
@@ -355,22 +351,31 @@ pub fn spawn(
     // `/home/coder/.claude/.claude.json` must come *after* the directory mount
     // on `/home/coder/.claude` — otherwise the directory mount overwrites it.
     let mut sorted_mounts: Vec<&crate::config::ContainerMount> = ctr.mounts.iter().collect();
-    sorted_mounts.sort_by_key(|m| m.container.components().count());
+    sorted_mounts.sort_by_key(|m| {
+        container_path_string(&m.container)
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .count()
+    });
     let mut seed_tempfiles: Vec<NamedTempFile> = Vec::new();
     let has_top_level_claude_config_mount = sorted_mounts
         .iter()
-        .any(|mount| mount.container == Path::new(CLAUDE_CONFIG_CONTAINER_PATH));
+        .any(|mount| container_path_string(&mount.container) == CLAUDE_CONFIG_CONTAINER_PATH);
     for mount in &sorted_mounts {
         let seeded = seed_private_mount(mount, claude_oauth_token_available)?;
+        if seeded.is_none() && !mount.host.exists() {
+            warn!(
+                host = %mount.host.display(),
+                container = %container_path_string(&mount.container),
+                "skipping bind mount because host source does not exist"
+            );
+            continue;
+        }
         let host_arg = match &seeded {
             Some(tempfile) => tempfile.path().display().to_string(),
             None => mount.host.display().to_string(),
         };
-        let container_arg = mount.container.display().to_string();
-        // Same `-v`-injection guard as the primary workspace bind above.
-        validate_bind_path(&host_arg, "mount.host")?;
-        validate_bind_path(&container_arg, "mount.container")?;
-        docker_args.extend(mount_bind_args(&host_arg, mount, seeded.is_some()));
+        docker_args.extend(mount_bind_args(&host_arg, mount, seeded.is_some())?);
 
         if let Some(tempfile) = seeded {
             seed_tempfiles.push(tempfile);
@@ -380,10 +385,11 @@ pub fn spawn(
         let tempfile = seed_claude_oauth_onboarding_config()?;
         let host_arg = tempfile.path().display().to_string();
         seed_tempfiles.push(tempfile);
-        validate_bind_path(&host_arg, "mount.host")?;
-        validate_bind_path(CLAUDE_CONFIG_CONTAINER_PATH, "mount.container")?;
-        docker_args.push("-v".to_string());
-        docker_args.push(format!("{}:{}:rw", host_arg, CLAUDE_CONFIG_CONTAINER_PATH));
+        docker_args.extend(docker_bind_mount_args(
+            &host_arg,
+            CLAUDE_CONFIG_CONTAINER_PATH,
+            &MountMode::Rw,
+        )?);
     }
 
     for name in &ctr.env_passthrough {
@@ -655,26 +661,6 @@ fn sanitize_label_value(value: &str) -> String {
     value.replace([',', '\n', '\r'], "_")
 }
 
-/// Reject `:` and `,` in any path that ends up inside `docker run -v host:container:mode`.
-/// `docker run` parses `-v` values as colon-separated fields and the third field as a
-/// comma-separated option list, so a `:` in either path silently switches the mount
-/// mode (or adds propagation flags) and a `,` injects an extra mount option. We could
-/// migrate to `--mount type=bind,source=…,target=…` instead (key=value, unambiguous),
-/// but that's a wider behavior change; the validation route is the smaller diff.
-fn validate_bind_path(path: &str, label: &str) -> Result<()> {
-    if path.contains(':') {
-        anyhow::bail!(
-            "refusing to mount: {label} contains ':' which would be parsed as a docker -v separator ({path:?})"
-        );
-    }
-    if path.contains(',') {
-        anyhow::bail!(
-            "refusing to mount: {label} contains ',' which would be parsed as a docker -v option separator ({path:?})"
-        );
-    }
-    Ok(())
-}
-
 /// Append `flag value` to `docker_args` when `value` is present and non-blank.
 /// Used for optional `docker run` flags like `--memory`, `--cpus`, `--shm-size`.
 fn push_opt_flag(docker_args: &mut Vec<String>, flag: &str, value: Option<&str>) {
@@ -729,24 +715,30 @@ fn mount_bind_args(
     host_arg: &str,
     mount: &crate::config::ContainerMount,
     seeded: bool,
-) -> Vec<String> {
-    let mode = mount_mode_arg(&mount.mode);
-    let container_arg = mount.container.display().to_string();
-    let mut args = vec![
-        "-v".to_string(),
-        format!("{host_arg}:{container_arg}:{mode}"),
-    ];
-    if !seeded && mount.host != mount.container {
+) -> Result<Vec<String>> {
+    let container_arg = container_path_string(&mount.container);
+    let mut args = docker_bind_mount_args(host_arg, &container_arg, &mount.mode)?;
+    if !seeded && should_add_plugin_path_shim(mount) {
         // The plugin-path shim re-exposes the same directory at its host path so
         // stored absolute paths resolve. It is always read-only regardless of the
         // primary mount's mode: the shim exists only for path resolution, never
         // for writes, and defaulting it to rw needlessly widens write exposure of
         // whatever the user mounted (H4).
         let host_path = mount.host.display().to_string();
-        args.push("-v".to_string());
-        args.push(format!("{host_path}:{host_path}:ro"));
+        args.extend(docker_bind_mount_args(
+            &host_path,
+            &host_path,
+            &MountMode::Ro,
+        )?);
     }
-    args
+    Ok(args)
+}
+
+fn should_add_plugin_path_shim(mount: &crate::config::ContainerMount) -> bool {
+    if cfg!(target_os = "windows") {
+        return false;
+    }
+    mount.host != mount.container
 }
 
 /// If `mount` is configured for seeding and the host path is a regular file,
@@ -772,10 +764,9 @@ fn seed_private_mount(
     mount: &crate::config::ContainerMount,
     claude_oauth_token_available: bool,
 ) -> Result<Option<NamedTempFile>> {
-    let is_claude_config =
-        mount.container.file_name() == Some(std::ffi::OsStr::new(".claude.json"));
-    let is_claude_credentials =
-        mount.container.file_name() == Some(std::ffi::OsStr::new(".credentials.json"));
+    let container_file_name = container_path_file_name(&mount.container);
+    let is_claude_config = container_file_name.as_deref() == Some(".claude.json");
+    let is_claude_credentials = container_file_name.as_deref() == Some(".credentials.json");
 
     // When CLAUDE_CODE_OAUTH_TOKEN provides launch auth, the host's stored
     // .credentials.json holds a subscription OAuth access token that interactive
@@ -1345,37 +1336,50 @@ mod tests {
 
     #[test]
     fn mount_bind_args_adds_plugin_path_shim_for_nonseeded_differing_mounts() {
-        let mode = super::mount_mode_arg(&MountMode::Rw);
-
         // Non-seeded ~/.claude (host != container): primary bind + host-path shim
         // so stored absolute plugin paths (/Users/me/.claude/plugins/...) resolve.
         // The shim is always read-only regardless of the primary mode (H4).
         let claude = mount("/Users/me/.claude", "/home/coder/.claude", None);
-        assert_eq!(
-            super::mount_bind_args("/Users/me/.claude", &claude, false),
-            vec![
-                "-v".to_string(),
-                format!("/Users/me/.claude:/home/coder/.claude:{mode}"),
-                "-v".to_string(),
-                "/Users/me/.claude:/Users/me/.claude:ro".to_string(),
-            ],
-        );
+        let claude_args =
+            super::mount_bind_args("/Users/me/.claude", &claude, false).expect("mount args");
+        if cfg!(target_os = "windows") {
+            assert_eq!(
+                claude_args,
+                vec![
+                    "--mount".to_string(),
+                    "type=bind,source=/Users/me/.claude,target=/home/coder/.claude".to_string(),
+                ],
+            );
+        } else {
+            assert_eq!(
+                claude_args,
+                vec![
+                    "--mount".to_string(),
+                    "type=bind,source=/Users/me/.claude,target=/home/coder/.claude".to_string(),
+                    "--mount".to_string(),
+                    "type=bind,source=/Users/me/.claude,target=/Users/me/.claude,readonly"
+                        .to_string(),
+                ],
+            );
+        }
 
         // Seeded mount: primary bind only — the private per-session copy must
         // NOT be re-exposed at the host path.
         let seeded = mount("/Users/me/.claude.json", "/home/coder/.claude.json", None);
         assert_eq!(
-            super::mount_bind_args("/tmp/seed-xyz", &seeded, true),
+            super::mount_bind_args("/tmp/seed-xyz", &seeded, true).expect("mount args"),
             vec![
-                "-v".to_string(),
-                format!("/tmp/seed-xyz:/home/coder/.claude.json:{mode}"),
+                "--mount".to_string(),
+                "type=bind,source=/tmp/seed-xyz,target=/home/coder/.claude.json".to_string(),
             ],
         );
 
         // host == container: nothing to shim, it already resolves.
         let same = mount("/Users/me/.claude", "/Users/me/.claude", None);
         assert_eq!(
-            super::mount_bind_args("/Users/me/.claude", &same, false).len(),
+            super::mount_bind_args("/Users/me/.claude", &same, false)
+                .expect("mount args")
+                .len(),
             2
         );
     }

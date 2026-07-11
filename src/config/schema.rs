@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ── Workspaces ───────────────────────────────────────────────────────────────
 
@@ -163,6 +163,42 @@ pub(crate) fn default_mount_target() -> PathBuf {
     PathBuf::from("/workspace")
 }
 
+pub(crate) fn container_path_string(path: &Path) -> String {
+    path.as_os_str().to_string_lossy().replace('\\', "/")
+}
+
+pub(crate) fn is_absolute_container_path(path: &Path) -> bool {
+    container_path_string(path).starts_with('/')
+}
+
+pub(crate) fn container_path_file_name(path: &Path) -> Option<String> {
+    container_path_string(path)
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .map(str::to_string)
+}
+
+pub(crate) fn join_container_path(base: &str, rel: &Path) -> String {
+    let mut base = base.replace('\\', "/");
+    while base.len() > 1 && base.ends_with('/') {
+        base.pop();
+    }
+
+    let rel = container_path_string(rel);
+    let rel = rel.trim_matches('/');
+    if rel.is_empty() {
+        return base;
+    }
+
+    if base.is_empty() {
+        format!("/{rel}")
+    } else if base == "/" {
+        format!("/{rel}")
+    } else {
+        format!("{base}/{rel}")
+    }
+}
+
 pub fn normalize_command_name(command: &str) -> Option<String> {
     let raw = command.trim();
     if raw.is_empty() {
@@ -207,7 +243,7 @@ impl ContainerMount {
     /// truth shared by container launch and the TUI mounts view.
     pub fn is_seeded(&self) -> bool {
         self.seed.unwrap_or_else(|| {
-            self.container.file_name() == Some(std::ffi::OsStr::new(".claude.json"))
+            container_path_file_name(&self.container).as_deref() == Some(".claude.json")
         })
     }
 }

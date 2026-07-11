@@ -35,6 +35,15 @@
 #
 # $WORKSPACE = workspace path on the host.
 #
+# Environment scrubbing (optional, passthrough commands only):
+#   env_allowlist = ["CARGO_TERM_COLOR", "CI"]
+# When env_allowlist is present the command runs from a cleared environment
+# containing only a small base set (PATH, HOME, USER, LOGNAME, SHELL, TMPDIR,
+# LANG, LC_ALL, LC_CTYPE, TERM) plus the variables listed, instead of
+# inheriting the manager's full host environment. An empty list grants just
+# the base set. Not supported on image rules — the runner container already
+# starts with a clean environment.
+#
 # Network (HTTP/HTTPS proxy policy)
 #
 # Coder-style network rules. Deny matches win over allow matches; if no rule
@@ -89,5 +98,7 @@ allowlist = [
     "domain=static.rust-lang.org",
     "domain=sdmntprnorthcentralus.oaiusercontent.com",
     "domain=crates.io",
+    "domain=main.vscode-cdn.net",
+    "domain=mobile.events.data.microsoft.com",
 ]
 denylist = ["domain=160.79.104.10"]

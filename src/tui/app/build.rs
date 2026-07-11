@@ -6,7 +6,8 @@ impl App {
     pub(crate) fn start_docker_build(
         &mut self,
         label: &str,
-        shell_command: String,
+        docker_commands: Vec<Vec<String>>,
+        command_display: String,
         launch_project_idx: usize,
         launch_container_idx: usize,
     ) {
@@ -23,8 +24,8 @@ impl App {
         }
         self.active_session = None;
         self.focus = Focus::ImageBuild;
-        self.push_log(format!("starting {label} in shell"), false);
-        self.push_log(format!("$ {shell_command}"), false);
+        self.push_log(format!("starting {label}"), false);
+        self.push_log(format!("$ {command_display}"), false);
 
         if let Some(pi) = self.build_project_idx {
             let items = self.sidebar_items();
@@ -37,16 +38,16 @@ impl App {
         }
 
         let cancel_flag = Arc::new(AtomicBool::new(false));
-        let shell_command_for_state = shell_command.clone();
+        let command_display_for_state = command_display.clone();
 
         let tx = self.build_event_tx.clone();
         let launch_session_group = self.build_session_group;
         let label = label.to_string();
         let task_cancel = Arc::clone(&cancel_flag);
         let handle = tokio::spawn(async move {
-            run_build_shell_command(
+            run_build_docker_commands(
                 label,
-                shell_command,
+                docker_commands,
                 launch_project_idx,
                 launch_container_idx,
                 launch_session_group,
@@ -57,19 +58,39 @@ impl App {
         });
 
         self.build_task = Some(BuildTaskState {
-            shell_command: shell_command_for_state,
+            command_display: command_display_for_state,
             cancel_flag,
             handle,
         });
     }
 
-    /// Request cancellation of the in-flight build (if any) and abort the task.
+    /// Request cancellation of the in-flight build (if any).
     /// Called on quit and when the user presses Esc on the build pane.
     pub(crate) fn cancel_docker_build(&mut self) {
-        if let Some(task) = self.build_task.take() {
-            task.cancel_flag.store(true, Ordering::SeqCst);
-            task.handle.abort();
-            self.push_log("docker build cancelled", true);
+        if let Some(task) = self.build_task.as_ref() {
+            if !task.cancel_flag.swap(true, Ordering::SeqCst) {
+                self.push_log("docker build cancellation requested", true);
+            }
+        }
+    }
+
+    pub(crate) async fn cancel_docker_build_for_shutdown(&mut self) {
+        let Some(task) = self.build_task.take() else {
+            return;
+        };
+
+        if !task.cancel_flag.swap(true, Ordering::SeqCst) {
+            self.push_log("docker build cancellation requested", true);
+        }
+
+        let mut handle = task.handle;
+        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
+            Ok(_) => {}
+            Err(_) => {
+                self.push_log("docker build cancellation timed out", true);
+                handle.abort();
+                let _ = handle.await;
+            }
         }
     }
 

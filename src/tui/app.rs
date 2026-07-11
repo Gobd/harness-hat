@@ -15,5 +15,5 @@ pub(crate) use crate::container::docker_image_exists;
 #[allow(unused_imports)]
 pub(crate) use helpers::{
     encode_sgr_mouse, is_scroll_mode_toggle_key, maybe_encode_sgr_mouse_for_session, oneshot_dummy,
-    run_build_shell_command, shell_command_for_docker_args,
+    run_build_docker_commands, shell_command_for_docker_args,
 };

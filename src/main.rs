@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 
-// current_thread keeps all async tasks on one thread, which allows
-// ContainerSession (containing Box<dyn MasterPty>, which is !Send) to be
-// held in App across await points in the TUI event loop.
-#[tokio::main(flavor = "current_thread")]
+// Multi-thread runtime so the control server and proxy stay responsive even
+// when the TUI thread blocks (stalled terminal emulator, synchronous docker
+// calls). The TUI itself runs on a dedicated thread with its own
+// current-thread runtime (see `manager::run`) because ContainerSession
+// contains Box<dyn MasterPty>, which is !Send and must stay on one thread.
+#[tokio::main]
 async fn main() -> Result<()> {
     use harness_hat::cli::Command;
 

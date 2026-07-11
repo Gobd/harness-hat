@@ -103,22 +103,39 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
         }
     });
 
-    let app = crate::tui::App::new(
-        shared_config,
-        config_path.clone(),
-        token,
-        session_registry,
-        exec_pending_rx,
-        stop_pending_rx,
-        launch_pending_rx,
-        net_pending_rx,
-        activity_rx,
-        audit_rx,
-        state,
-        proxy_state,
-        proxy_addr_display,
-    )?;
-    crate::tui::run(app).await?;
+    // The TUI runs on its own thread with a dedicated current-thread runtime:
+    // App owns ContainerSession (whose Box<dyn MasterPty> is !Send), so it
+    // must be built and driven on a single thread — but that thread must not
+    // be the one running the control server and proxy, or any blocking call
+    // in the TUI loop (a terminal emulator that stops draining stdout during
+    // screen sharing, a slow synchronous docker invocation) freezes container
+    // networking along with the UI. App is constructed inside the closure
+    // because it is !Send even while empty.
+    let config_path_for_tui = config_path.clone();
+    let tui_result = tokio::task::spawn_blocking(move || -> Result<()> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(async move {
+            let app = crate::tui::App::new(
+                shared_config,
+                config_path_for_tui,
+                token,
+                session_registry,
+                exec_pending_rx,
+                stop_pending_rx,
+                launch_pending_rx,
+                net_pending_rx,
+                activity_rx,
+                audit_rx,
+                state,
+                proxy_state,
+                proxy_addr_display,
+            )?;
+            crate::tui::run(app).await
+        })
+    })
+    .await;
 
     // The TUI loop has exited (user quit). Stop the background listeners so
     // they don't keep accepting connections (or hold an in-flight
@@ -129,6 +146,7 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
     proxy_handle.abort();
 
     telemetry_handle.shutdown()?;
+    tui_result.map_err(|e| anyhow::anyhow!("TUI thread panicked: {e}"))??;
     Ok(())
 }
 

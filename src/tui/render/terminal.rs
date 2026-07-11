@@ -298,7 +298,7 @@ pub(crate) fn render_session_detail(
             label_color,
             mount.host.display().to_string(),
             arrow,
-            mount.container.display().to_string(),
+            crate::config::container_path_string(&mount.container),
             if seeded {
                 Some("(per-session copy)")
             } else {
