@@ -1,6 +1,8 @@
 use anyhow::Result;
 use base64::Engine as _;
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::STANDARD;
+#[cfg(test)]
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures::StreamExt;
 use globset::Glob;
 use lru::LruCache;
@@ -17,6 +19,7 @@ use tokio::sync::Semaphore;
 
 use crate::activity::{Activity, ActivityState, wait_cancelled};
 use crate::config::Config;
+#[cfg(test)]
 use crate::proxy::SourceIdentityStatus;
 use crate::proxy::http::is_hop_by_hop;
 
@@ -105,19 +108,6 @@ where
     }
 }
 
-pub(crate) fn parse_source_from_headers(
-    headers: &[(String, String)],
-) -> (Option<String>, Option<String>, SourceIdentityStatus) {
-    let auth = headers
-        .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case("proxy-authorization"))
-        .map(|(_, v)| v.as_str());
-    let Some(auth) = auth else {
-        return (None, None, SourceIdentityStatus::MissingProxyAuthorization);
-    };
-    decode_source_from_proxy_authorization(auth)
-}
-
 pub(crate) fn proxy_authorization_matches_token(
     headers: &[(String, String)],
     expected_token: &str,
@@ -195,6 +185,7 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn decode_source_from_proxy_authorization(
     value: &str,
 ) -> (Option<String>, Option<String>, SourceIdentityStatus) {
@@ -282,7 +273,7 @@ pub(crate) fn host_matches_pattern(pattern: &str, host: &str) -> bool {
     }
 
     if let Some(apex) = pattern_lc.strip_prefix("*.") {
-        return host_lc == apex || host_lc.ends_with(&format!(".{apex}"));
+        return host_lc.ends_with(&format!(".{apex}"));
     }
 
     if !pattern_lc.contains('*') {
@@ -361,7 +352,7 @@ pub(crate) fn canonicalize_host(raw: &str) -> Result<String> {
     Ok(ascii)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn ensure_host_header_matches_target(
     headers: &[(String, String)],
     expected_host: &str,
@@ -387,7 +378,7 @@ pub(crate) fn ensure_host_header_matches_target(
     Ok(())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn host_names_match(actual: &str, expected: &str) -> bool {
     let actual = actual.trim().trim_end_matches('.');
     let expected = expected.trim().trim_end_matches('.');

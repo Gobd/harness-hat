@@ -27,6 +27,11 @@ target
 
 /target
 
+# OS and Python-generated artifacts
+.DS_Store
+__pycache__/
+*.py[cod]
+
 # Stray literal-tilde directory created by pre-fix claw-cage builds
 /~/
 

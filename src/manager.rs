@@ -79,7 +79,6 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
         }
     });
 
-    let proxy_port = config.defaults.proxy.proxy_port;
     let proxy_host = config.defaults.proxy.proxy_host.clone();
     let proxy_ip = parse_bind_host(&proxy_host).map_err(|e| {
         anyhow::anyhow!(
@@ -92,16 +91,11 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
              set defaults.control.allow_remote_control = true to opt in to remote-reachable bindings"
         );
     }
-    let proxy_addr = format!("{proxy_host}:{proxy_port}");
+    // `ProxyState` is a factory for authenticated, per-session listeners. Do
+    // not bind the legacy root proxy: it accepted spoofable source metadata and
+    // became remotely reachable when remote control was enabled.
     let proxy_state =
         crate::proxy::ProxyState::new(shared_config.clone(), net_pending_tx, activity_tx)?;
-    let proxy_addr_display = proxy_addr.clone();
-    let proxy_state_for_server = proxy_state.clone();
-    let proxy_handle = tokio::spawn(async move {
-        if let Err(e) = crate::proxy::run(proxy_state_for_server, proxy_addr).await {
-            error!("proxy error: {e}");
-        }
-    });
 
     // The TUI runs on its own thread with a dedicated current-thread runtime:
     // App owns ContainerSession (whose Box<dyn MasterPty> is !Send), so it
@@ -130,7 +124,6 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
                 audit_rx,
                 state,
                 proxy_state,
-                proxy_addr_display,
             )?;
             crate::tui::run(app).await
         })
@@ -143,8 +136,6 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
     // telemetry. Aborting is sufficient: the process is exiting and both tasks
     // only own their listener + ephemeral per-connection state.
     control_handle.abort();
-    proxy_handle.abort();
-
     telemetry_handle.shutdown()?;
     tui_result.map_err(|e| anyhow::anyhow!("TUI thread panicked: {e}"))??;
     Ok(())
@@ -175,11 +166,7 @@ pub fn discover_default_config_path() -> Option<PathBuf> {
     }
     let home_candidate = default_home_config_path().ok()?;
     if home_candidate.exists() {
-        return Some(
-            home_candidate
-                .canonicalize()
-                .unwrap_or_else(|_| home_candidate),
-        );
+        return Some(home_candidate.canonicalize().unwrap_or(home_candidate));
     }
     None
 }

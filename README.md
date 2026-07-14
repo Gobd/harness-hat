@@ -126,7 +126,7 @@ denylist = [
 - Hostnames are canonicalized (lowercase, trailing-dot strip, IDNA) before rule matching — case, trailing dots, and punycode can't bypass denies.
 - HTTPS and other raw TCP destinations are policy-checked as `CONNECT` requests. Because TLS is not decrypted, HTTPS rules can only match the CONNECT host and port, not the inner HTTP method or path. Domain-only allow rules auto-allow HTTPS CONNECT on port 443; non-443 CONNECT needs an explicit `port=...` rule.
 
-For hosts that should never prompt, use `[defaults.containers].allowed_hosts` or per-template `allowed_hosts` in `harness-hat.toml`. This pre-approves matching hosts without bypassing the proxy or strict-network routing. `allowed_hosts` supports exact hosts, `*`, and apex-plus-subdomain patterns such as `*.example.com`.
+For hosts that should never prompt, use `[defaults.containers].allowed_hosts` or per-template `allowed_hosts` in `harness-hat.toml`. This pre-approves matching hosts without bypassing the proxy or strict-network routing. `allowed_hosts` supports exact hosts, `*`, and subdomain-only patterns such as `*.example.com`; list `example.com` separately when the apex should also be allowed.
 
 ## Strict-network mode
 
@@ -177,8 +177,8 @@ The proxy and control plane are hardened against the usual proxy-abuse classes:
 - DNS lookups are bounded, cached, and case-normalized.
 - IPv6 SSRF predicate covers NAT64, 6to4, IPv4-translated, and discard-only prefixes.
 - Audit log and `log_dir` are created `0o600`/`0o700` atomically and refuse to follow symlinks.
-- Control server and proxy default to loopback-only; non-loopback binds require explicit `allow_remote_control = true`.
-- Workspace paths under `~/.ssh`, `~/.gnupg`, `/etc` are refused.
+- The control server defaults to loopback-only, and the proxy exposes only authenticated per-session listeners; non-loopback binds require explicit `allow_remote_control = true`.
+- Broad workspace/mount roots (`/`, `$HOME`, system directories) and common credential paths such as `~/.ssh`, `~/.aws`, and `~/.kube` are refused.
 - Mount/container paths reject `:` and `,` to prevent `-v` argument injection.
 
 ### Threat model — what Harness Hat does not protect against
@@ -205,7 +205,6 @@ server_host = "127.0.0.1"
 token_env_var = "HARNESS_HAT_TOKEN"
 
 [defaults.proxy]
-proxy_port = 28781
 proxy_host = "127.0.0.1"
 strict_network = true
 

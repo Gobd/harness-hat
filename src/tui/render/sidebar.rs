@@ -28,7 +28,7 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 render_network_group_detail(frame, app, area, si, true);
             }
             Some(SidebarItem::Settings(pi)) => {
-                render_project_settings(frame, app, area, pi, true);
+                render_workspace_settings(frame, app, area, pi, true);
             }
             Some(SidebarItem::Launch(_)) => {
                 render_idle(frame, area);
@@ -40,10 +40,10 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 render_build_output(frame, app, area, true);
             }
             Some(SidebarItem::NewWorkspace) => {
-                if app.new_project.is_some() {
-                    render_new_project(frame, app, area, true);
+                if app.new_workspace.is_some() {
+                    render_new_workspace(frame, app, area, true);
                 } else {
-                    render_new_project_preview(frame, app, area, true);
+                    render_new_workspace_preview(frame, app, area, true);
                 }
             }
             _ => render_idle(frame, area),
@@ -53,10 +53,10 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if app.focus == Focus::Settings {
         let pi = app
-            .active_settings_project
-            .or_else(|| app.selected_project_idx())
+            .active_settings_workspace
+            .or_else(|| app.selected_workspace_idx())
             .unwrap_or(0);
-        render_project_settings(frame, app, area, pi, false);
+        render_workspace_settings(frame, app, area, pi, false);
         return;
     }
 
@@ -98,7 +98,7 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.focus == Focus::NewWorkspace {
-        render_new_project(frame, app, area, false);
+        render_new_workspace(frame, app, area, false);
         return;
     }
 
@@ -377,7 +377,7 @@ fn network_group_title(app: &App, session_idx: usize, count: usize, width: u16) 
             format!(
                 " Network: container={} workspace={} docker={} ({count}) ",
                 session.container_name,
-                session.project,
+                session.workspace_name,
                 short_container_id(&session.container_id)
             )
         })
@@ -408,7 +408,7 @@ fn append_activity_summary_lines(
         Span::styled(
             format!(
                 "workspace={}  container={}",
-                activity.project,
+                activity.workspace_name,
                 activity.container.as_deref().unwrap_or("<unknown>")
             ),
             Style::default().fg(tone(Color::White)),
@@ -648,15 +648,15 @@ pub(crate) fn render_idle(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-pub(crate) fn render_project_settings(
+pub(crate) fn render_workspace_settings(
     frame: &mut Frame,
     app: &App,
     area: Rect,
-    project_idx: usize,
+    workspace_idx: usize,
     dimmed: bool,
 ) {
     let cfg = app.config.get();
-    let Some(proj) = cfg.workspaces.get(project_idx) else {
+    let Some(proj) = cfg.workspaces.get(workspace_idx) else {
         render_idle(frame, area);
         return;
     };

@@ -186,14 +186,14 @@ pub(crate) fn render_container_picker(frame: &mut Frame, app: &mut App, area: Re
 pub(crate) fn render_image_build(frame: &mut Frame, app: &mut App, area: Rect, dimmed: bool) {
     let cfg = app.config.get();
     let ctr_idx = app.build_container_idx.unwrap_or(0);
-    let templates = if let Some(pi) = app.build_project_idx
+    let templates = if let Some(pi) = app.build_workspace_idx
         && pi < cfg.workspaces.len()
     {
-        app.workspace_templates_for_project(pi)
+        app.workspace_templates_for_workspace(pi)
     } else {
         cfg.containers.clone()
     };
-    let template = templates.get(ctr_idx).or_else(|| templates.get(0));
+    let template = templates.get(ctr_idx).or_else(|| templates.first());
 
     let image = template.map(|c| c.image.as_str()).unwrap_or("<unknown>");
     let image_stem = template.map(|c| c.image_stem.as_str()).unwrap_or("default");
@@ -343,10 +343,10 @@ pub(crate) fn render_image_build(frame: &mut Frame, app: &mut App, area: Rect, d
 
 pub(crate) fn render_build_output(frame: &mut Frame, app: &mut App, area: Rect, dimmed: bool) {
     let cfg = app.config.get();
-    let templates = if let Some(pi) = app.build_project_idx
+    let templates = if let Some(pi) = app.build_workspace_idx
         && pi < cfg.workspaces.len()
     {
-        app.workspace_templates_for_project(pi)
+        app.workspace_templates_for_workspace(pi)
     } else {
         cfg.containers.clone()
     };

@@ -12,7 +12,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, oneshot};
 
@@ -31,7 +31,9 @@ use crate::state::{AuditEntry, DecisionKind};
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const APPROVAL_TIMEOUT_SECS: u64 = 300;
 const IMAGE_PULL_TIMEOUT_SECS: u64 = 30 * 60;
-const EXEC_JOB_CAPTURE_BYTES: usize = 1024 * 1024;
+const EXEC_JOB_CAPTURE_BYTES: usize = 256 * 1024;
+const EXEC_JOB_STDIN_QUEUE_CAPACITY: usize = 32;
+const ACTIVITY_LINE_BUFFER_BYTES: usize = 64 * 1024;
 /// Absolute ceiling on a hostdo command's wall-clock time. A container-supplied
 /// `timeout_secs` cannot exceed this or the matched rule's own value (M4).
 const MAX_TIMEOUT_SECS: u64 = 6 * 60 * 60;
@@ -68,6 +70,10 @@ pub(super) async fn exec_handler(
         Err(resp) => return resp,
     };
 
+    if wants_detached && !state.exec_jobs.has_active_capacity() {
+        return job_capacity_exceeded_response();
+    }
+
     if req.argv.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -93,11 +99,11 @@ pub(super) async fn exec_handler(
     let Some(project) = cfg
         .workspaces
         .iter()
-        .find(|workspace| workspace.name == identity.project)
+        .find(|workspace| workspace.name == identity.workspace_name)
     else {
         return deny_with_audit(
             &state,
-            &identity.project,
+            &identity.workspace_name,
             &req.argv,
             &req.cwd,
             "unknown workspace",
@@ -112,13 +118,20 @@ pub(super) async fn exec_handler(
     ) {
         Ok(path) => path,
         Err(reason) => {
-            return deny_with_audit(&state, &identity.project, &req.argv, &req.cwd, reason).await;
+            return deny_with_audit(
+                &state,
+                &identity.workspace_name,
+                &req.argv,
+                &req.cwd,
+                reason,
+            )
+            .await;
         }
     };
 
     let rules = match crate::config::load_composed_rules_for_workspace(
         &cfg,
-        Some(identity.project.as_str()),
+        Some(identity.workspace_name.as_str()),
     ) {
         Ok(rules) => rules,
         Err(e) => {
@@ -142,7 +155,7 @@ pub(super) async fn exec_handler(
     if approval_mode == NetworkPolicy::Deny {
         return deny_with_audit(
             &state,
-            &identity.project,
+            &identity.workspace_name,
             &req.argv,
             &req.cwd,
             "command denied by hostdo policy",
@@ -177,7 +190,7 @@ pub(super) async fn exec_handler(
         ActivityState::Running
     };
     let mut activity = Activity::new(
-        identity.project.clone(),
+        identity.workspace_name.clone(),
         Some(identity.container_id.clone()),
         ActivityKind::Hostdo {
             argv: req.argv.clone(),
@@ -196,7 +209,8 @@ pub(super) async fn exec_handler(
 
     let run = CommandRun {
         state: state.clone(),
-        project: identity.project.clone(),
+        workspace_name: identity.workspace_name.clone(),
+        session_token,
         container_id: identity.container_id.clone(),
         argv: req.argv.clone(),
         image: req.image.clone(),
@@ -224,7 +238,7 @@ pub(super) async fn exec_handler(
         id: uuid::Uuid::new_v4().to_string(),
         activity_id: run.activity_id.clone(),
         cancel_flag,
-        project: identity.project.clone(),
+        workspace_name: identity.workspace_name.clone(),
         container_id: Some(identity.container_id.clone()),
         argv: req.argv.clone(),
         image: req.image.clone(),
@@ -234,7 +248,16 @@ pub(super) async fn exec_handler(
         matched_command,
         response_tx: Some(response_tx),
     };
+    if wants_detached {
+        return start_approval_wait_job(run, response_rx, pending);
+    }
+
     if state.pending_tx.send(pending).await.is_err() {
+        let _ = state.activity_tx.try_send(ActivityEvent::Finished {
+            id: run.activity_id.clone(),
+            state: ActivityState::Failed,
+            status: Some("manager is shutting down".to_string()),
+        });
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
@@ -245,10 +268,6 @@ pub(super) async fn exec_handler(
             .into_response();
     }
 
-    if wants_detached {
-        return start_approval_wait_job(run, response_rx);
-    }
-
     await_approval_and_execute(run, response_rx).await
 }
 
@@ -256,12 +275,17 @@ pub(super) async fn exec_jobs_list_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
 ) -> Response {
-    let (_, identity) = match require_session_context(&state, &headers) {
+    let (session_token, _) = match require_session_context(&state, &headers) {
         Ok(ctx) => ctx,
         Err(resp) => return resp,
     };
     Json(ExecJobListResponse {
-        jobs: state.exec_jobs.list_for_project(&identity.project),
+        jobs: state
+            .exec_jobs
+            .list_for_session(&session_token)
+            .into_iter()
+            .map(ExecJobStatus::without_output)
+            .collect(),
     })
     .into_response()
 }
@@ -271,11 +295,11 @@ pub(super) async fn exec_job_handler(
     headers: HeaderMap,
     AxumPath(job_id): AxumPath<String>,
 ) -> Response {
-    let (_, identity) = match require_session_context(&state, &headers) {
+    let (session_token, _) = match require_session_context(&state, &headers) {
         Ok(ctx) => ctx,
         Err(resp) => return resp,
     };
-    let Some(job) = state.exec_jobs.get_for_project(&job_id, &identity.project) else {
+    let Some(job) = state.exec_jobs.get_for_session(&job_id, &session_token) else {
         return (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -285,7 +309,7 @@ pub(super) async fn exec_job_handler(
         )
             .into_response();
     };
-    Json(job).into_response()
+    Json(job.without_output()).into_response()
 }
 
 pub(super) async fn exec_job_output_handler(
@@ -294,11 +318,11 @@ pub(super) async fn exec_job_output_handler(
     AxumPath(job_id): AxumPath<String>,
     Query(query): Query<ExecJobOutputQuery>,
 ) -> Response {
-    let (_, identity) = match require_session_context(&state, &headers) {
+    let (session_token, _) = match require_session_context(&state, &headers) {
         Ok(ctx) => ctx,
         Err(resp) => return resp,
     };
-    let Some(job) = state.exec_jobs.get_for_project(&job_id, &identity.project) else {
+    let Some(job) = state.exec_jobs.get_for_session(&job_id, &session_token) else {
         return (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -338,11 +362,11 @@ pub(super) async fn exec_job_kill_handler(
     headers: HeaderMap,
     AxumPath(job_id): AxumPath<String>,
 ) -> Response {
-    let (_, identity) = match require_session_context(&state, &headers) {
+    let (session_token, _) = match require_session_context(&state, &headers) {
         Ok(ctx) => ctx,
         Err(resp) => return resp,
     };
-    let Some(job) = state.exec_jobs.get_for_project(&job_id, &identity.project) else {
+    let Some(job) = state.exec_jobs.get_for_session(&job_id, &session_token) else {
         return (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -379,11 +403,11 @@ pub(super) async fn exec_job_send_handler(
     AxumPath(job_id): AxumPath<String>,
     Json(req): Json<ExecJobSendRequest>,
 ) -> Response {
-    let (_, identity) = match require_session_context(&state, &headers) {
+    let (session_token, _) = match require_session_context(&state, &headers) {
         Ok(ctx) => ctx,
         Err(resp) => return resp,
     };
-    let Some(job) = state.exec_jobs.get_for_project(&job_id, &identity.project) else {
+    let Some(job) = state.exec_jobs.get_for_session(&job_id, &session_token) else {
         return (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -403,15 +427,28 @@ pub(super) async fn exec_job_send_handler(
         )
             .into_response();
     };
-    if stdin_tx.send(req.input.into_bytes()).is_err() {
-        return (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: "not_running".into(),
-                reason: "job input channel is closed".into(),
-            }),
-        )
-            .into_response();
+    match stdin_tx.try_send(req.input.into_bytes()) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(ErrorResponse {
+                    error: "input_backpressure".into(),
+                    reason: "job input queue is full; retry shortly".into(),
+                }),
+            )
+                .into_response();
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "not_running".into(),
+                    reason: "job input channel is closed".into(),
+                }),
+            )
+                .into_response();
+        }
     }
     Json(ExecJobSendResponse {
         ok: true,
@@ -423,7 +460,8 @@ pub(super) async fn exec_job_send_handler(
 
 struct CommandRun {
     state: Arc<ServerState>,
-    project: String,
+    workspace_name: String,
+    session_token: String,
     container_id: String,
     argv: Vec<String>,
     image: Option<String>,
@@ -471,7 +509,7 @@ async fn await_approval_and_execute(
                 });
                 record_command_audit(
                     &run.state,
-                    &run.project,
+                    &run.workspace_name,
                     &run.argv,
                     &run.request_cwd,
                     DecisionKind::TimedOut,
@@ -510,7 +548,7 @@ async fn await_approval_and_execute(
             });
             record_command_audit(
                 &run.state,
-                &run.project,
+                &run.workspace_name,
                 &run.argv,
                 &run.request_cwd,
                 DecisionKind::Denied,
@@ -528,15 +566,6 @@ async fn await_approval_and_execute(
                 .into_response()
         }
         ApprovalDecision::Approve { remember } => {
-            if remember {
-                remember_hostdo_command(
-                    &run.state,
-                    &run.project,
-                    &run.argv,
-                    run.image.as_deref(),
-                    run.timeout_secs,
-                );
-            }
             let mut run = run;
             run.decision_kind = if remember {
                 DecisionKind::Remembered
@@ -551,12 +580,14 @@ async fn await_approval_and_execute(
 fn start_approval_wait_job(
     run: CommandRun,
     response_rx: oneshot::Receiver<ApprovalDecision>,
+    pending: PendingItem,
 ) -> Response {
-    let (stdin_tx, stdin_rx) = mpsc::unbounded_channel();
+    let (stdin_tx, stdin_rx) = mpsc::channel(EXEC_JOB_STDIN_QUEUE_CAPACITY);
     let Some(status) = run.state.exec_jobs.insert(ExecJobStatus {
         state: ExecJobState::Running,
         job_id: String::new(),
-        project: run.project.clone(),
+        workspace_name: run.workspace_name.clone(),
+        session_token: run.session_token.clone(),
         container: Some(run.container_id.clone()),
         timeout_secs: run.timeout_secs,
         argv: run.argv.clone(),
@@ -572,10 +603,41 @@ fn start_approval_wait_job(
         reason: None,
         cancel_flag: Some(run.cancel_flag.clone()),
         stdin_tx: Some(stdin_tx),
+        created_at: Instant::now(),
     }) else {
+        run.cancel_flag.store(true, Ordering::SeqCst);
+        let _ = run.state.activity_tx.try_send(ActivityEvent::Finished {
+            id: run.activity_id.clone(),
+            state: ActivityState::Failed,
+            status: Some("exec job capacity reached".to_string()),
+        });
         return job_capacity_exceeded_response();
     };
     let job_id = status.job_id.clone();
+    if run.state.pending_tx.try_send(pending).is_err() {
+        run.state.exec_jobs.update(&job_id, |status| {
+            status.state = ExecJobState::Failed;
+            status.phase = None;
+            status.message = "approval queue is full or closed".to_string();
+            status.reason = Some("approval queue is full or closed".to_string());
+            status.poll_after_ms = None;
+            status.cancel_flag = None;
+            status.stdin_tx = None;
+        });
+        let _ = run.state.activity_tx.try_send(ActivityEvent::Finished {
+            id: run.activity_id.clone(),
+            state: ActivityState::Failed,
+            status: Some("approval queue is full or closed".to_string()),
+        });
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "busy".into(),
+                reason: "approval queue is full or closed".into(),
+            }),
+        )
+            .into_response();
+    }
     let run_clone = run;
     tokio::spawn(async move {
         let decision =
@@ -603,7 +665,7 @@ fn start_approval_wait_job(
                         });
                     record_command_audit(
                         &run_clone.state,
-                        &run_clone.project,
+                        &run_clone.workspace_name,
                         &run_clone.argv,
                         &run_clone.request_cwd,
                         DecisionKind::TimedOut,
@@ -646,7 +708,7 @@ fn start_approval_wait_job(
                     });
                 record_command_audit(
                     &run_clone.state,
-                    &run_clone.project,
+                    &run_clone.workspace_name,
                     &run_clone.argv,
                     &run_clone.request_cwd,
                     DecisionKind::Denied,
@@ -656,15 +718,6 @@ fn start_approval_wait_job(
                 .await;
             }
             ApprovalDecision::Approve { remember } => {
-                if remember {
-                    remember_hostdo_command(
-                        &run_clone.state,
-                        &run_clone.project,
-                        &run_clone.argv,
-                        run_clone.image.as_deref(),
-                        run_clone.timeout_secs,
-                    );
-                }
                 let mut run = run_clone;
                 run.decision_kind = if remember {
                     DecisionKind::Remembered
@@ -690,11 +743,12 @@ fn start_execution_job(run: CommandRun) -> Response {
     } else {
         format!("Starting {}.", run.argv.join(" "))
     };
-    let (stdin_tx, stdin_rx) = mpsc::unbounded_channel();
+    let (stdin_tx, stdin_rx) = mpsc::channel(EXEC_JOB_STDIN_QUEUE_CAPACITY);
     let Some(status) = run.state.exec_jobs.insert(ExecJobStatus {
         state: ExecJobState::Running,
         job_id: String::new(),
-        project: run.project.clone(),
+        workspace_name: run.workspace_name.clone(),
+        session_token: run.session_token.clone(),
         container: Some(run.container_id.clone()),
         timeout_secs: run.timeout_secs,
         argv: run.argv.clone(),
@@ -710,7 +764,13 @@ fn start_execution_job(run: CommandRun) -> Response {
         reason: None,
         cancel_flag: Some(run.cancel_flag.clone()),
         stdin_tx: Some(stdin_tx),
+        created_at: Instant::now(),
     }) else {
+        let _ = run.state.activity_tx.try_send(ActivityEvent::Finished {
+            id: run.activity_id.clone(),
+            state: ActivityState::Failed,
+            status: Some("exec job capacity reached".to_string()),
+        });
         return job_capacity_exceeded_response();
     };
     let job_id = status.job_id.clone();
@@ -758,17 +818,32 @@ async fn execute_immediate(run: CommandRun) -> Response {
 async fn run_job_after_approval(
     run: CommandRun,
     job_id: String,
-    stdin_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    stdin_rx: mpsc::Receiver<Vec<u8>>,
 ) {
-    match run_command(run, Some((job_id.clone(), stdin_rx))).await {
-        Ok(_) => {}
-        Err(_) => {}
+    let state = run.state.clone();
+    if let Err(error) = run_command(run, Some((job_id.clone(), stdin_rx))).await {
+        let reason = match error {
+            ExecFailure::TimedOut => "host command timed out".to_string(),
+            ExecFailure::Cancelled => "command cancelled".to_string(),
+            ExecFailure::Message(reason) => reason,
+        };
+        state.exec_jobs.update(&job_id, |status| {
+            if status.state == ExecJobState::Running {
+                status.state = ExecJobState::Failed;
+                status.phase = None;
+                status.message = reason.clone();
+                status.reason = Some(reason);
+                status.poll_after_ms = None;
+                status.cancel_flag = None;
+                status.stdin_tx = None;
+            }
+        });
     }
 }
 
 async fn run_command(
     run: CommandRun,
-    job: Option<(String, mpsc::UnboundedReceiver<Vec<u8>>)>,
+    job: Option<(String, mpsc::Receiver<Vec<u8>>)>,
 ) -> Result<ExecResult, ExecFailure> {
     let job_id = job.as_ref().map(|(job_id, _)| job_id.clone());
     if let Some(image) = &run.image {
@@ -864,7 +939,7 @@ async fn run_command(
             let (activity_state, msg) = exec_failure_state(&err, run.timeout_secs);
             record_command_audit(
                 &run.state,
-                &run.project,
+                &run.workspace_name,
                 &run.argv,
                 &run.request_cwd,
                 run.decision_kind.clone(),
@@ -902,7 +977,7 @@ async fn run_command(
 
     record_command_audit(
         &run.state,
-        &run.project,
+        &run.workspace_name,
         &run.argv,
         &run.request_cwd,
         run.decision_kind.clone(),
@@ -916,7 +991,7 @@ async fn run_command(
         status: Some(format!("exit code {exit_code}")),
     });
     if let Some(job_id) = &job_id {
-        run.state.exec_jobs.update(&job_id, |status| {
+        run.state.exec_jobs.update(job_id, |status| {
             status.state = ExecJobState::Complete;
             status.phase = None;
             status.message = format!("Command finished with exit code {exit_code}.");
@@ -1215,7 +1290,7 @@ fn exec_failure_state(err: &ExecFailure, timeout_secs: u64) -> (ActivityState, S
 }
 
 fn spawn_stream_reader<R>(
-    reader: R,
+    mut reader: R,
     state: Arc<ServerState>,
     activity_id: String,
     job_id: Option<String>,
@@ -1226,18 +1301,18 @@ where
 {
     tokio::spawn(async move {
         let mut buf = String::new();
-        let mut lines = BufReader::new(reader).lines();
-        while let Some(line) = lines
-            .next_line()
-            .await
-            .map_err(|e| ExecFailure::Message(format!("failed reading process output: {e}")))?
-        {
-            let prefix = if is_stderr { "stderr" } else { "stdout" };
-            let _ = state.activity_tx.try_send(ActivityEvent::Line {
-                id: activity_id.clone(),
-                line: format!("{prefix}: {line}"),
-            });
-            append_captured_output(&mut buf, &line);
+        let mut activity_line = String::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let count = reader
+                .read(&mut chunk)
+                .await
+                .map_err(|e| ExecFailure::Message(format!("failed reading process output: {e}")))?;
+            if count == 0 {
+                break;
+            }
+            let bytes = &chunk[..count];
+            append_captured_bytes(&mut buf, bytes);
             if let Some(job_id) = &job_id {
                 state.exec_jobs.update(job_id, |status| {
                     let output = if is_stderr {
@@ -1245,12 +1320,51 @@ where
                     } else {
                         &mut status.stdout
                     };
-                    append_job_output(output, &line);
+                    append_job_output(output, bytes);
                 });
             }
+            activity_line.push_str(&String::from_utf8_lossy(bytes));
+            emit_complete_activity_lines(&state, &activity_id, is_stderr, &mut activity_line);
+        }
+        if !activity_line.is_empty() {
+            emit_activity_line(
+                &state,
+                &activity_id,
+                is_stderr,
+                std::mem::take(&mut activity_line),
+            );
         }
         Ok(buf)
     })
+}
+
+fn emit_complete_activity_lines(
+    state: &ServerState,
+    activity_id: &str,
+    is_stderr: bool,
+    pending: &mut String,
+) {
+    while let Some(newline) = pending.find('\n') {
+        let mut line = pending.drain(..=newline).collect::<String>();
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+        emit_activity_line(state, activity_id, is_stderr, line);
+    }
+    while pending.len() > ACTIVITY_LINE_BUFFER_BYTES {
+        let split = floor_char_boundary(pending, ACTIVITY_LINE_BUFFER_BYTES);
+        let line = pending.drain(..split).collect::<String>();
+        emit_activity_line(state, activity_id, is_stderr, line);
+    }
+}
+
+fn emit_activity_line(state: &ServerState, activity_id: &str, is_stderr: bool, line: String) {
+    let prefix = if is_stderr { "stderr" } else { "stdout" };
+    let _ = state.activity_tx.try_send(ActivityEvent::Line {
+        id: activity_id.to_string(),
+        line: format!("{prefix}: {line}"),
+    });
 }
 
 async fn deny_with_audit(
@@ -1292,7 +1406,7 @@ async fn record_command_audit(
     record_audit(
         state,
         AuditEntry {
-            project: project.to_string(),
+            workspace_name: project.to_string(),
             argv: argv.to_vec(),
             cwd: cwd.to_string(),
             decision,
@@ -1302,22 +1416,6 @@ async fn record_command_audit(
         },
     )
     .await;
-}
-
-pub(super) fn remember_hostdo_command(
-    state: &ServerState,
-    project: &str,
-    command: &[String],
-    image: Option<&str>,
-    timeout_secs: u64,
-) -> bool {
-    let config = state.config.get();
-    let Some(workspace) = config.workspaces.iter().find(|w| w.name == project) else {
-        return false;
-    };
-    let rules_path = workspace.canonical_path.join("harness-rules.toml");
-    crate::rules::append_hostdo_auto_approval(&rules_path, command, image, timeout_secs)
-        .unwrap_or(false)
 }
 
 fn supports_exec_jobs(headers: &HeaderMap) -> bool {
@@ -1413,22 +1511,27 @@ fn posix_relative_to_host_path(rel: &str) -> PathBuf {
         .collect::<PathBuf>()
 }
 
-fn append_captured_output(output: &mut String, line: &str) {
+fn append_captured_bytes(output: &mut String, bytes: &[u8]) {
     if output.len() >= EXEC_JOB_CAPTURE_BYTES {
         return;
     }
     let remaining = EXEC_JOB_CAPTURE_BYTES - output.len();
-    if line.len() + 1 <= remaining {
-        output.push_str(line);
-        output.push('\n');
-    } else {
-        output.push_str(&line[..remaining.min(line.len())]);
-    }
+    let decoded = String::from_utf8_lossy(bytes);
+    let take = floor_char_boundary(&decoded, remaining.min(decoded.len()));
+    output.push_str(&decoded[..take]);
 }
 
-fn append_job_output(output: &mut Option<String>, line: &str) {
+fn append_job_output(output: &mut Option<String>, bytes: &[u8]) {
     let buf = output.get_or_insert_with(String::new);
-    append_captured_output(buf, line);
+    append_captured_bytes(buf, bytes);
+}
+
+fn floor_char_boundary(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 fn tail_lines(text: &str, count: usize) -> String {
@@ -1446,7 +1549,10 @@ fn tail_lines(text: &str, count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{hostdo_child_env, resolve_host_cwd_in_workspace, resolve_runner_container_cwd};
+    use super::{
+        EXEC_JOB_CAPTURE_BYTES, append_captured_bytes, floor_char_boundary, hostdo_child_env,
+        resolve_host_cwd_in_workspace, resolve_runner_container_cwd,
+    };
 
     fn host_env(name: &str) -> Option<String> {
         match name {
@@ -1519,5 +1625,20 @@ mod tests {
             resolve_host_cwd_in_workspace("\\workspace\\src", Some("\\workspace"), root.path())
                 .expect("host cwd");
         assert_eq!(host_cwd, nested.canonicalize().expect("canonical nested"));
+    }
+
+    #[test]
+    fn captured_output_stays_bounded_on_utf8_and_invalid_bytes() {
+        let mut output = "a".repeat(EXEC_JOB_CAPTURE_BYTES - 1);
+        append_captured_bytes(&mut output, "🙂".as_bytes());
+        append_captured_bytes(&mut output, &[0xff, 0xfe]);
+        assert!(output.len() <= EXEC_JOB_CAPTURE_BYTES);
+        assert!(output.is_char_boundary(output.len()));
+    }
+
+    #[test]
+    fn floor_boundary_never_splits_a_multibyte_character() {
+        assert_eq!(floor_char_boundary("a🙂b", 3), 1);
+        assert_eq!(floor_char_boundary("a🙂b", 5), 5);
     }
 }

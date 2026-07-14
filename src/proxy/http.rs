@@ -8,7 +8,7 @@ use tracing::warn;
 use crate::activity::{Activity, ActivityState, wait_cancelled};
 use crate::config;
 use crate::proxy::helpers::{
-    connection_hop_tokens, extract_host_port, is_hop_by_hop_with_extra, parse_source_from_headers,
+    connection_hop_tokens, extract_host_port, is_hop_by_hop_with_extra,
     proxy_authorization_matches_token, strip_scheme_and_host, write_error_any, write_response_any,
 };
 use crate::proxy::{NetworkDecision, PendingNetworkItem, ProxyState, SourceIdentityStatus};
@@ -37,7 +37,7 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
             return Ok(());
         }
     };
-    let (source_project, source_container, source_status, has_proxy_authorization): (
+    let (source_workspace, source_container, source_status, has_proxy_authorization): (
         Option<String>,
         Option<String>,
         SourceIdentityStatus,
@@ -48,18 +48,14 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
             return Ok(());
         }
         (
-            Some(fixed.project.clone()),
+            Some(fixed.workspace_name.clone()),
             Some(fixed.container.clone()),
             SourceIdentityStatus::ListenerBoundSource,
-            false,
+            true,
         )
     } else {
-        let (project, container, status) = parse_source_from_headers(&headers);
-
-        let has_auth = headers
-            .iter()
-            .any(|(n, _)| n.eq_ignore_ascii_case("proxy-authorization"));
-        (project, container, status, has_auth)
+        write_error_any(&mut stream, 407, "Proxy Authentication Required").await?;
+        return Ok(());
     };
     // H3: strict Host validation on the plain-HTTP path. `extract_host_port`
     // returns `None` for missing Host, duplicate Host, or invalid host syntax.
@@ -67,13 +63,13 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
         write_error_any(&mut stream, 400, "Missing or invalid Host header").await?;
         return Ok(());
     };
-    let Some(_source_permit) =
-        state.try_acquire_source_connection(source_project.as_deref(), source_container.as_deref())
+    let Some(_source_permit) = state
+        .try_acquire_source_connection(source_workspace.as_deref(), source_container.as_deref())
     else {
         tracing::warn!(
             host = %host,
             port,
-            source_project = ?source_project,
+            source_workspace = ?source_workspace,
             source_container = ?source_container,
             source_status = source_status.as_str(),
             has_proxy_authorization,
@@ -86,7 +82,7 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
 
     let body = read_body_any(&mut stream, &headers, body_remainder).await?;
     let activity = state.start_network_activity(
-        source_project.clone(),
+        source_workspace.clone(),
         source_container.clone(),
         &method,
         &host,
@@ -98,7 +94,7 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
     );
     state.activity_line(&activity.id, "request body read");
 
-    if source_project.is_none() {
+    if source_workspace.is_none() {
         warn!(
             host = %host,
             method = %method,
@@ -106,11 +102,11 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
             source_container = ?source_container,
             source_status = source_status.as_str(),
             has_proxy_authorization,
-            "proxy request missing source project metadata; permanent network rule persistence will not know which project to update"
+            "proxy request missing source workspace metadata; permanent network rule persistence will not know which workspace to update"
         );
     }
 
-    let rules = match config::load_composed_rules_for_workspace(&cfg, source_project.as_deref()) {
+    let rules = match config::load_composed_rules_for_workspace(&cfg, source_workspace.as_deref()) {
         Ok(rules) => rules,
         Err(e) => {
             warn!("proxy rules load error: {e}");
@@ -156,7 +152,7 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
         &host,
         Some(port),
         &path,
-        source_project.clone(),
+        source_workspace.clone(),
         source_container.clone(),
         source_status.as_str(),
         has_proxy_authorization,
@@ -199,7 +195,7 @@ pub(crate) async fn prompt_network(
     host: &str,
     port: Option<u16>,
     path: &str,
-    source_project: Option<String>,
+    source_workspace: Option<String>,
     source_container: Option<String>,
     source_status: &str,
     has_proxy_authorization: bool,
@@ -217,7 +213,7 @@ pub(crate) async fn prompt_network(
     let item = PendingNetworkItem {
         activity_id,
         cancel_flag,
-        source_project,
+        source_workspace,
         source_container,
         source_status: source_status.to_string(),
         has_proxy_authorization,
@@ -262,7 +258,7 @@ pub(crate) async fn network_policy_allows(
     host: &str,
     port: Option<u16>,
     path: &str,
-    source_project: Option<String>,
+    source_workspace: Option<String>,
     source_container: Option<String>,
     source_status: &str,
     has_proxy_authorization: bool,
@@ -282,7 +278,7 @@ pub(crate) async fn network_policy_allows(
                 host,
                 port,
                 path,
-                source_project,
+                source_workspace,
                 source_container,
                 source_status,
                 has_proxy_authorization,
@@ -552,11 +548,6 @@ fn collect_headers<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<(String, Str
     headers
 }
 
-/// True when the request line has at least a method and a target.
-fn request_line_is_valid(first: &str) -> bool {
-    first.splitn(3, ' ').count() >= 2
-}
-
 pub(crate) fn parse_request_line_and_headers(
     head: &str,
 ) -> Option<(String, String, Vec<(String, String)>)> {
@@ -571,32 +562,4 @@ pub(crate) fn parse_request_line_and_headers(
         parts[1].to_string(),
         collect_headers(lines),
     ))
-}
-
-/// Parse only the header pairs from an HTTP head, skipping the method/path
-/// allocations that header-only callers discard. Returns `None` for a malformed
-/// request line, matching `parse_request_line_and_headers`.
-fn headers_from_head(head: &str) -> Option<Vec<(String, String)>> {
-    let mut lines = head.lines();
-    if !request_line_is_valid(lines.next()?) {
-        return None;
-    }
-    Some(collect_headers(lines))
-}
-
-pub(crate) fn parse_source_from_connect_head(
-    head: &str,
-) -> (Option<String>, Option<String>, SourceIdentityStatus) {
-    let Some(headers) = headers_from_head(head) else {
-        return (None, None, SourceIdentityStatus::MalformedAuthHeader);
-    };
-    parse_source_from_headers(&headers)
-}
-
-pub(crate) fn connect_head_has_proxy_authorization(head: &str) -> bool {
-    headers_from_head(head).is_some_and(|headers| {
-        headers
-            .iter()
-            .any(|(n, _)| n.eq_ignore_ascii_case("proxy-authorization"))
-    })
 }

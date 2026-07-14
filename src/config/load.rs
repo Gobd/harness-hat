@@ -49,7 +49,7 @@ pub fn load_composed_rules_for_workspace(
                 Ok(rules) => proj_rules.push(rules),
                 Err(e) => {
                     errors.push(format!(
-                        "project '{}' rules '{}': {e}",
+                        "workspace '{}' rules '{}': {e}",
                         project.name,
                         path.display()
                     ));
@@ -415,9 +415,9 @@ fn discover_workspace_local_dockerfiles(workspace_path: &Path) -> Result<Vec<Pat
             if file_type.is_dir() {
                 stack.push(path);
             } else if file_type.is_file()
-                && path.extension().map_or(false, |ext| {
-                    ext.to_string_lossy().eq_ignore_ascii_case("dockerfile")
-                })
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("dockerfile"))
                 && local_dockerfile_uses_local_base(&path)?
             {
                 out.push(path);
@@ -470,8 +470,7 @@ fn local_template_name(workspace_path: &Path, dockerfile_path: &Path) -> String 
     if raw.trim().is_empty() {
         "dockerfile".to_string()
     } else {
-        raw.replace('\n', "/")
-            .replace('\\', "/")
+        raw.replace(['\n', '\\'], "/")
             .trim_end_matches('/')
             .trim_start_matches('/')
             .to_string()
@@ -484,9 +483,7 @@ fn local_image_stem(workspace_path: &Path, dockerfile_path: &Path) -> String {
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .unwrap_or("workspace");
-    let rel_name = local_template_name(workspace_path, dockerfile_path)
-        .replace('/', "_")
-        .replace('\\', "_");
+    let rel_name = local_template_name(workspace_path, dockerfile_path).replace(['/', '\\'], "_");
     let mut raw = format!("local-{}-{}", workspace_name, rel_name);
     raw.make_ascii_lowercase();
 
@@ -525,12 +522,12 @@ fn canonicalize_workspace_paths(config: &mut Config) -> Result<()> {
     for proj in &mut config.workspaces {
         anyhow::ensure!(
             !proj.canonical_path.as_os_str().is_empty(),
-            "project '{}': canonical_path is required",
+            "workspace '{}': canonical_path is required",
             proj.name
         );
         proj.canonical_path = proj.canonical_path.canonicalize().with_context(|| {
             format!(
-                "project '{}': canonical_path is not accessible: {}",
+                "workspace '{}': canonical_path is not accessible: {}",
                 proj.name,
                 proj.canonical_path.display()
             )
@@ -546,7 +543,7 @@ fn canonicalize_workspace_paths(config: &mut Config) -> Result<()> {
 fn reject_sensitive_workspace_path(name: &str, canonical: &Path) -> Result<()> {
     if let Some(hit) = sensitive_path_hit(canonical) {
         anyhow::bail!(
-            "project '{}': canonical_path {} resolves under a sensitive path ({}); refusing to mount",
+            "workspace '{}': canonical_path {} resolves under a sensitive path ({}); refusing to mount",
             name,
             canonical.display(),
             hit.display()
@@ -578,14 +575,44 @@ fn reject_sensitive_mount_source(context: &str, host: &Path) -> Result<()> {
 /// Return the sensitive root a path equals or lives under, if any. Covers
 /// `/etc`, `~/.ssh`, `~/.gnupg`, and the Docker socket at its common locations.
 fn sensitive_path_hit(candidate: &Path) -> Option<PathBuf> {
+    let mut exact_only: Vec<PathBuf> = vec![
+        PathBuf::from("/"),
+        PathBuf::from("/home"),
+        PathBuf::from("/Users"),
+    ];
     let mut sensitive: Vec<PathBuf> = vec![
         PathBuf::from("/etc"),
+        PathBuf::from("/boot"),
+        PathBuf::from("/dev"),
+        PathBuf::from("/proc"),
+        PathBuf::from("/root"),
+        PathBuf::from("/run"),
+        PathBuf::from("/sys"),
+        PathBuf::from("/usr"),
+        PathBuf::from("/var"),
         PathBuf::from("/var/run/docker.sock"),
         PathBuf::from("/run/docker.sock"),
     ];
     if let Some(home) = dirs::home_dir() {
+        // Reject the home directory itself. Common broad parents are listed
+        // explicitly above; deriving every ancestor from HOME is unsafe in
+        // hermetic environments where HOME may live under a shared temp root.
+        exact_only.push(home.clone());
         sensitive.push(home.join(".ssh"));
         sensitive.push(home.join(".gnupg"));
+        sensitive.push(home.join(".aws"));
+        sensitive.push(home.join(".azure"));
+        sensitive.push(home.join(".config/gcloud"));
+        sensitive.push(home.join(".docker"));
+        sensitive.push(home.join(".kube"));
+        sensitive.push(home.join(".netrc"));
+    }
+    for root in &exact_only {
+        let canonical_root = root.canonicalize();
+        let root = canonical_root.as_deref().unwrap_or(root.as_path());
+        if candidate == root {
+            return Some(root.to_path_buf());
+        }
     }
     for s in &sensitive {
         // Canonicalize the sensitive root too so we compare apples to apples
@@ -790,23 +817,23 @@ fn validate(config: &Config) -> Result<()> {
     for proj in &config.workspaces {
         anyhow::ensure!(
             seen.insert(&proj.name),
-            "duplicate project name: {}",
+            "duplicate workspace name: {}",
             proj.name
         );
         anyhow::ensure!(
             !proj.canonical_path.as_os_str().is_empty(),
-            "project '{}': canonical_path is required",
+            "workspace '{}': canonical_path is required",
             proj.name
         );
         anyhow::ensure!(
             proj.canonical_path.exists(),
-            "project '{}': canonical_path does not exist: {}",
+            "workspace '{}': canonical_path does not exist: {}",
             proj.name,
             proj.canonical_path.display()
         );
         anyhow::ensure!(
             proj.canonical_path.is_dir(),
-            "project '{}': canonical_path is not a directory: {}",
+            "workspace '{}': canonical_path is not a directory: {}",
             proj.name,
             proj.canonical_path.display()
         );
@@ -1041,5 +1068,21 @@ pub fn expand_path(path: &Path) -> Result<PathBuf> {
         )
     } else {
         Ok(path.to_path_buf())
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_broad_and_credential_bearing_mount_roots() {
+        assert!(sensitive_path_hit(Path::new("/")).is_some());
+        assert!(sensitive_path_hit(Path::new("/etc")).is_some());
+        assert!(sensitive_path_hit(Path::new("/proc/self")).is_some());
+        if let Some(home) = dirs::home_dir() {
+            assert!(sensitive_path_hit(&home).is_some());
+            assert!(sensitive_path_hit(&home.join(".aws/credentials")).is_some());
+        }
     }
 }

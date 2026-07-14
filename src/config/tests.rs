@@ -297,7 +297,7 @@ fn workspace_container_templates_merge_deduplicates_matching_names() {
         std::fs::create_dir_all(&workspace).expect("workspace");
         let first = workspace.join("same.dockerfile");
         let second = workspace.join("alt").join("same.dockerfile");
-        std::fs::create_dir_all(&workspace.join("alt")).expect("alt");
+        std::fs::create_dir_all(workspace.join("alt")).expect("alt");
         std::fs::write(&first, "FROM harness-hat-base:local\n").expect("write first");
         std::fs::write(&second, "FROM harness-hat-base:local\n").expect("write second");
 

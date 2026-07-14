@@ -1,13 +1,11 @@
-/// MITM HTTP/HTTPS proxy enforcing network policies from harness-rules.toml.
+/// Authenticated HTTP/CONNECT proxy enforcing policies from harness-rules.toml.
 ///
 /// Containers route all traffic through this proxy. Plain HTTP requests are
-/// intercepted and parsed directly. HTTPS traffic is intercepted via CONNECT
-/// tunnels: the proxy terminates TLS with a per-domain leaf cert signed by
-/// the harness-hat CA (which containers are configured to trust), inspects the
-/// inner HTTP request, then forwards to the real server.
+/// intercepted and parsed directly. HTTPS and other TCP traffic is gated by
+/// destination and then carried through CONNECT tunnels without decrypting it.
 ///
 /// Network policy (auto/prompt/deny) is determined by matching the composed
-/// rules against method + host + path of each request.
+/// rules against method + host + path for HTTP, or host + port for CONNECT.
 use anyhow::Result;
 use lru::LruCache;
 use std::collections::HashMap;
@@ -43,7 +41,7 @@ const LIMITED_SOURCE_PROXY_CONNECTION_LIMIT: usize = 32;
 pub struct PendingNetworkItem {
     pub activity_id: String,
     pub cancel_flag: Arc<std::sync::atomic::AtomicBool>,
-    pub source_project: Option<String>,
+    pub source_workspace: Option<String>,
     pub source_container: Option<String>,
     pub source_status: String,
     pub has_proxy_authorization: bool,
@@ -64,7 +62,7 @@ pub enum NetworkDecision {
 
 #[derive(Debug, Clone)]
 pub(crate) struct FixedSourceIdentity {
-    pub(crate) project: String,
+    pub(crate) workspace_name: String,
     pub(crate) container: String,
     pub(crate) auth_token: String,
     pub(crate) limiter_key: String,
@@ -79,34 +77,52 @@ pub enum SourcePriority {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceIdentityStatus {
+    #[cfg(test)]
     Ok,
     ListenerBoundSource,
-    MissingProxyAuthorization,
+    #[cfg(test)]
     MalformedAuthHeader,
+    #[cfg(test)]
     UnsupportedAuthScheme,
+    #[cfg(test)]
     InvalidBase64,
+    #[cfg(test)]
     InvalidUtf8,
+    #[cfg(test)]
     MissingUsernamePasswordDelimiter,
+    #[cfg(test)]
     UnexpectedUsername,
+    #[cfg(test)]
     MissingProjectContainerDelimiter,
+    #[cfg(test)]
     InvalidProjectEncoding,
+    #[cfg(test)]
     InvalidContainerEncoding,
 }
 
 impl SourceIdentityStatus {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            #[cfg(test)]
             Self::Ok => "ok",
             Self::ListenerBoundSource => "listener_bound_source",
-            Self::MissingProxyAuthorization => "missing_proxy_authorization",
+            #[cfg(test)]
             Self::MalformedAuthHeader => "malformed_auth_header",
+            #[cfg(test)]
             Self::UnsupportedAuthScheme => "unsupported_auth_scheme",
+            #[cfg(test)]
             Self::InvalidBase64 => "invalid_base64",
+            #[cfg(test)]
             Self::InvalidUtf8 => "invalid_utf8",
+            #[cfg(test)]
             Self::MissingUsernamePasswordDelimiter => "missing_username_password_delimiter",
+            #[cfg(test)]
             Self::UnexpectedUsername => "unexpected_username",
+            #[cfg(test)]
             Self::MissingProjectContainerDelimiter => "missing_project_container_delimiter",
+            #[cfg(test)]
             Self::InvalidProjectEncoding => "invalid_project_encoding",
+            #[cfg(test)]
             Self::InvalidContainerEncoding => "invalid_container_encoding",
         }
     }
@@ -171,14 +187,14 @@ impl ProxyState {
 
     pub(crate) fn with_fixed_source(
         &self,
-        project: &str,
+        workspace_name: &str,
         container: &str,
         auth_token: &str,
         priority: SourcePriority,
     ) -> Self {
         let mut cloned = self.clone();
         cloned.fixed_source = Some(FixedSourceIdentity {
-            project: project.to_string(),
+            workspace_name: workspace_name.to_string(),
             container: container.to_string(),
             auth_token: auth_token.to_string(),
             limiter_key: auth_token.to_string(),
@@ -224,7 +240,7 @@ impl ProxyState {
 
     pub(crate) fn try_acquire_source_connection(
         &self,
-        source_project: Option<&str>,
+        source_workspace: Option<&str>,
         source_container: Option<&str>,
     ) -> Option<SourceConnectionPermit> {
         if self.is_primary_source() {
@@ -234,8 +250,10 @@ impl ProxyState {
         let key = self
             .fixed_source
             .as_ref()
-            .map(|fixed| source_connection_key(Some(&fixed.project), Some(&fixed.limiter_key)))
-            .unwrap_or_else(|| source_connection_key(source_project, source_container));
+            .map(|fixed| {
+                source_connection_key(Some(&fixed.workspace_name), Some(&fixed.limiter_key))
+            })
+            .unwrap_or_else(|| source_connection_key(source_workspace, source_container));
         let limiter = {
             let mut limiters = self.source_connection_limiters.lock().ok()?;
             limiters
@@ -347,10 +365,10 @@ fn is_container_host_alias(host: &str) -> bool {
         .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())
 }
 
-fn source_connection_key(source_project: Option<&str>, source_container: Option<&str>) -> String {
+fn source_connection_key(source_workspace: Option<&str>, source_container: Option<&str>) -> String {
     format!(
         "{}\0{}",
-        source_project.unwrap_or("<unknown-project>"),
+        source_workspace.unwrap_or("<unknown-workspace>"),
         source_container.unwrap_or("<unknown-container>")
     )
 }
@@ -358,7 +376,7 @@ fn source_connection_key(source_project: Option<&str>, source_container: Option<
 impl ProxyState {
     pub(crate) fn start_network_activity(
         &self,
-        source_project: Option<String>,
+        source_workspace: Option<String>,
         source_container: Option<String>,
         method: &str,
         host: &str,
@@ -379,7 +397,7 @@ impl ProxyState {
             .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
             .and_then(|(_, value)| value.trim().parse::<usize>().ok());
         let mut activity = Activity::new(
-            source_project.unwrap_or_else(|| "unknown-workspace".to_string()),
+            source_workspace.unwrap_or_else(|| "unknown-workspace".to_string()),
             source_container,
             ActivityKind::Network {
                 method: method.to_string(),
@@ -464,15 +482,8 @@ impl Drop for ScopedProxyListener {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[instrument(skip(state))]
-pub async fn run(state: ProxyState, addr: String) -> Result<()> {
-    let listener = TcpListener::bind(&addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("proxy bind {addr}: {e}"))?;
-    run_with_listener(state, listener).await
-}
-
 #[instrument(skip(state, listener))]
-async fn run_with_listener(state: ProxyState, listener: TcpListener) -> Result<()> {
+async fn run_scoped_listener(state: ProxyState, listener: TcpListener) -> Result<()> {
     let mut tasks = JoinSet::new();
     loop {
         tokio::select! {
@@ -521,7 +532,7 @@ async fn run_with_listener(state: ProxyState, listener: TcpListener) -> Result<(
 pub fn spawn_scoped_listener(
     state: &ProxyState,
     bind_host: &str,
-    project: &str,
+    workspace_name: &str,
     container: &str,
     auth_token: &str,
     priority: SourcePriority,
@@ -535,9 +546,9 @@ pub fn spawn_scoped_listener(
     let local_addr = std_listener.local_addr()?;
     let listener = TcpListener::from_std(std_listener)?;
     let addr = format!("{}:{}", bind_host, local_addr.port());
-    let fixed_state = state.with_fixed_source(project, container, auth_token, priority);
+    let fixed_state = state.with_fixed_source(workspace_name, container, auth_token, priority);
     let task = tokio::spawn(async move {
-        if let Err(e) = run_with_listener(fixed_state, listener).await {
+        if let Err(e) = run_scoped_listener(fixed_state, listener).await {
             error!("scoped proxy server error: {e}");
         }
     });

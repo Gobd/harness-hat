@@ -30,7 +30,6 @@ token_env_var = "HARNESS_HAT_TOKEN"
 # Bind the MITM proxy to loopback only. Non-loopback proxy hosts require
 # `allow_remote_control = true` and turn the proxy into a network-reachable
 # MITM relay.
-proxy_port = 28781
 proxy_host = "127.0.0.1"
 strict_network = true
 

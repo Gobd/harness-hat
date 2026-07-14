@@ -1,5 +1,3 @@
-#![allow(unused_imports)]
-
 use super::*;
 use crate::state::DecisionKind;
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -10,7 +8,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -41,7 +39,7 @@ mod terminal;
 
 pub(crate) use overlays::*;
 pub use root::render;
-pub(crate) use root::{log_pane_height, render_scrollbar, right_pane_gap_width};
+pub(crate) use root::render_scrollbar;
 pub(crate) use sidebar::*;
 pub(crate) use terminal::*;
 

@@ -67,7 +67,7 @@ pub struct ContainerSession {
     pub docker_name: String,
     /// Short random id (zero-padded 4 digits) used by `hh shell <alias>`.
     pub alias: String,
-    pub project: String,
+    pub workspace_name: String,
     pub session_token: String,
     pub mount_target: String,
     pub launched_at: Instant,
@@ -386,9 +386,9 @@ impl ContainerSession {
         Ok(())
     }
 
-    /// Generates a human-readable label for the TUI tab, combining container and project names.
+    /// Generates a human-readable label for the TUI tab, combining container and workspace names.
     pub fn tab_label(&self) -> String {
-        format!("{} @ {}", self.display_name(), self.project)
+        format!("{} @ {}", self.display_name(), self.workspace_name)
     }
 }
 

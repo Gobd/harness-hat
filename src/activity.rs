@@ -136,7 +136,7 @@ impl ActivityTerminal {
 #[derive(Debug, Clone)]
 pub struct Activity {
     pub id: ActivityId,
-    pub project: String,
+    pub workspace_name: String,
     pub session_token: Option<String>,
     pub container: Option<String>,
     pub kind: ActivityKind,
@@ -155,7 +155,7 @@ pub struct Activity {
 
 impl Activity {
     pub fn new(
-        project: String,
+        workspace_name: String,
         container: Option<String>,
         kind: ActivityKind,
         state: ActivityState,
@@ -165,7 +165,7 @@ impl Activity {
         let finished_at = state.is_terminal().then_some(now);
         Self {
             id: uuid::Uuid::new_v4().to_string(),
-            project,
+            workspace_name,
             session_token: None,
             container,
             kind,

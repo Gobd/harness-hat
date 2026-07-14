@@ -50,7 +50,7 @@ impl App {
         self.maybe_launch_native_dialog();
         self.refresh_session_terminal_states();
         for _ in 0..64 {
-            match self.container_usage_rx.try_recv() {
+            match self.background_channels.container_usage_rx.try_recv() {
                 Ok(update) => {
                     self.container_usage.insert(
                         update.docker_name,
@@ -65,7 +65,7 @@ impl App {
             }
         }
         for _ in 0..8 {
-            match self.rules_scan_rx.try_recv() {
+            match self.background_channels.rules_scan_rx.try_recv() {
                 Ok(stamps) => self.apply_rules_scan(stamps),
                 Err(_) => break,
             }
@@ -106,7 +106,7 @@ impl App {
                 }
                 Ok(BuildEvent::Finished {
                     label,
-                    launch_project_idx,
+                    launch_workspace_idx,
                     launch_container_idx,
                     launch_session_group,
                     success,
@@ -121,7 +121,7 @@ impl App {
                         .map(|task| task.command_display)
                         .unwrap_or_default();
                     if let Some(error) = error {
-                        self.build_project_idx = None;
+                        self.build_workspace_idx = None;
                         self.build_session_group = None;
                         self.push_log(format!("{label} failed: {error}"), true);
                         if let Some(diagnostic) = &diagnostic {
@@ -145,7 +145,7 @@ impl App {
                         continue;
                     }
                     if cancelled {
-                        self.build_project_idx = None;
+                        self.build_workspace_idx = None;
                         self.build_session_group = None;
                         self.push_log(format!("{label} cancelled"), true);
                         self.build_finished = Some(BuildFinished {
@@ -164,7 +164,7 @@ impl App {
                         continue;
                     }
                     if success {
-                        self.build_project_idx = None;
+                        self.build_workspace_idx = None;
                         self.build_session_group = None;
                         self.build_finished = None;
                         self.push_log(format!("{label} finished successfully"), false);
@@ -188,15 +188,15 @@ impl App {
                                 outcome,
                             );
                         } else {
-                            self.do_launch_container_on_project_with_priority(
-                                launch_project_idx,
+                            self.do_launch_container_on_workspace_with_priority(
+                                launch_workspace_idx,
                                 launch_container_idx,
                                 crate::proxy::SourcePriority::Primary,
                                 launch_session_group,
                             );
                         }
                     } else {
-                        self.build_project_idx = None;
+                        self.build_workspace_idx = None;
                         self.build_session_group = None;
                         let suffix = exit_code
                             .map(|code| format!(" (exit code {code})"))
@@ -286,7 +286,7 @@ impl App {
             let Some((project, container_id)) = self
                 .pending_stop
                 .get(idx)
-                .map(|item| (item.project.clone(), item.container_id.clone()))
+                .map(|item| (item.workspace_name.clone(), item.container_id.clone()))
             else {
                 continue;
             };
@@ -324,7 +324,7 @@ impl App {
             return;
         }
 
-        // Per-source quota check (M3). "Source" = `source_project` when set,
+        // Per-source quota check (M3). "Source" = `source_workspace` when set,
         // otherwise the source container's identity — that's the strongest
         // attribution we have for unauthenticated proxy clients. Items with no
         // source at all share a single bucket so an attacker can't bypass the
@@ -378,7 +378,7 @@ fn pending_network_merge_key_matches(
     left: &crate::proxy::PendingNetworkItem,
     right: &crate::proxy::PendingNetworkItem,
 ) -> bool {
-    left.source_project == right.source_project
+    left.source_workspace == right.source_workspace
         && left.method.eq_ignore_ascii_case(&right.method)
         && left.host.eq_ignore_ascii_case(&right.host)
         && left.port == right.port
@@ -386,12 +386,12 @@ fn pending_network_merge_key_matches(
 }
 
 /// Stable key used to count "how many pending approvals does this source
-/// already hold." Prefers an explicit `source_project`; falls back to the
+/// already hold." Prefers an explicit `source_workspace`; falls back to the
 /// source container identity, then to a shared "unknown" bucket so requests
 /// with no attribution can't dodge the quota by being anonymous (M3).
 fn pending_network_source_key(item: &crate::proxy::PendingNetworkItem) -> String {
-    if let Some(project) = item.source_project.as_deref() {
-        return format!("project:{project}");
+    if let Some(project) = item.source_workspace.as_deref() {
+        return format!("workspace:{project}");
     }
     if let Some(container) = item.source_container.as_deref() {
         return format!("container:{container}");

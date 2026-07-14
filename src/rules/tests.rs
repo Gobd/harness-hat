@@ -1,4 +1,7 @@
-use super::{ComposedRules, NetworkPolicy, NetworkRules, ProjectRules, host_matches, load};
+use super::{
+    ComposedRules, NetworkPolicy, NetworkRules, ProjectRules, append_hostdo_auto_approval,
+    host_matches, load,
+};
 use super::{HostdoCommand, HostdoRules};
 
 #[test]
@@ -144,24 +147,19 @@ fn compose_hostdo_default_policy_and_exact_match() {
     };
 
     let composed = ComposedRules::compose(&global, &[project]);
-    // Global auto command keeps `auto` — the global rules file is host-owned.
     assert_eq!(
         composed.match_hostdo(&["cargo".into(), "build".into()], None),
         Some(NetworkPolicy::Auto)
     );
-    // Project (workspace) auto command is downgraded to `prompt`: the workspace
-    // rules file is container-writable and must not grant passwordless host
-    // execution (C1).
     assert_eq!(
         composed.match_hostdo(&["npm".into(), "test".into()], None),
-        Some(NetworkPolicy::Prompt)
+        Some(NetworkPolicy::Auto)
     );
     assert_eq!(composed.hostdo.default_policy, NetworkPolicy::Deny);
 }
 
 #[test]
-fn compose_downgrades_workspace_auto_hostdo_to_prompt() {
-    // A workspace rules file cannot grant `auto`; `deny` (tightening) is kept.
+fn compose_preserves_workspace_hostdo_decisions() {
     let project = ProjectRules {
         hostdo: HostdoRules {
             default_policy: NetworkPolicy::Prompt,
@@ -184,8 +182,8 @@ fn compose_downgrades_workspace_auto_hostdo_to_prompt() {
     let composed = ComposedRules::compose(&ProjectRules::default(), &[project]);
     assert_eq!(
         composed.match_hostdo(&["rm".into(), "-rf".into(), "/".into()], None),
-        Some(NetworkPolicy::Prompt),
-        "workspace auto must be downgraded to prompt"
+        Some(NetworkPolicy::Auto),
+        "workspace remembered allows must remain automatic"
     );
     assert_eq!(
         composed.match_hostdo(&["curl".into(), "evil".into()], None),
@@ -210,9 +208,7 @@ fn compose_hostdo_match_distinguishes_image() {
         ..ProjectRules::default()
     };
 
-    // Pass as the host-owned global so `auto` is preserved and the test stays
-    // focused on image distinction rather than the workspace downgrade (C1).
-    let composed = ComposedRules::compose(&rules, &[]);
+    let composed = ComposedRules::compose(&ProjectRules::default(), &[rules]);
     assert_eq!(
         composed.match_hostdo(&["cargo".into(), "test".into()], Some("rust:1.88")),
         Some(NetworkPolicy::Auto)
@@ -306,5 +302,30 @@ commands = [{ argv = ["npm", "test"], image = "node:20", env_allowlist = ["CI"] 
     assert!(
         err.to_string().contains("image rules"),
         "error should explain the image restriction: {err}"
+    );
+}
+
+#[test]
+fn remembered_workspace_hostdo_rule_is_persisted_and_effective() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("harness-rules.toml");
+    let argv = vec!["cargo".to_string(), "test".to_string()];
+
+    assert!(
+        append_hostdo_auto_approval(&path, &argv, None, 120).expect("persist remembered approval")
+    );
+
+    let workspace_rules = load(&path).expect("reload remembered approval");
+    assert_eq!(workspace_rules.hostdo.commands.len(), 1);
+    assert_eq!(
+        workspace_rules.hostdo.commands[0].approval_mode,
+        NetworkPolicy::Auto
+    );
+
+    let composed = ComposedRules::compose(&ProjectRules::default(), &[workspace_rules]);
+    assert_eq!(
+        composed.match_hostdo(&argv, None),
+        Some(NetworkPolicy::Auto),
+        "a remembered project-local decision must not prompt again"
     );
 }

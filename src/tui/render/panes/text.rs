@@ -32,7 +32,7 @@ pub(crate) fn render_log(frame: &mut Frame, app: &mut App, area: Rect) {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        format!("{:<16} ", e.project),
+                        format!("{:<16} ", e.workspace_name),
                         Style::default().fg(Color::White),
                     ),
                     Span::raw(e.argv.join(" ")),
@@ -107,8 +107,8 @@ pub(crate) fn status_bar_keys(app: &App) -> &'static str {
 
 // ── New workspace pane ───────────────────────────────────────────────────────
 
-pub(crate) fn render_new_project(frame: &mut Frame, app: &App, area: Rect, dimmed: bool) {
-    let Some(state) = app.new_project.as_ref() else {
+pub(crate) fn render_new_workspace(frame: &mut Frame, app: &App, area: Rect, dimmed: bool) {
+    let Some(state) = app.new_workspace.as_ref() else {
         render_idle(frame, area);
         return;
     };
@@ -199,7 +199,7 @@ pub(crate) fn render_new_project(frame: &mut Frame, app: &App, area: Rect, dimme
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-pub(crate) fn render_new_project_preview(frame: &mut Frame, app: &App, area: Rect, dimmed: bool) {
+pub(crate) fn render_new_workspace_preview(frame: &mut Frame, app: &App, area: Rect, dimmed: bool) {
     let tone = |c| maybe_dim(c, dimmed);
     let block = Block::default()
         .title(" New Workspace ")

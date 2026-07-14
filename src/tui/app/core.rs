@@ -103,7 +103,6 @@ impl App {
         audit_rx: mpsc::Receiver<AuditEntry>,
         state: StateManager,
         proxy_state: ProxyState,
-        _proxy_addr: String,
     ) -> Result<Self> {
         let cfg = config.get();
         let watched_rules_stamps = Self::watched_rules_paths(&cfg)
@@ -140,9 +139,9 @@ impl App {
         });
 
         let (build_event_tx, build_event_rx) = mpsc::channel(BUILD_EVENT_CHANNEL_CAPACITY);
-        let (native_dialog_tx, native_dialog_rx) = mpsc::unbounded_channel();
-        let (container_usage_tx, container_usage_rx) = mpsc::unbounded_channel();
-        let (rules_scan_tx, rules_scan_rx) = mpsc::unbounded_channel();
+        let (native_dialog_tx, native_dialog_rx) = mpsc::channel(4);
+        let (container_usage_tx, container_usage_rx) = mpsc::channel(32);
+        let (rules_scan_tx, rules_scan_rx) = mpsc::channel(2);
 
         let rules_path = &cfg.manager.global_rules_file;
         let network_rule_count = crate::rules::load(rules_path)
@@ -183,17 +182,17 @@ impl App {
             active_network_session: None,
             network_cursor: 0,
             preview_session: None,
-            active_settings_project: None,
+            active_settings_workspace: None,
             settings_cursor: 0,
             container_picker: None,
             build_container_idx: None,
-            build_project_idx: None,
+            build_workspace_idx: None,
             build_session_group: None,
             build_cursor: 0,
             build_output: VecDeque::new(),
             build_scroll: 0,
             sessions: vec![],
-            new_project: None,
+            new_workspace: None,
             remove_workspace_confirm: None,
             base_rules_changed: None,
             exec_pending_rx,
@@ -201,8 +200,14 @@ impl App {
             launch_pending_rx,
             workspace_launch_pending: None,
             net_pending_rx,
-            native_dialog_rx,
-            native_dialog_tx,
+            background_channels: BackgroundUiChannels {
+                native_dialog_rx,
+                native_dialog_tx,
+                container_usage_rx,
+                container_usage_tx,
+                rules_scan_rx,
+                rules_scan_tx,
+            },
             native_dialog_inflight: None,
             activity_rx,
             audit_rx,
@@ -210,10 +215,6 @@ impl App {
             build_event_tx,
             build_task: None,
             build_finished: None,
-            container_usage_rx,
-            container_usage_tx,
-            rules_scan_rx,
-            rules_scan_tx,
             rules_scan_in_flight: false,
             should_quit: false,
             passthrough_mode: false,
@@ -256,19 +257,19 @@ impl App {
             return;
         }
         self.rules_scan_in_flight = true;
-        let tx = self.rules_scan_tx.clone();
+        let tx = self.background_channels.rules_scan_tx.clone();
         std::thread::spawn(move || {
             // Drop-guard: `rules_scan_in_flight` is only cleared when a result
             // arrives via `apply_rules_scan`. If stamping panics partway, this
             // guarantees a (possibly empty) result is still sent so the flag is
             // reset and the rules-tampering watch keeps running (H15).
             struct SendOnDrop {
-                tx: Option<mpsc::UnboundedSender<Vec<(PathBuf, WatchedFileStamp)>>>,
+                tx: Option<mpsc::Sender<Vec<(PathBuf, WatchedFileStamp)>>>,
             }
             impl Drop for SendOnDrop {
                 fn drop(&mut self) {
                     if let Some(tx) = self.tx.take() {
-                        let _ = tx.send(Vec::new());
+                        let _ = tx.blocking_send(Vec::new());
                     }
                 }
             }
@@ -282,7 +283,7 @@ impl App {
                 })
                 .collect();
             if let Some(tx) = guard.tx.take() {
-                let _ = tx.send(stamps);
+                let _ = tx.blocking_send(stamps);
             }
         });
     }
@@ -338,29 +339,6 @@ impl App {
         );
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn record_completed_rules_internal_write(
-        &mut self,
-        path: PathBuf,
-        expected_content: String,
-    ) {
-        match std::fs::read_to_string(&path) {
-            Ok(current) if current == expected_content => {
-                self.pending_base_rules_internal_write.remove(&path);
-                self.watched_rules_stamps
-                    .insert(path.clone(), Self::watched_file_stamp(&path));
-            }
-            _ => self.note_rules_internal_write(path, expected_content),
-        }
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn note_base_rules_internal_write(&mut self, expected_content: String) {
-        let path = self.config.get().manager.global_rules_file.clone();
-        self.note_rules_internal_write(path, expected_content);
-    }
-
     pub fn sidebar_items(&self) -> Vec<SidebarItem> {
         let cfg = self.config.get();
         let mut items = Vec::new();
@@ -381,7 +359,7 @@ impl App {
             }
         }
 
-        if let Some(pi) = self.build_project_idx {
+        if let Some(pi) = self.build_workspace_idx {
             if pi < cfg.workspaces.len() {
                 items.push(SidebarItem::Build(pi));
             }
@@ -436,7 +414,7 @@ impl App {
             .get(workspace_idx)
             .map(|ws| ws.name.clone())
             .unwrap_or_else(|| format!("workspace-{workspace_idx}"));
-        let templates = self.workspace_templates_for_project(workspace_idx);
+        let templates = self.workspace_templates_for_workspace(workspace_idx);
         let template_name = templates
             .get(ctr_idx)
             .map(|ctr| ctr.name.clone())
@@ -458,20 +436,6 @@ impl App {
             group.terminal_indices.clear();
             group.terminal_indices.push(session_idx);
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn session_terminal_pos(
-        &self,
-        session_group: usize,
-        session_idx: usize,
-    ) -> Option<usize> {
-        self.session_groups.get(session_group).and_then(|group| {
-            group
-                .terminal_indices
-                .iter()
-                .position(|existing| *existing == session_idx)
-        })
     }
 
     pub(crate) fn remove_session_terminal(
@@ -507,7 +471,7 @@ impl App {
             .retain(|group| !group.terminal_indices.is_empty());
     }
 
-    pub fn selected_project_idx(&self) -> Option<usize> {
+    pub fn selected_workspace_idx(&self) -> Option<usize> {
         match self.sidebar_items().get(self.sidebar_idx) {
             Some(SidebarItem::Session(si)) | Some(SidebarItem::SessionTerminal(si, _)) => self
                 .session_groups
@@ -519,11 +483,11 @@ impl App {
                     .get()
                     .workspaces
                     .iter()
-                    .position(|p| p.name == session.project)
+                    .position(|p| p.name == session.workspace_name)
             }),
             Some(SidebarItem::Activity(id)) => {
                 let cfg = self.config.get();
-                let project = self.activity_by_id(id)?.project.as_str();
+                let project = self.activity_by_id(id)?.workspace_name.as_str();
                 cfg.workspaces.iter().position(|p| p.name == project)
             }
             Some(SidebarItem::Settings(si)) => self
@@ -561,7 +525,7 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, pending)| {
-                pending.project == session.project
+                pending.workspace_name == session.workspace_name
                     && pending.container_id.as_deref().is_none_or(|container| {
                         Self::container_identity_matches(
                             container,
@@ -594,7 +558,7 @@ impl App {
             .filter(|activity| {
                 Self::activity_matches_session_identity(
                     activity,
-                    &session.project,
+                    &session.workspace_name,
                     &session.session_token,
                     &session.container_id,
                     &session.container_name,
@@ -604,7 +568,6 @@ impl App {
             .collect()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn sidebar_activity_items_for_session(
         session_idx: usize,
         activities: Vec<&Activity>,
@@ -671,7 +634,7 @@ impl App {
         self.sessions.iter().position(|session| {
             Self::activity_matches_session_identity(
                 activity,
-                &session.project,
+                &session.workspace_name,
                 &session.session_token,
                 &session.container_id,
                 &session.container_name,
@@ -704,7 +667,7 @@ impl App {
         container_name: &str,
         docker_name: &str,
     ) -> bool {
-        if activity.project != project {
+        if activity.workspace_name != project {
             return false;
         }
         if let Some(activity_session_token) = activity.session_token.as_deref() {
@@ -800,7 +763,7 @@ impl App {
         let selected_network_identity = selected_network_session.and_then(|si| {
             self.sessions.get(si).map(|session| {
                 (
-                    session.project.clone(),
+                    session.workspace_name.clone(),
                     session.session_token.clone(),
                     session.container_id.clone(),
                     session.container_name.clone(),
@@ -883,7 +846,7 @@ impl App {
         // exists, fall back to the workspace's launch entry.
         items
             .iter()
-            .position(|item| matches!(item, SidebarItem::Session(si) if self.selected_project_idx_for_group(*si) == Some(workspace_idx)))
+            .position(|item| matches!(item, SidebarItem::Session(si) if self.selected_workspace_idx_for_group(*si) == Some(workspace_idx)))
             .or_else(|| {
                 items
                     .iter()
@@ -891,7 +854,7 @@ impl App {
             })
     }
 
-    pub(crate) fn selected_project_idx_for_group(&self, group_idx: usize) -> Option<usize> {
+    pub(crate) fn selected_workspace_idx_for_group(&self, group_idx: usize) -> Option<usize> {
         self.session_groups
             .get(group_idx)
             .and_then(|group| group.workspace_idx)
@@ -1167,11 +1130,9 @@ impl App {
         // stop a sibling container in the same workspace by submitting a short
         // common prefix (H19). The session-token check upstream binds the call
         // to its own container; this just enforces that here as well.
-        let Some(idx) = self
-            .sessions
-            .iter()
-            .position(|session| session.project == project && session.container_id == normalized)
-        else {
+        let Some(idx) = self.sessions.iter().position(|session| {
+            session.workspace_name == project && session.container_id == normalized
+        }) else {
             self.push_log(
                 format!(
                     "killme request for workspace '{}' could not find container {}",
@@ -1246,13 +1207,13 @@ impl App {
                     in_flight: true,
                 });
 
-            let tx = self.container_usage_tx.clone();
+            let tx = self.background_channels.container_usage_tx.clone();
             let name = docker_name.clone();
             std::thread::spawn(move || {
                 let stats = crate::container::inspect_container_usage(&name)
                     .ok()
                     .flatten();
-                let _ = tx.send(ContainerUsageUpdate {
+                let _ = tx.blocking_send(ContainerUsageUpdate {
                     docker_name: name,
                     stats,
                 });
@@ -1290,7 +1251,7 @@ impl App {
         }
     }
 
-    pub(crate) fn log_project_rules_status(&mut self, project: &crate::config::WorkspaceConfig) {
+    pub(crate) fn log_workspace_rules_status(&mut self, project: &crate::config::WorkspaceConfig) {
         let rules_path = project.canonical_path.join("harness-rules.toml");
         if !rules_path.exists() {
             self.push_log(

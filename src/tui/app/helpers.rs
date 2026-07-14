@@ -1,76 +1,4 @@
 use super::*;
-use alacritty_terminal::term::TermMode;
-
-#[allow(dead_code)]
-pub(crate) fn maybe_encode_sgr_mouse_for_session(
-    session: &crate::container::ContainerSession,
-    mouse: MouseEvent,
-) -> Option<Vec<u8>> {
-    // Only forward mouse events when the terminal app has explicitly enabled mouse reporting.
-    // Without this gating, shells and other apps would see raw escape sequences.
-    let mode = *session.term.lock().mode();
-    if !mode
-        .intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
-    {
-        return None;
-    }
-
-    // Only emit SGR mouse sequences for now; this matches most modern TUIs.
-    if !mode.contains(TermMode::SGR_MOUSE) {
-        return None;
-    }
-
-    encode_sgr_mouse(mouse)
-}
-
-#[allow(dead_code)]
-pub(crate) fn encode_sgr_mouse(mouse: MouseEvent) -> Option<Vec<u8>> {
-    let mut cb: u16 = 0;
-    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
-        cb |= 4;
-    }
-    if mouse.modifiers.contains(KeyModifiers::ALT) {
-        cb |= 8;
-    }
-    if mouse.modifiers.contains(KeyModifiers::CONTROL) {
-        cb |= 16;
-    }
-
-    let (button_code, suffix): (u16, u8) = match mouse.kind {
-        MouseEventKind::Down(button) => (button_to_code(button)?, b'M'),
-        MouseEventKind::Up(button) => (button_to_code(button)?, b'm'),
-        MouseEventKind::Drag(button) => (button_to_code(button)? + 32, b'M'),
-        MouseEventKind::ScrollUp => (64, b'M'),
-        MouseEventKind::ScrollDown => (65, b'M'),
-        MouseEventKind::ScrollLeft => (66, b'M'),
-        MouseEventKind::ScrollRight => (67, b'M'),
-        MouseEventKind::Moved => return None,
-    };
-
-    let cb = cb + button_code;
-    let x = mouse.column.saturating_add(1);
-    let y = mouse.row.saturating_add(1);
-
-    let mut out = Vec::with_capacity(32);
-    out.extend_from_slice(b"\x1b[<");
-    out.extend_from_slice(cb.to_string().as_bytes());
-    out.push(b';');
-    out.extend_from_slice(x.to_string().as_bytes());
-    out.push(b';');
-    out.extend_from_slice(y.to_string().as_bytes());
-    out.push(suffix);
-    Some(out)
-}
-
-#[allow(dead_code)]
-pub(crate) fn button_to_code(button: MouseButton) -> Option<u16> {
-    match button {
-        MouseButton::Left => Some(0),
-        MouseButton::Middle => Some(1),
-        MouseButton::Right => Some(2),
-    }
-}
-
 pub(crate) fn shell_command_for_docker_args(args: &[String]) -> String {
     format!("docker {}", shell_words::join(args))
 }
@@ -166,7 +94,7 @@ async fn forward_build_stream<R>(
 pub(crate) async fn run_build_docker_commands(
     label: String,
     docker_commands: Vec<Vec<String>>,
-    launch_project_idx: usize,
+    launch_workspace_idx: usize,
     launch_container_idx: usize,
     launch_session_group: Option<usize>,
     cancel_flag: Arc<AtomicBool>,
@@ -176,7 +104,7 @@ pub(crate) async fn run_build_docker_commands(
         let _ = tx
             .send(BuildEvent::Finished {
                 label,
-                launch_project_idx,
+                launch_workspace_idx,
                 launch_container_idx,
                 launch_session_group,
                 success: false,
@@ -254,7 +182,7 @@ pub(crate) async fn run_build_docker_commands(
         let _ = tx
             .send(BuildEvent::Finished {
                 label,
-                launch_project_idx,
+                launch_workspace_idx,
                 launch_container_idx,
                 launch_session_group,
                 success: false,
@@ -275,7 +203,7 @@ pub(crate) async fn run_build_docker_commands(
     let _ = tx
         .send(BuildEvent::Finished {
             label,
-            launch_project_idx,
+            launch_workspace_idx,
             launch_container_idx,
             launch_session_group,
             success,
@@ -340,11 +268,6 @@ fn join_build_tail(tail: &Arc<Mutex<VecDeque<String>>>) -> Option<String> {
 pub(crate) fn is_scroll_mode_toggle_key(key: KeyEvent) -> bool {
     (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL))
         || (key.code == KeyCode::Char('\u{13}') && key.modifiers.is_empty())
-}
-
-pub(crate) fn oneshot_dummy() -> tokio::sync::oneshot::Sender<NetworkDecision> {
-    let (tx, _) = tokio::sync::oneshot::channel();
-    tx
 }
 
 // ── Key → PTY bytes (Streamlined mapping) ────────────────────────────────────

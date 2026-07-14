@@ -4,8 +4,8 @@ mod tests {
     use crate::proxy::core::{NetworkDecision, ProxyState, SourceIdentityStatus, SourcePriority};
     use crate::proxy::helpers::{
         canonicalize_host, decode_source_from_proxy_authorization,
-        ensure_host_header_matches_target, format_byte_count, proxy_authorization_matches_token,
-        resolve_public_addrs, split_host_port,
+        ensure_host_header_matches_target, format_byte_count, host_matches_pattern,
+        proxy_authorization_matches_token, resolve_public_addrs, split_host_port,
     };
     use crate::proxy::http::{prompt_network, read_body_any};
     use crate::shared_config::SharedConfig;
@@ -454,6 +454,13 @@ global_rules_file = "/tmp/global.toml""#;
         );
         assert!(canonicalize_host("").is_err());
         assert!(canonicalize_host("bad host").is_err());
+    }
+
+    #[test]
+    fn allowed_host_wildcards_are_subdomain_only_like_network_rules() {
+        assert!(host_matches_pattern("*.example.com", "api.example.com"));
+        assert!(!host_matches_pattern("*.example.com", "example.com"));
+        assert!(host_matches_pattern("example.com", "example.com"));
     }
 
     #[test]

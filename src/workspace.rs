@@ -308,14 +308,14 @@ fn probe_manager(control_url: &str) -> Result<()> {
 struct LaunchResponse {
     alias: String,
     docker_name: String,
-    #[allow(dead_code)]
-    session_token: String,
+    #[serde(rename = "session_token")]
+    _session_token: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct LaunchError {
-    #[allow(dead_code)]
-    error: String,
+    #[serde(rename = "error")]
+    _error: String,
     reason: String,
 }
 

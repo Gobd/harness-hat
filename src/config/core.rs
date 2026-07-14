@@ -149,8 +149,11 @@ impl Default for ControlDefaults {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyDefaults {
-    #[serde(default = "default_proxy_port")]
-    pub proxy_port: u16,
+    /// Legacy root-listener port retained only so existing configuration files
+    /// continue to deserialize. Sessions now receive authenticated ephemeral
+    /// proxy listeners and this value is not bound.
+    #[serde(default = "default_proxy_port", rename = "proxy_port")]
+    pub legacy_proxy_port: u16,
     #[serde(default = "default_host")]
     pub proxy_host: String,
     /// When enabled, containers are launched with NET_ADMIN + root so they can:
@@ -164,7 +167,7 @@ pub struct ProxyDefaults {
     pub strict_network: bool,
 }
 
-/// Provides the default value for `ProxyDefaults.proxy_port`.
+/// Provides the compatibility default for the retired root proxy port.
 fn default_proxy_port() -> u16 {
     28781
 }
@@ -172,7 +175,7 @@ fn default_proxy_port() -> u16 {
 impl Default for ProxyDefaults {
     fn default() -> Self {
         Self {
-            proxy_port: default_proxy_port(),
+            legacy_proxy_port: default_proxy_port(),
             proxy_host: default_host(),
             strict_network: false,
         }

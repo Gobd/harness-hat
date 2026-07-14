@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 /// Thread-safe hot-reloadable handle to the current config.
 ///
 /// This is used so the TUI can update the config at runtime and the control
-/// server + proxy can see the new project list without restart.
+/// server + proxy can see the new workspace list without restart.
 #[derive(Clone)]
 pub struct SharedConfig {
     inner: Arc<RwLock<Arc<Config>>>,

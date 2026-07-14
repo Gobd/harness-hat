@@ -9,14 +9,13 @@ use crate::proxy::helpers::{
     proxy_authorization_matches_token, tunnel_with_activity, write_error_any,
 };
 use crate::proxy::http::{
-    connect_head_has_proxy_authorization, finish_blocked_network_activity, network_policy_allows,
-    parse_connect_target, parse_request_line_and_headers, parse_source_from_connect_head,
-    read_request_head_any,
+    finish_blocked_network_activity, network_policy_allows, parse_connect_target,
+    parse_request_line_and_headers, read_request_head_any,
 };
 use crate::proxy::{ProxyState, SourceIdentityStatus};
 use crate::rules::NetworkPolicy;
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn parse_sni_from_tls_client_hello(record: &[u8]) -> Option<String> {
     if record.len() < 5 + 4 {
         return None;
@@ -113,7 +112,7 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
     };
     let (_, _, connect_headers) = parse_request_line_and_headers(head_str)
         .ok_or_else(|| anyhow::anyhow!("malformed CONNECT request"))?;
-    let (source_project, source_container, source_status, connect_has_proxy_authorization): (
+    let (source_workspace, source_container, source_status, connect_has_proxy_authorization): (
         Option<String>,
         Option<String>,
         SourceIdentityStatus,
@@ -124,23 +123,22 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
             return Ok(());
         }
         (
-            Some(fixed.project.clone()),
+            Some(fixed.workspace_name.clone()),
             Some(fixed.container.clone()),
             SourceIdentityStatus::ListenerBoundSource,
-            false,
+            true,
         )
     } else {
-        let (project, container, status) = parse_source_from_connect_head(head_str);
-        let has_auth = connect_head_has_proxy_authorization(head_str);
-        (project, container, status, has_auth)
+        write_error_any(&mut stream, 407, "Proxy Authentication Required").await?;
+        return Ok(());
     };
-    let Some(_source_permit) =
-        state.try_acquire_source_connection(source_project.as_deref(), source_container.as_deref())
+    let Some(_source_permit) = state
+        .try_acquire_source_connection(source_workspace.as_deref(), source_container.as_deref())
     else {
         warn!(
             host = %host,
             port,
-            source_project = ?source_project,
+            source_workspace = ?source_workspace,
             source_container = ?source_container,
             source_status = source_status.as_str(),
             connect_has_proxy_authorization,
@@ -156,7 +154,7 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
         "connect-tcp"
     };
     let connect_activity = state.start_network_activity(
-        source_project.clone(),
+        source_workspace.clone(),
         source_container.clone(),
         "CONNECT",
         &host,
@@ -169,7 +167,7 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
     state.activity_line(&connect_activity.id, format!("target {host}:{port}"));
 
     let cfg = state.config.get();
-    let rules = match config::load_composed_rules_for_workspace(&cfg, source_project.as_deref()) {
+    let rules = match config::load_composed_rules_for_workspace(&cfg, source_workspace.as_deref()) {
         Ok(rules) => rules,
         Err(e) => {
             warn!("proxy rules load error: {e}");
@@ -216,7 +214,7 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
         &host,
         Some(port),
         "/",
-        source_project.clone(),
+        source_workspace.clone(),
         source_container.clone(),
         source_status.as_str(),
         connect_has_proxy_authorization,
@@ -231,7 +229,7 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
     info!(
         host = %host,
         port,
-        source_project = ?source_project,
+        source_workspace = ?source_workspace,
         source_container = ?source_container,
         source_status = source_status.as_str(),
         connect_has_proxy_authorization,

@@ -14,15 +14,15 @@ impl App {
         if idx >= self.pending_exec.len() {
             return;
         }
-        if remember {
+        let remembered = if remember {
             let item = &self.pending_exec[idx];
             let image = item.image.clone();
             let timeout_secs = item.timeout_secs;
             let argv = item.argv.clone();
-            let project = item.project.clone();
+            let workspace_name = item.workspace_name.clone();
             let rule_cwd = item.rule_cwd.clone();
-            if let Some(rules_path) = self.project_rules_path(&project) {
-                let cwd = self.portable_cwd(&rule_cwd, &project);
+            if let Some(rules_path) = self.workspace_rules_path(&workspace_name) {
+                let cwd = self.portable_cwd(&rule_cwd, &workspace_name);
                 match self.persist_exec_rule(
                     &rules_path,
                     &argv,
@@ -31,20 +31,38 @@ impl App {
                     &cwd,
                     NetworkPolicy::Auto,
                 ) {
-                    Ok(()) => self.push_log(
-                        format!(
-                            "saved hostdo allow rule in {}: {}",
-                            rules_path.display(),
-                            argv.join(" ")
-                        ),
-                        false,
-                    ),
-                    Err(e) => self.push_log(format!("failed to save hostdo rule: {e}"), true),
+                    Ok(()) => {
+                        self.push_log(
+                            format!(
+                                "saved hostdo allow rule in {}: {}",
+                                rules_path.display(),
+                                argv.join(" ")
+                            ),
+                            false,
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        self.push_log(format!("failed to save hostdo rule: {e}"), true);
+                        false
+                    }
                 }
+            } else {
+                self.push_log(
+                    format!(
+                        "failed to save hostdo rule: workspace {workspace_name:?} is no longer configured"
+                    ),
+                    true,
+                );
+                false
             }
-        }
+        } else {
+            false
+        };
         if let Some(tx) = self.pending_exec[idx].response_tx.take() {
-            let _ = tx.send(crate::server::ApprovalDecision::Approve { remember });
+            let _ = tx.send(crate::server::ApprovalDecision::Approve {
+                remember: remembered,
+            });
         }
         self.pending_exec.remove(idx);
     }
@@ -67,9 +85,9 @@ impl App {
         let image = item.image.clone();
         let timeout_secs = item.timeout_secs;
         let argv = item.argv.clone();
-        let project = item.project.clone();
+        let project = item.workspace_name.clone();
         let rule_cwd = item.rule_cwd.clone();
-        if let Some(rules_path) = self.project_rules_path(&project) {
+        if let Some(rules_path) = self.workspace_rules_path(&project) {
             let cwd = self.portable_cwd(&rule_cwd, &project);
             match self.persist_exec_rule(
                 &rules_path,
@@ -117,10 +135,10 @@ impl App {
         // workspace, otherwise we'd weaken whichever workspace the user happens
         // to be looking at. Per-request (one-shot) decisions are still safe
         // because they never touch on-disk rules.
-        let project_name = match self.unambiguous_pending_network_project(idx) {
+        let project_name = match self.unambiguous_pending_network_workspace(idx) {
             Some(name) => name,
             None => {
-                self.log_ambiguous_network_project_context(idx, "allow");
+                self.log_ambiguous_network_workspace_context(idx, "allow");
                 return;
             }
         };
@@ -132,10 +150,10 @@ impl App {
         if idx >= self.pending_net.len() {
             return;
         }
-        let project_name = match self.unambiguous_pending_network_project(idx) {
+        let project_name = match self.unambiguous_pending_network_workspace(idx) {
             Some(name) => name,
             None => {
-                self.log_ambiguous_network_project_context(idx, "deny");
+                self.log_ambiguous_network_workspace_context(idx, "deny");
                 return;
             }
         };
@@ -179,12 +197,12 @@ impl App {
     /// approve/deny paths, which write to disk and therefore must never fall
     /// back to whichever workspace the user happens to have selected in the
     /// sidebar (see CR7).
-    pub(crate) fn unambiguous_pending_network_project(&self, idx: usize) -> Option<String> {
+    pub(crate) fn unambiguous_pending_network_workspace(&self, idx: usize) -> Option<String> {
         let item = self.pending_net.get(idx)?;
-        if let Some(project) = item.source_project.clone() {
+        if let Some(project) = item.source_workspace.clone() {
             return Some(project);
         }
-        // No `source_project` attribution on the request. Accept the resolution
+        // No `source_workspace` attribution on the request. Accept the resolution
         // only if every running container that matches `source_container` maps
         // to the same workspace.
         let container_name = item.source_container.as_deref()?;
@@ -192,7 +210,7 @@ impl App {
             .sessions
             .iter()
             .filter(|s| !s.is_exited() && s.container_name == container_name)
-            .map(|s| s.project.clone())
+            .map(|s| s.workspace_name.clone())
             .collect::<Vec<_>>();
         workspaces.sort();
         workspaces.dedup();
@@ -203,33 +221,6 @@ impl App {
         }
     }
 
-    /// Resolve the source workspace for `pending_net[idx]`, allowing the
-    /// sidebar selection as a last-resort fallback. Safe for display-only uses;
-    /// **never** call this for persistence — use
-    /// `unambiguous_pending_network_project` instead (CR7).
-    #[allow(dead_code)]
-    pub(crate) fn resolve_pending_network_project(&self, idx: usize) -> Option<String> {
-        if let Some(unambiguous) = self.unambiguous_pending_network_project(idx) {
-            return Some(unambiguous);
-        }
-        let cfg = self.config.get();
-        self.selected_project_idx()
-            .and_then(|pi| cfg.workspaces.get(pi))
-            .map(|p| p.name.clone())
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn persist_network_rule(
-        &mut self,
-        host: &str,
-        policy: NetworkPolicy,
-        project_name: Option<&str>,
-    ) -> Result<Option<std::path::PathBuf>> {
-        let entry = format!("domain={host}");
-        self.persist_network_rule_entry(&entry, policy, project_name)
-    }
-
     pub(crate) fn persist_network_rule_entry(
         &mut self,
         entry: &str,
@@ -237,7 +228,7 @@ impl App {
         project_name: Option<&str>,
     ) -> Result<Option<std::path::PathBuf>> {
         let rules_path = match project_name {
-            Some(name) => match self.project_rules_path(name) {
+            Some(name) => match self.workspace_rules_path(name) {
                 Some(path) => path,
                 None => anyhow::bail!(
                     "cannot persist network rule: workspace '{}' not found",
@@ -358,7 +349,7 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn log_ambiguous_network_project_context(&mut self, idx: usize, action: &str) {
+    pub(crate) fn log_ambiguous_network_workspace_context(&mut self, idx: usize, action: &str) {
         if idx >= self.pending_net.len() {
             return;
         }
@@ -372,7 +363,6 @@ impl App {
         );
     }
 
-    #[allow(dead_code)]
     pub(crate) fn portable_cwd(&self, cwd: &Path, project_name: &str) -> String {
         let cfg = self.config.get();
         let project = cfg.workspaces.iter().find(|p| p.name == project_name);
@@ -396,7 +386,7 @@ impl App {
         }
     }
 
-    pub(crate) fn project_rules_path(&self, project_name: &str) -> Option<std::path::PathBuf> {
+    pub(crate) fn workspace_rules_path(&self, project_name: &str) -> Option<std::path::PathBuf> {
         let cfg = self.config.get();
         cfg.workspaces
             .iter()
@@ -433,21 +423,6 @@ pub(crate) fn send_pending_network_decision_owned(
 ) {
     let _ = item.response_tx.send(decision);
     for tx in item.merged_response_txs {
-        let _ = tx.send(decision);
-    }
-}
-
-/// Borrowing variant kept for call sites that still need `&mut` access to the
-/// item afterwards. Avoid in new code — prefer the owning form, which skips
-/// the dummy-channel allocation.
-#[allow(dead_code)]
-pub(crate) fn send_pending_network_decision(
-    item: &mut crate::proxy::PendingNetworkItem,
-    decision: NetworkDecision,
-) {
-    let tx = std::mem::replace(&mut item.response_tx, oneshot_dummy());
-    let _ = tx.send(decision);
-    for tx in item.merged_response_txs.drain(..) {
         let _ = tx.send(decision);
     }
 }

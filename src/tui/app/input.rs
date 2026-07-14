@@ -90,6 +90,15 @@ impl App {
             return;
         }
 
+        if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.terminal_fullscreen {
+                self.close_terminal_fullscreen();
+            } else if self.focus == Focus::Terminal && self.active_session.is_some() {
+                self.open_terminal_fullscreen();
+            }
+            return;
+        }
+
         if self.log_fullscreen {
             match key.code {
                 KeyCode::Char('o') | KeyCode::Esc | KeyCode::Char('q') => {
@@ -114,7 +123,7 @@ impl App {
             Focus::Settings => self.handle_settings_key(key),
             Focus::ContainerPicker => self.handle_picker_key(key),
             Focus::ImageBuild => self.handle_build_key(key),
-            Focus::NewWorkspace => self.handle_new_project_key(key),
+            Focus::NewWorkspace => self.handle_new_workspace_key(key),
         }
     }
 
@@ -138,7 +147,7 @@ impl App {
             }
             Focus::Settings => {
                 self.remove_workspace_confirm = None;
-                self.active_settings_project = None;
+                self.active_settings_workspace = None;
                 self.focus = Focus::Sidebar;
             }
             Focus::ContainerPicker => {
@@ -151,13 +160,13 @@ impl App {
                 } else {
                     self.build_finished = None;
                     self.build_container_idx = None;
-                    self.build_project_idx = None;
+                    self.build_workspace_idx = None;
                     self.build_session_group = None;
                     self.focus = Focus::Sidebar;
                 }
             }
             Focus::NewWorkspace => {
-                self.new_project = None;
+                self.new_workspace = None;
                 self.focus = Focus::Sidebar;
             }
         }
@@ -170,14 +179,12 @@ impl App {
         self.log_fullscreen = true;
     }
 
-    #[allow(dead_code)]
     pub(crate) fn open_terminal_fullscreen(&mut self) {
         self.log_fullscreen = false;
         self.terminal_fullscreen = true;
         self.last_terminal_esc = None;
     }
 
-    #[allow(dead_code)]
     pub(crate) fn close_terminal_fullscreen(&mut self) {
         self.terminal_fullscreen = false;
         self.last_terminal_esc = None;
@@ -285,7 +292,7 @@ impl App {
         match items.get(self.sidebar_idx).cloned() {
             Some(SidebarItem::NewSession) => self.open_picker(),
             Some(SidebarItem::Settings(pi)) => {
-                self.active_settings_project = Some(pi);
+                self.active_settings_workspace = Some(pi);
                 self.active_activity = None;
                 self.active_network_session = None;
                 self.settings_cursor = 0;
@@ -301,7 +308,7 @@ impl App {
                 self.active_activity = None;
                 self.active_network_session = None;
                 self.focus = Focus::ImageBuild;
-                self.active_settings_project = None;
+                self.active_settings_workspace = None;
             }
             Some(SidebarItem::Session(si)) => {
                 if let Some(session_idx) = self.first_terminal_for_session_group(si) {
@@ -315,7 +322,7 @@ impl App {
                     self.focus = Focus::Terminal;
                     self.active_activity = None;
                     self.active_network_session = None;
-                    self.active_settings_project = None;
+                    self.active_settings_workspace = None;
                 }
             }
             Some(SidebarItem::SessionTerminal(group_idx, session_pos)) => {
@@ -332,7 +339,7 @@ impl App {
                 self.focus = Focus::Terminal;
                 self.active_activity = None;
                 self.active_network_session = None;
-                self.active_settings_project = None;
+                self.active_settings_workspace = None;
             }
             Some(SidebarItem::NetworkGroup(si)) => {
                 self.active_session = Some(si);
@@ -341,7 +348,7 @@ impl App {
                 self.network_cursor = self.network_cursor_for_session(si);
                 self.active_network_session = Some(si);
                 self.focus = Focus::Network;
-                self.active_settings_project = None;
+                self.active_settings_workspace = None;
             }
             Some(SidebarItem::Activity(id)) => {
                 self.active_session = self.session_for_activity(&id);
@@ -351,9 +358,9 @@ impl App {
                 self.scroll_mode = false;
                 self.terminal_scroll = 0;
                 self.focus = Focus::Activity;
-                self.active_settings_project = None;
+                self.active_settings_workspace = None;
             }
-            Some(SidebarItem::NewWorkspace) => self.open_new_project(),
+            Some(SidebarItem::NewWorkspace) => self.open_new_workspace(),
             // Non-selectable; navigation never lands here.
             Some(SidebarItem::WorkspacesHeader) => {}
             None => {}
@@ -403,8 +410,8 @@ impl App {
 
     const NEW_PROJECT_ROW_COUNT: usize = 5;
 
-    pub(crate) fn open_new_project(&mut self) {
-        self.new_project = Some(NewWorkspaceState {
+    pub(crate) fn open_new_workspace(&mut self) {
+        self.new_workspace = Some(NewWorkspaceState {
             cursor: 0,
             name: String::new(),
             workspace_dir: String::new(),
@@ -415,12 +422,12 @@ impl App {
         self.active_session = None;
         self.active_activity = None;
         self.active_network_session = None;
-        self.active_settings_project = None;
+        self.active_settings_workspace = None;
         self.container_picker = None;
     }
 
-    pub(crate) fn handle_new_project_key(&mut self, key: KeyEvent) {
-        let Some(state) = self.new_project.as_mut() else {
+    pub(crate) fn handle_new_workspace_key(&mut self, key: KeyEvent) {
+        let Some(state) = self.new_workspace.as_mut() else {
             self.focus = Focus::Sidebar;
             return;
         };
@@ -429,13 +436,13 @@ impl App {
             && let KeyCode::Char(c) = key.code
             && !key.modifiers.contains(KeyModifiers::CONTROL)
         {
-            self.append_new_project_text(&c.to_string());
+            self.append_new_workspace_text(&c.to_string());
             return;
         }
 
         match key.code {
             KeyCode::Esc => {
-                self.new_project = None;
+                self.new_workspace = None;
                 self.focus = Focus::Sidebar;
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -465,9 +472,9 @@ impl App {
             },
             KeyCode::Enter => match state.cursor {
                 2 => state.project_type = state.project_type.next(),
-                3 => self.submit_new_project(),
+                3 => self.submit_new_workspace(),
                 4 => {
-                    self.new_project = None;
+                    self.new_workspace = None;
                     self.focus = Focus::Sidebar;
                 }
                 _ => {}
@@ -476,8 +483,8 @@ impl App {
         }
     }
 
-    pub(crate) fn append_new_project_text(&mut self, text: &str) {
-        let Some(state) = self.new_project.as_mut() else {
+    pub(crate) fn append_new_workspace_text(&mut self, text: &str) {
+        let Some(state) = self.new_workspace.as_mut() else {
             return;
         };
         let cleaned = text.replace(['\r', '\n'], "");
@@ -491,8 +498,8 @@ impl App {
         }
     }
 
-    pub(crate) fn submit_new_project(&mut self) {
-        let Some((name, workspace_raw, project_type)) = self.new_project.as_mut().map(|state| {
+    pub(crate) fn submit_new_workspace(&mut self) {
+        let Some((name, workspace_raw, project_type)) = self.new_workspace.as_mut().map(|state| {
             state.error = None;
             (
                 state.name.trim().to_string(),
@@ -504,11 +511,11 @@ impl App {
         };
 
         if name.is_empty() {
-            self.set_new_project_error("workspace name is required".to_string());
+            self.set_new_workspace_error("workspace name is required".to_string());
             return;
         }
         if workspace_raw.is_empty() {
-            self.set_new_project_error("workspace dir is required".to_string());
+            self.set_new_workspace_error("workspace dir is required".to_string());
             return;
         }
 
@@ -516,19 +523,19 @@ impl App {
         {
             Ok(p) => p,
             Err(e) => {
-                self.set_new_project_error(format!("workspace dir is invalid: {e}"));
+                self.set_new_workspace_error(format!("workspace dir is invalid: {e}"));
                 return;
             }
         };
         if !workspace_path.exists() {
-            self.set_new_project_error(format!(
+            self.set_new_workspace_error(format!(
                 "workspace dir does not exist: {}",
                 workspace_path.display()
             ));
             return;
         }
         if !workspace_path.is_dir() {
-            self.set_new_project_error(format!(
+            self.set_new_workspace_error(format!(
                 "workspace dir is not a directory: {}",
                 workspace_path.display()
             ));
@@ -537,7 +544,7 @@ impl App {
 
         let cfg = self.config.get();
         if cfg.workspaces.iter().any(|p| p.name == name) {
-            self.set_new_project_error(format!("workspace name already exists: '{name}'"));
+            self.set_new_workspace_error(format!("workspace name already exists: '{name}'"));
             return;
         }
         let sidebar_hotkey = crate::config::select_workspace_sidebar_hotkey(&cfg.workspaces, &name);
@@ -552,7 +559,7 @@ impl App {
                 false,
             ),
             Err(e) => {
-                self.set_new_project_error(format!("failed writing harness-rules.toml: {e}"));
+                self.set_new_workspace_error(format!("failed writing harness-rules.toml: {e}"));
                 return;
             }
         };
@@ -563,26 +570,26 @@ impl App {
             &workspace_path,
             sidebar_hotkey,
         ) {
-            self.set_new_project_error(format!("failed updating config: {e}"));
+            self.set_new_workspace_error(format!("failed updating config: {e}"));
             return;
         }
 
         let new_config = match crate::config::load(&self.loaded_config_path) {
             Ok(c) => c,
             Err(e) => {
-                self.set_new_project_error(format!("config reload failed: {e}"));
+                self.set_new_workspace_error(format!("config reload failed: {e}"));
                 return;
             }
         };
         let new_pi = new_config.workspaces.iter().position(|p| p.name == name);
         self.config.set(std::sync::Arc::new(new_config));
-        self.refresh_projects_cache();
+        self.refresh_workspaces_cache();
 
         let hotkey_note = sidebar_hotkey
             .map(|ch| format!(" with sidebar hotkey {}", ch.to_ascii_uppercase()))
             .unwrap_or_default();
         self.push_log(format!("added workspace '{name}'{hotkey_note}"), false);
-        self.new_project = None;
+        self.new_workspace = None;
         self.focus = Focus::Sidebar;
 
         if let Some(pi) = new_pi {
@@ -596,8 +603,8 @@ impl App {
         }
     }
 
-    pub(crate) fn set_new_project_error(&mut self, msg: String) {
-        if let Some(state) = self.new_project.as_mut() {
+    pub(crate) fn set_new_workspace_error(&mut self, msg: String) {
+        if let Some(state) = self.new_workspace.as_mut() {
             state.error = Some(msg);
         }
     }

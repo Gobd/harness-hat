@@ -136,7 +136,7 @@ pub(crate) fn render_session_detail(
 
     let docker_name = session.docker_name.clone();
     let container_id = session.container_id.clone();
-    let project = session.project.clone();
+    let project = session.workspace_name.clone();
     let container_name = session.container_name.clone();
     let mount_target = session.mount_target.clone();
     let shell_command = session.shell_in_hint();

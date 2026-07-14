@@ -1,7 +1,7 @@
 use super::*;
 
 impl App {
-    pub(crate) fn refresh_projects_cache(&mut self) {
+    pub(crate) fn refresh_workspaces_cache(&mut self) {
         let cfg = self.config.get();
         self.workspaces = cfg
             .workspaces
@@ -33,16 +33,16 @@ impl App {
         ]
     }
 
-    pub(crate) fn settings_action_rows(&self, project_idx: usize) -> Vec<SettingsActionRow> {
+    pub(crate) fn settings_action_rows(&self, workspace_idx: usize) -> Vec<SettingsActionRow> {
         let cfg = self.config.get();
-        if cfg.workspaces.get(project_idx).is_none() {
+        if cfg.workspaces.get(workspace_idx).is_none() {
             return Vec::new();
         }
         Self::settings_action_rows_for()
     }
 
     pub(crate) fn handle_settings_key(&mut self, key: KeyEvent) {
-        let Some(pi) = self.active_settings_project else {
+        let Some(pi) = self.active_settings_workspace else {
             self.focus = Focus::Sidebar;
             return;
         };
@@ -50,7 +50,7 @@ impl App {
         let actions_len = self.settings_action_rows(pi).len();
         if actions_len == 0 {
             self.focus = Focus::Sidebar;
-            self.active_settings_project = None;
+            self.active_settings_workspace = None;
             return;
         }
         if self.settings_cursor >= actions_len {
@@ -60,7 +60,7 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('h') => {
                 self.focus = Focus::Sidebar;
-                self.active_settings_project = None;
+                self.active_settings_workspace = None;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.settings_cursor > 0 {
@@ -96,7 +96,7 @@ impl App {
             return;
         };
         let proj = proj.clone();
-        self.log_project_rules_status(&proj);
+        self.log_workspace_rules_status(&proj);
     }
 
     pub(crate) fn prompt_remove_workspace(&mut self, pi: usize) {
@@ -122,7 +122,7 @@ impl App {
         }
 
         for idx in (0..self.sessions.len()).rev() {
-            if self.sessions[idx].project == state.workspace_name {
+            if self.sessions[idx].workspace_name == state.workspace_name {
                 self.close_session(idx);
             }
         }
@@ -155,12 +155,12 @@ impl App {
                     }
                 };
                 self.config.set(std::sync::Arc::new(new_config));
-                self.refresh_projects_cache();
+                self.refresh_workspaces_cache();
                 self.pending_stop
-                    .retain(|item| item.project != state.workspace_name);
+                    .retain(|item| item.workspace_name != state.workspace_name);
                 self.pending_net
-                    .retain(|item| item.source_project.as_deref() != Some(&state.workspace_name));
-                self.active_settings_project = None;
+                    .retain(|item| item.source_workspace.as_deref() != Some(&state.workspace_name));
+                self.active_settings_workspace = None;
                 self.focus = Focus::Sidebar;
                 self.settings_cursor = 0;
                 let items = self.sidebar_items();
@@ -301,7 +301,7 @@ impl App {
             return false;
         }
 
-        let templates = self.workspace_templates_for_project(workspace_idx);
+        let templates = self.workspace_templates_for_workspace(workspace_idx);
         if templates.is_empty() {
             self.push_log("no container templates available for this workspace", true);
             return false;
@@ -334,10 +334,8 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => {
                     crate::tui::move_wrapping_cursor(cursor, self.workspaces.len(), 1);
                 }
-                KeyCode::Enter | KeyCode::Char('l') => {
-                    if !self.workspaces.is_empty() {
-                        next_workspace_idx = Some((*cursor).min(self.workspaces.len() - 1));
-                    }
+                KeyCode::Enter | KeyCode::Char('l') if !self.workspaces.is_empty() => {
+                    next_workspace_idx = Some((*cursor).min(self.workspaces.len() - 1));
                 }
                 _ => {}
             },
@@ -376,7 +374,7 @@ impl App {
         if let (Some(workspace_idx), Some(ctr_idx)) = (launch_workspace_idx, launch_container_idx) {
             self.container_picker = None;
             self.focus = Focus::Sidebar;
-            self.do_launch_container_on_project_with_priority_and_env(
+            self.do_launch_container_on_workspace_with_priority_and_env(
                 workspace_idx,
                 ctr_idx,
                 crate::proxy::SourcePriority::Primary,
@@ -462,7 +460,7 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('h') => {
                 self.build_container_idx = None;
-                self.build_project_idx = None;
+                self.build_workspace_idx = None;
                 self.build_session_group = None;
                 self.focus = Focus::Sidebar;
             }
@@ -485,15 +483,15 @@ impl App {
         let Some(ctr_idx) = self.build_container_idx else {
             return;
         };
-        let launch_project_idx = self
-            .build_project_idx
-            .or_else(|| self.selected_project_idx());
-        let Some(launch_project_idx) = launch_project_idx else {
+        let launch_workspace_idx = self
+            .build_workspace_idx
+            .or_else(|| self.selected_workspace_idx());
+        let Some(launch_workspace_idx) = launch_workspace_idx else {
             self.push_log("cannot start build: no workspace selected", true);
             return;
         };
 
-        let templates = self.workspace_templates_for_project(launch_project_idx);
+        let templates = self.workspace_templates_for_workspace(launch_workspace_idx);
         let Some(ctr) = templates.get(ctr_idx) else {
             self.push_log("selected container template is no longer available", true);
             return;
@@ -528,7 +526,7 @@ impl App {
             0 => Some(("build + launch", build_cmd)),
             1 => {
                 self.build_container_idx = None;
-                self.build_project_idx = None;
+                self.build_workspace_idx = None;
                 self.focus = Focus::Sidebar;
                 return;
             }
@@ -598,7 +596,7 @@ impl App {
             label,
             docker_commands,
             command_display,
-            launch_project_idx,
+            launch_workspace_idx,
             ctr_idx,
         );
     }

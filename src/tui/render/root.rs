@@ -119,7 +119,7 @@ fn sidebar_build_image_for_workspace(
     build_container_idx: Option<usize>,
 ) -> String {
     let templates = if workspace_idx < cfg.workspaces.len() {
-        app.workspace_templates_for_project(workspace_idx)
+        app.workspace_templates_for_workspace(workspace_idx)
     } else {
         cfg.containers.clone()
     };
@@ -294,7 +294,7 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                     let (prefix, name_color) = if session.is_exited() {
                         (format!("{indent}✗"), Color::DarkGray)
                     } else if app.session_is_waiting(session_idx) {
-                        (format!("{indent}"), Color::Yellow)
+                        (indent.to_string(), Color::Yellow)
                     } else {
                         (format!("{indent}{}", loading_spinner_frame()), Color::Green)
                     };

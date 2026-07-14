@@ -135,7 +135,7 @@ pub struct NetworkRule {
 // ── ComposedRules ────────────────────────────────────────────────────────────
 
 /// Effective rule set for a given request context.
-/// Global rules and all project rules are unioned together.
+/// Global rules and all workspace-local rules are unioned together.
 #[derive(Debug, Clone, Default)]
 pub struct ComposedRules {
     pub hostdo: HostdoRules,
@@ -160,17 +160,10 @@ impl ComposedRules {
                     .iter()
                     .any(|c| c.argv == cmd.argv && c.image == cmd.image)
                 {
-                    // SECURITY: project (workspace) rule files live inside the
-                    // read-write workspace bind mount, so a process in the
-                    // container can edit them. They must never be able to grant
-                    // passwordless host execution. Downgrade any `auto` from a
-                    // workspace file to `prompt`; only the host-owned global
-                    // rules file may auto-approve. Tightening (`deny`) is kept.
-                    let mut cmd = cmd.clone();
-                    if cmd.approval_mode == NetworkPolicy::Auto {
-                        cmd.approval_mode = NetworkPolicy::Prompt;
-                    }
-                    hostdo.push(cmd);
+                    // Workspace-local hostdo rules are intentional executable
+                    // grants. The approval UI persists remembered decisions
+                    // here so they can be reviewed and shared with the repo.
+                    hostdo.push(cmd.clone());
                 }
             }
             network_allowlist.extend(proj.network.allowlist.clone());
@@ -705,7 +698,8 @@ pub fn write_rules_file(path: &Path, rules: &ProjectRules) -> Result<()> {
             .with_context(|| format!("creating directory for {}", path.display()))?;
     }
     let content = render_rules_file(rules)?;
-    std::fs::write(path, &content).with_context(|| format!("writing {}", path.display()))
+    crate::config::atomic_write_with_lock(path, content.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Render rules file contents exactly as `write_rules_file` would serialize it.

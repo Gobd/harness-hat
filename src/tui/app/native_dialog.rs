@@ -36,7 +36,7 @@ impl App {
     /// its matching pending item. Called once per event-loop tick.
     pub(crate) fn drain_native_dialog_results(&mut self) {
         for _ in 0..16 {
-            match self.native_dialog_rx.try_recv() {
+            match self.background_channels.native_dialog_rx.try_recv() {
                 Ok((target, outcome)) => self.apply_native_dialog_outcome(target, outcome),
                 Err(_) => break,
             }
@@ -55,12 +55,16 @@ impl App {
             let req = HostdoApprovalRequest {
                 command: item.argv.join(" "),
                 cwd: Some(item.cwd.display().to_string()),
-                workspace: Some(item.project.clone()),
+                workspace: Some(item.workspace_name.clone()),
                 image: item.image.clone(),
                 timeout_secs: Some(item.timeout_secs),
             };
             self.native_dialog_inflight = Some(target.clone());
-            spawn_native_hostdo_dialog(target, req, self.native_dialog_tx.clone());
+            spawn_native_hostdo_dialog(
+                target,
+                req,
+                self.background_channels.native_dialog_tx.clone(),
+            );
             return;
         }
         let Some(item) = self.pending_net.first() else {
@@ -68,9 +72,9 @@ impl App {
         };
         let target = NativeDialogTarget::Network(item.activity_id.clone());
         // Display-only attribution for the dialog body; persistence later uses
-        // `unambiguous_pending_network_project`, never this.
+        // `unambiguous_pending_network_workspace`, never this.
         let workspace = item
-            .source_project
+            .source_workspace
             .clone()
             .or_else(|| item.source_container.clone());
         let req = ApprovalRequest {
@@ -81,7 +85,11 @@ impl App {
             workspace,
         };
         self.native_dialog_inflight = Some(target.clone());
-        spawn_native_network_dialog(target, req, self.native_dialog_tx.clone());
+        spawn_native_network_dialog(
+            target,
+            req,
+            self.background_channels.native_dialog_tx.clone(),
+        );
     }
 
     /// Translate a native dialog `Outcome` into the existing approve/deny paths.
@@ -121,18 +129,18 @@ impl App {
                     Outcome::Deny { remember: false } => self.deny_net(idx),
                     Outcome::Cancelled => self.deny_net(idx),
                     Outcome::Allow { remember: true } => {
-                        if self.unambiguous_pending_network_project(idx).is_some() {
+                        if self.unambiguous_pending_network_workspace(idx).is_some() {
                             self.approve_net_forever(idx);
                         } else {
-                            self.log_ambiguous_network_project_context(idx, "allow");
+                            self.log_ambiguous_network_workspace_context(idx, "allow");
                             self.approve_net(idx);
                         }
                     }
                     Outcome::Deny { remember: true } => {
-                        if self.unambiguous_pending_network_project(idx).is_some() {
+                        if self.unambiguous_pending_network_workspace(idx).is_some() {
                             self.deny_net_forever(idx);
                         } else {
-                            self.log_ambiguous_network_project_context(idx, "deny");
+                            self.log_ambiguous_network_workspace_context(idx, "deny");
                             self.deny_net(idx);
                         }
                     }
@@ -145,22 +153,22 @@ impl App {
 fn spawn_native_network_dialog(
     target: NativeDialogTarget,
     req: ApprovalRequest,
-    result_tx: mpsc::UnboundedSender<NativeDialogResult>,
+    result_tx: mpsc::Sender<NativeDialogResult>,
 ) {
     tokio::spawn(async move {
         let outcome = run_native_dialog_subprocess(&req).await;
-        let _ = result_tx.send((target, outcome));
+        let _ = result_tx.send((target, outcome)).await;
     });
 }
 
 fn spawn_native_hostdo_dialog(
     target: NativeDialogTarget,
     req: HostdoApprovalRequest,
-    result_tx: mpsc::UnboundedSender<NativeDialogResult>,
+    result_tx: mpsc::Sender<NativeDialogResult>,
 ) {
     tokio::spawn(async move {
         let outcome = run_native_hostdo_dialog_subprocess(&req).await;
-        let _ = result_tx.send((target, outcome));
+        let _ = result_tx.send((target, outcome)).await;
     });
 }
 

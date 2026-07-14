@@ -35,7 +35,7 @@
 - Workspace `harness-rules.toml` hostdo entries now support exact `image` and `timeout_secs` fields in addition to `argv`, `cwd`, and `approval_mode`, so remembered allow/deny decisions can persist image-backed and custom-timeout hostdo requests exactly.
 - **Breaking:** example container profiles are reorganized from agent-centric names (`claude`, `codex`, `gemini`, `pi`) to language/size templates (`typescript`, `go`, `rust`, `php`, `base`, `large`).
 - **Breaking:** the example config now ships with `server_host = "127.0.0.1"` and `proxy_host = "127.0.0.1"`. The manager refuses non-loopback binds unless `allow_remote_control = true` is set explicitly.
-- **Breaking:** the base Docker image no longer installs Claude Code from npm. It now ships two coexisting builds: the GPG-verified apt `stable` build (`downloads.claude.ai`) exposed as `claude-stable`, and the `latest` native-installer build as the default `claude` (with `~/.local/bin` first on `PATH`), so a session runs the newest model by default but can fall back if a `latest` release regresses. Both are pinned at build time (`DISABLE_AUTOUPDATER=1`); image rebuilds are the only upgrade path.
+- **Breaking:** the base Docker image no longer installs Claude Code from npm or executes the mutable native `latest` installer. It uses Anthropic's signed stable apt repository, exposes the binary as both `claude` and `claude-stable`, and disables in-session auto-updates; image rebuilds are the only upgrade path.
 - The base image installs Antigravity CLI (`agy`) from the official GitHub release artifacts instead of installing Gemini CLI from npm, and includes an `agy-yolo` wrapper for `agy --dangerously-skip-permissions`.
 - Containers now run as user `coder` (uid 1000) across all templates.
 - Mount-seed detection consolidated onto `ContainerMount::is_seeded()`, shared by container launch and the TUI.
@@ -49,6 +49,8 @@
 - **Breaking:** the `agentctl` subagent spawn/control system (`agentctl spawn`/`status`/`tail`/`send`/`stop`) and its TUI integration (`docker/scripts/agentctl.py`, `src/agents.rs`, `src/tui/app/agents.rs`).
 - The legacy substring-based container-ID match in the stop endpoint.
 - Per-request `reqwest::Client` rebuild on the proxy hot path (now cached on `ProxyState`).
+- The unauthenticated legacy root proxy listener; only authenticated per-session proxy listeners are now bound.
+- The unused PWA scaffold, source-export helper, and tracked OS/Python generated artifacts.
 
 ### Security
 - Bearer-token and proxy-authorization comparisons now use constant-time equality.
@@ -58,14 +60,13 @@
 - Plain-HTTP `Host:` validation rejects duplicate and missing Host headers.
 - SNI host names that are non-ASCII or invalid UTF-8 are rejected instead of being lossily decoded into a bogus policy key.
 - Shared session-state mounts (`~/.claude`, `~/.codex`, …) are skipped when the host source does not exist instead of asking Docker to bind a missing path.
-- Workspace `harness-rules.toml` files can no longer grant host execution: any per-command `approval_mode = "auto"` coming from a workspace (container-writable) rules file is downgraded to `prompt` when rules compose; only the host-owned global rules file may auto-approve hostdo commands. (`default_policy` was already clamped the same way.)
 - An explicit network denylist match now wins over `allowed_hosts` on both proxy paths; previously `allowed_hosts` silently outranked the denylist.
-- The `/exec` endpoint is gated by a dedicated concurrency semaphore (cap 32, fast-fail 503), and the exec-job registry enforces an active-job ceiling (64) with eviction of finished jobs past a total cap (512), so a container cannot flood the host with concurrent commands or unbounded job state.
-- The sensitive-path refusal (`~/.ssh`, `~/.gnupg`, `/etc`, and now the Docker socket) applies to every configured `mount.host`, not just workspace paths; the plugin-path shim mount is always read-only regardless of the primary mount's mode.
+- The `/exec` endpoint is gated by a dedicated concurrency semaphore (cap 32, fast-fail 503); jobs are scoped to their originating session, stdin uses bounded backpressure, output uses fixed-size chunked capture, and finished jobs are constrained by count, byte budget, and TTL.
+- Sensitive-path refusal now unconditionally covers broad roots, system trees, Docker sockets, and common credential directories for both workspaces and configured mounts.
 - Container-supplied hostdo `--image` references are validated (non-empty, no leading `-`, Docker-reference charset) and a `--` separator precedes the image in the `docker run` argv, so crafted values can't be parsed as flags.
 - Hostdo children never inherit harness-hat's control-plane secrets: all `HARNESS_HAT_*` variables (bearer token, session token, scoped-proxy auth) are stripped from the child environment.
 - A container-supplied hostdo `timeout_secs` is now clamped to the matched rule's own timeout (the rule value is a ceiling, not just a fallback) and to an absolute 6-hour maximum.
-- Supply-chain hardening across the Docker images: the Composer installer is verified against its published sha384 signature before execution; the Claude Code `latest` installer is downloaded to a file before executing (no pipe-to-bash of a possibly-truncated script), with the GPG-verified apt build as the trusted fallback; Bun, rustup-init, and the Go toolchain are downloaded as pinned releases verified against their published sha256 checksums; and all `npm -g`, `go install`, `cargo install`, and `composer global` tools are pinned to exact versions.
+- Supply-chain hardening across the Docker images: the Composer installer is verified against its published sha384 signature; Claude Code comes only from its signed apt repository; Bun, rustup-init, and the Go toolchain are pinned and checksum-verified; and all `npm -g`, `go install`, `cargo install`, and `composer global` tools are pinned to exact versions.
 - Container capability lockdown: every launch sets `--security-opt no-new-privileges`; non-strict Linux launches run with `--cap-drop ALL`; strict-mode Linux launches now also run `--cap-drop ALL` and re-add only the verified minimal set (`NET_ADMIN` for iptables/tun setup, `SETUID`/`SETGID` for the init's downward `gosu` drop).
 - Fixed the IPv6 6to4 SSRF check, which previously matched all addresses due to a tautological predicate; all `2002::/16` (6to4) destinations are now correctly restricted.
 - IPv6 SSRF predicate extended to cover NAT64, 6to4, IPv4-translated, and discard-only prefixes.
@@ -81,6 +82,7 @@
 - The Claude Code OAuth refresh token is no longer injected into containers — neither as `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` nor inside the seeded `~/.claude.json`'s `claudeAiOauth` block. Containers can't write a refreshed token back to the host's macOS Keychain, so allowing in-container refresh would rotate (and invalidate) the host's refresh token while the new token died with the container, breaking auth on the next launch. Sessions in the container are now bounded by the access token lifetime; re-run Claude locally to refresh the Keychain.
 
 ### Fixed
+- Remembered hostdo approvals are again written to the originating workspace's `harness-rules.toml` and honored on subsequent exact command requests. The approval is only reported as remembered when that project-local write succeeds, and the duplicate server-side write path has been removed.
 - The TUI no longer hard-freezes when the terminal emulator stops draining output (e.g. stalled by Teams/Zoom screen sharing). Rendering now goes through a dedicated stdout writer thread that drops frames instead of blocking when the terminal stalls, then forces a full repaint on recovery; and the TUI runs on its own thread with a dedicated runtime, so the control server and network proxy keep serving containers even while the TUI is stalled or busy in a synchronous docker call.
 - Generated starter `harness-rules.toml` files once again document the hostdo rule model, including exact command examples and image-backed hostdo examples.
 - Build tasks can now be cancelled (cooperative flag + task abort) on TUI quit.

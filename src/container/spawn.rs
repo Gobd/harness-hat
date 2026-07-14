@@ -211,6 +211,8 @@ pub fn spawn(
 
     write_env_file_entry(&mut env_file, "HARNESS_HAT_TOKEN", token)?;
     write_env_file_entry(&mut env_file, "HARNESS_HAT_SESSION_TOKEN", session_token)?;
+    write_env_file_entry(&mut env_file, "HARNESS_HAT_WORKSPACE", project_name)?;
+    // Compatibility for older in-container integrations.
     write_env_file_entry(&mut env_file, "HARNESS_HAT_PROJECT", project_name)?;
     write_env_file_entry(&mut env_file, "HARNESS_HAT_MOUNT_TARGET", &mount_str)?;
     write_env_file_entry(&mut env_file, "HARNESS_HAT_URL", &container_control_url)?;
@@ -497,7 +499,7 @@ pub fn spawn(
             container_id,
             docker_name,
             alias,
-            project: project_name.to_owned(),
+            workspace_name: project_name.to_owned(),
             session_token: session_token.to_string(),
             mount_target: mount_str,
             launched_at: Instant::now(),

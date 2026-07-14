@@ -7,7 +7,7 @@ use crossterm::{
     cursor,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableMouseCapture, Event, EventStream,
-        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        KeyCode, KeyEvent, KeyModifiers, MouseEvent,
     },
     execute,
     style::ResetColor,
@@ -195,6 +195,18 @@ pub(crate) struct WorkspaceLaunchPending {
     pub(crate) template_idx: usize,
 }
 
+/// Bounded channels used by background workers that feed best-effort UI data.
+/// Keeping them together makes their ownership and backpressure policy explicit
+/// instead of spreading unrelated sender/receiver pairs across `App`.
+struct BackgroundUiChannels {
+    native_dialog_rx: mpsc::Receiver<app::native_dialog::NativeDialogResult>,
+    native_dialog_tx: mpsc::Sender<app::native_dialog::NativeDialogResult>,
+    container_usage_rx: mpsc::Receiver<ContainerUsageUpdate>,
+    container_usage_tx: mpsc::Sender<ContainerUsageUpdate>,
+    rules_scan_rx: mpsc::Receiver<Vec<(PathBuf, WatchedFileStamp)>>,
+    rules_scan_tx: mpsc::Sender<Vec<(PathBuf, WatchedFileStamp)>>,
+}
+
 /// Top-level TUI application state and event loop ownership.
 pub struct App {
     pub config: SharedConfig,
@@ -220,18 +232,18 @@ pub struct App {
     pub active_network_session: Option<usize>,
     pub network_cursor: usize,
     pub preview_session: Option<usize>,
-    pub active_settings_project: Option<usize>,
+    pub active_settings_workspace: Option<usize>,
     pub settings_cursor: usize,
 
     pub(crate) container_picker: Option<ContainerPickerState>,
     pub build_container_idx: Option<usize>,
-    pub build_project_idx: Option<usize>,
+    pub build_workspace_idx: Option<usize>,
     pub build_session_group: Option<usize>,
     pub build_cursor: usize,
     pub build_output: VecDeque<(String, bool)>,
     pub build_scroll: usize,
     pub sessions: Vec<ContainerSession>,
-    pub new_project: Option<NewWorkspaceState>,
+    pub new_workspace: Option<NewWorkspaceState>,
     pub remove_workspace_confirm: Option<RemoveWorkspaceConfirmState>,
     pub base_rules_changed: Option<BaseRulesChangedState>,
 
@@ -243,8 +255,7 @@ pub struct App {
     // Native OS approval dialog (macOS): results of finished `hh __dialog`
     // subprocesses come back here; `inflight` holds the activity id of the one
     // dialog currently on screen so we never pop two at once.
-    native_dialog_rx: mpsc::UnboundedReceiver<app::native_dialog::NativeDialogResult>,
-    native_dialog_tx: mpsc::UnboundedSender<app::native_dialog::NativeDialogResult>,
+    background_channels: BackgroundUiChannels,
     native_dialog_inflight: Option<app::native_dialog::NativeDialogTarget>,
     // Bounded (H12): a malicious in-container client streaming events at full
     // speed otherwise grows the backing Vec without limit. On full the
@@ -258,10 +269,6 @@ pub struct App {
     /// Result of the most recent build, retained so the output pane (and its
     /// pass/fail banner) stays visible after the build task itself has ended.
     pub(crate) build_finished: Option<BuildFinished>,
-    container_usage_rx: mpsc::UnboundedReceiver<ContainerUsageUpdate>,
-    container_usage_tx: mpsc::UnboundedSender<ContainerUsageUpdate>,
-    rules_scan_rx: mpsc::UnboundedReceiver<Vec<(PathBuf, WatchedFileStamp)>>,
-    rules_scan_tx: mpsc::UnboundedSender<Vec<(PathBuf, WatchedFileStamp)>>,
     rules_scan_in_flight: bool,
 
     pub should_quit: bool,
@@ -292,7 +299,7 @@ enum BuildEvent {
     },
     Finished {
         label: String,
-        launch_project_idx: usize,
+        launch_workspace_idx: usize,
         launch_container_idx: usize,
         launch_session_group: Option<usize>,
         success: bool,
@@ -563,7 +570,7 @@ async fn event_loop(
             if let Some(item) = app.pending_net.first() {
                 crate::notifications::notify_pending_network_approval(
                     &item.host,
-                    item.source_project.as_deref(),
+                    item.source_workspace.as_deref(),
                     app.pending_net.len(),
                 );
             }
@@ -597,7 +604,7 @@ async fn event_loop(
                     Some(Ok(Event::Mouse(mouse))) => app.handle_mouse(mouse),
                     Some(Ok(Event::Paste(text))) => {
                         if app.focus == Focus::NewWorkspace {
-                            app.append_new_project_text(&text);
+                            app.append_new_workspace_text(&text);
                         } else if let Some(si) = app.active_session
                             && let Some(session) = app.sessions.get(si)
                         {

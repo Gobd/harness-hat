@@ -10,7 +10,8 @@ use crate::fs_util::{set_private_file_permissions, write_private_file};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
-    pub project: String,
+    #[serde(rename = "project")]
+    pub workspace_name: String,
     pub argv: Vec<String>,
     pub cwd: String,
     pub decision: DecisionKind,
@@ -190,7 +191,7 @@ fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
                 let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
             }
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(unix))]
     {
@@ -275,7 +276,7 @@ mod tests {
 
         let now = Utc::now();
         let entry1 = AuditEntry {
-            project: "p1".to_string(),
+            workspace_name: "p1".to_string(),
             argv: vec!["ls".into()],
             cwd: "/".into(),
             decision: DecisionKind::Auto,
@@ -284,7 +285,7 @@ mod tests {
             timestamp: now - chrono::Duration::seconds(10),
         };
         let entry2 = AuditEntry {
-            project: "p1".to_string(),
+            workspace_name: "p1".to_string(),
             argv: vec!["pwd".into()],
             cwd: "/".into(),
             decision: DecisionKind::Approved,
@@ -315,7 +316,7 @@ mod tests {
         // AuditEntry requires more fields, so it might skip both if not valid).
         // Let's write one valid entry and one invalid.
         let entry = AuditEntry {
-            project: "valid".to_string(),
+            workspace_name: "valid".to_string(),
             argv: vec![],
             cwd: "".into(),
             decision: DecisionKind::Auto,
@@ -327,7 +328,7 @@ mod tests {
 
         let recent = state.recent_audit(10).expect("recent");
         assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].project, "valid");
+        assert_eq!(recent[0].workspace_name, "valid");
     }
 
     #[test]
@@ -339,7 +340,7 @@ mod tests {
         let day2 = Utc::now();
 
         let entry1 = AuditEntry {
-            project: "p1".to_string(),
+            workspace_name: "p1".to_string(),
             argv: vec!["day1".into()],
             cwd: "".into(),
             decision: DecisionKind::Auto,
@@ -348,7 +349,7 @@ mod tests {
             timestamp: day1,
         };
         let entry2 = AuditEntry {
-            project: "p1".to_string(),
+            workspace_name: "p1".to_string(),
             argv: vec!["day2".into()],
             cwd: "".into(),
             decision: DecisionKind::Auto,

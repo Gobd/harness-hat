@@ -48,12 +48,12 @@ pub(crate) fn render_exec_approval_overlay(
     let queue_total = app
         .pending_exec
         .iter()
-        .filter(|pending| pending.project == item.project)
+        .filter(|pending| pending.workspace_name == item.workspace_name)
         .count();
     let queue_pos = app
         .pending_exec
         .iter()
-        .filter(|pending| pending.project == item.project)
+        .filter(|pending| pending.workspace_name == item.workspace_name)
         .position(|pending| pending.id == item.id)
         .map(|idx| idx + 1)
         .unwrap_or(1);
@@ -89,12 +89,18 @@ pub(crate) fn render_exec_approval_overlay(
         ]),
         Line::from(vec![
             Span::styled("  Workspace: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(item.project.clone(), Style::default().fg(Color::White)),
+            Span::styled(
+                item.workspace_name.clone(),
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  Source  : ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("workspace={}  container={}", item.project, source_container),
+                format!(
+                    "workspace={}  container={}",
+                    item.workspace_name, source_container
+                ),
                 Style::default().fg(Color::White),
             ),
         ]),
@@ -105,7 +111,7 @@ pub(crate) fn render_exec_approval_overlay(
                     "{}/{} for workspace '{}' (exec total: {}, net total: {})",
                     queue_pos,
                     queue_total.max(1),
-                    item.project,
+                    item.workspace_name,
                     app.pending_exec.len(),
                     app.pending_net.len()
                 ),
@@ -185,7 +191,7 @@ pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Re
     let queue_total = app.pending_net.len();
     let merged_total = crate::tui::app::approvals::pending_network_request_count(item);
     let source_workspace = item
-        .source_project
+        .source_workspace
         .clone()
         .unwrap_or_else(|| "unknown-workspace".to_string());
     let source_container = item
@@ -294,8 +300,8 @@ fn pending_network_source_header(app: &App, item: &crate::proxy::PendingNetworkI
         .or_else(|| item.source_container.clone())
         .unwrap_or_else(|| "unknown-container".to_string());
     let workspace = session
-        .map(|session| session.project.clone())
-        .or_else(|| item.source_project.clone())
+        .map(|session| session.workspace_name.clone())
+        .or_else(|| item.source_workspace.clone())
         .unwrap_or_else(|| "unknown-workspace".to_string());
     let docker_container = session
         .map(|session| short_container_id(&session.container_id))
@@ -317,12 +323,12 @@ fn pending_network_source_session<'a>(
     app: &'a App,
     item: &crate::proxy::PendingNetworkItem,
 ) -> Option<&'a crate::container::ContainerSession> {
-    let source_project = item.source_project.as_deref();
+    let source_workspace = item.source_workspace.as_deref();
     let source_container = item.source_container.as_deref();
 
     if let Some(source_container) = source_container {
         if let Some(session) = app.sessions.iter().find(|session| {
-            source_project.is_none_or(|project| session.project == project)
+            source_workspace.is_none_or(|project| session.workspace_name == project)
                 && App::container_identity_matches(
                     source_container,
                     &session.container_id,
@@ -334,11 +340,11 @@ fn pending_network_source_session<'a>(
         }
     }
 
-    let source_project = source_project?;
+    let source_workspace = source_workspace?;
     let mut matching_sessions = app
         .sessions
         .iter()
-        .filter(|session| session.project == source_project);
+        .filter(|session| session.workspace_name == source_workspace);
     let only = matching_sessions.next()?;
     matching_sessions.next().is_none().then_some(only)
 }
@@ -504,7 +510,7 @@ pub(crate) fn render_log_fullscreen(frame: &mut Frame, app: &mut App, area: Rect
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        format!("{:<16} ", e.project),
+                        format!("{:<16} ", e.workspace_name),
                         Style::default().fg(Color::White),
                     ),
                     Span::raw(e.argv.join(" ")),

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tracing::{instrument, warn};
@@ -65,7 +65,7 @@ pub struct PendingItem {
     pub id: String,
     pub activity_id: String,
     pub cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pub project: String,
+    pub workspace_name: String,
     pub container_id: Option<String>,
     pub argv: Vec<String>,
     pub image: Option<String>,
@@ -114,7 +114,9 @@ pub struct ExecJobStatus {
     pub state: ExecJobState,
     pub job_id: String,
     #[serde(skip_serializing)]
-    pub project: String,
+    pub workspace_name: String,
+    #[serde(skip_serializing)]
+    pub session_token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
     pub timeout_secs: u64,
@@ -141,7 +143,9 @@ pub struct ExecJobStatus {
     #[serde(skip_serializing)]
     pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     #[serde(skip_serializing)]
-    pub stdin_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    pub stdin_tx: Option<mpsc::Sender<Vec<u8>>>,
+    #[serde(skip_serializing)]
+    pub created_at: Instant,
 }
 
 #[derive(Clone, Default)]
@@ -156,6 +160,8 @@ const MAX_ACTIVE_EXEC_JOBS: usize = 64;
 /// Ceiling on total tracked jobs (running + finished). When exceeded, finished
 /// jobs are evicted to bound the registry's memory footprint (H3).
 const MAX_TOTAL_EXEC_JOBS: usize = 512;
+const MAX_TOTAL_EXEC_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+const FINISHED_EXEC_JOB_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 impl ExecJobRegistry {
     /// Insert a new job, enforcing the active-job ceiling and pruning finished
@@ -166,6 +172,7 @@ impl ExecJobRegistry {
             status.job_id = uuid::Uuid::new_v4().to_string();
         }
         let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        prune_expired_finished_jobs(&mut map);
 
         let active = map
             .values()
@@ -179,12 +186,13 @@ impl ExecJobRegistry {
         // are dropped, so a running job is never lost; the worst case is that a
         // client can no longer fetch the output of an old, completed job.
         if map.len() >= MAX_TOTAL_EXEC_JOBS {
-            let finished: Vec<String> = map
+            let mut finished = map
                 .iter()
                 .filter(|(_, job)| job.state != ExecJobState::Running)
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in finished
+                .map(|(id, job)| (job.created_at, id.clone()))
+                .collect::<Vec<_>>();
+            finished.sort_by_key(|(created_at, _)| *created_at);
+            for (_, id) in finished
                 .into_iter()
                 .take(map.len().saturating_sub(MAX_TOTAL_EXEC_JOBS) + 1)
             {
@@ -201,24 +209,76 @@ impl ExecJobRegistry {
         if let Some(status) = map.get_mut(job_id) {
             f(status);
         }
+        prune_expired_finished_jobs(&mut map);
+        prune_finished_output_to_budget(&mut map);
     }
 
-    pub fn get_for_project(&self, job_id: &str, project: &str) -> Option<ExecJobStatus> {
-        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+    pub fn has_active_capacity(&self) -> bool {
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        prune_expired_finished_jobs(&mut map);
+        map.values()
+            .filter(|job| job.state == ExecJobState::Running)
+            .count()
+            < MAX_ACTIVE_EXEC_JOBS
+    }
+
+    pub fn get_for_session(&self, job_id: &str, session_token: &str) -> Option<ExecJobStatus> {
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        prune_expired_finished_jobs(&mut map);
         map.get(job_id)
-            .filter(|job| job.project == project)
+            .filter(|job| job.session_token == session_token)
             .cloned()
     }
 
-    pub fn list_for_project(&self, project: &str) -> Vec<ExecJobStatus> {
-        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+    pub fn list_for_session(&self, session_token: &str) -> Vec<ExecJobStatus> {
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        prune_expired_finished_jobs(&mut map);
         let mut jobs = map
             .values()
-            .filter(|job| job.project == project)
+            .filter(|job| job.session_token == session_token)
             .cloned()
             .collect::<Vec<_>>();
-        jobs.sort_by(|a, b| a.job_id.cmp(&b.job_id));
+        jobs.sort_by_key(|job| job.created_at);
         jobs
+    }
+}
+
+fn prune_finished_output_to_budget(map: &mut HashMap<String, ExecJobStatus>) {
+    let output_bytes = |job: &ExecJobStatus| {
+        job.stdout.as_ref().map_or(0, String::len) + job.stderr.as_ref().map_or(0, String::len)
+    };
+    let mut total = map.values().map(output_bytes).sum::<usize>();
+    if total <= MAX_TOTAL_EXEC_OUTPUT_BYTES {
+        return;
+    }
+    let mut finished = map
+        .values()
+        .filter(|job| job.state != ExecJobState::Running)
+        .map(|job| (job.created_at, job.job_id.clone(), output_bytes(job)))
+        .collect::<Vec<_>>();
+    finished.sort_by_key(|(created_at, _, _)| *created_at);
+    for (_, job_id, bytes) in finished {
+        map.remove(&job_id);
+        total = total.saturating_sub(bytes);
+        if total <= MAX_TOTAL_EXEC_OUTPUT_BYTES {
+            break;
+        }
+    }
+}
+
+fn prune_expired_finished_jobs(map: &mut HashMap<String, ExecJobStatus>) {
+    let now = Instant::now();
+    map.retain(|_, job| {
+        job.state == ExecJobState::Running
+            || now.saturating_duration_since(job.created_at) <= FINISHED_EXEC_JOB_TTL
+    });
+}
+
+impl ExecJobStatus {
+    pub fn without_output(mut self) -> Self {
+        self.stdout = None;
+        self.stderr = None;
+        self
     }
 }
 
@@ -281,7 +341,7 @@ pub struct StopResponse {
 /// Represents the identity of a running container session.
 #[derive(Debug, Clone)]
 pub struct SessionIdentity {
-    pub project: String,
+    pub workspace_name: String,
     pub container_id: String,
     pub mount_target: String,
 }
@@ -330,7 +390,7 @@ pub struct ServerState {
 
 /// A container stop request waiting to be handled by the TUI.
 pub struct ContainerStopItem {
-    pub project: String,
+    pub workspace_name: String,
     pub container_id: String,
     pub response_tx: Option<oneshot::Sender<ContainerStopDecision>>,
 }
@@ -496,7 +556,7 @@ pub(super) async fn stop_handler(
 
     let (response_tx, response_rx) = oneshot::channel::<ContainerStopDecision>();
     let item = ContainerStopItem {
-        project: identity.project.clone(),
+        workspace_name: identity.workspace_name.clone(),
         container_id: identity.container_id.clone(),
         response_tx: Some(response_tx),
     };
@@ -515,7 +575,7 @@ pub(super) async fn stop_handler(
         Ok(Ok(ContainerStopDecision::Stopped)) => {
             record_audit(
                 &state,
-                stop_audit_entry(&identity.project, DecisionKind::Approved, "stopped"),
+                stop_audit_entry(&identity.workspace_name, DecisionKind::Approved, "stopped"),
             )
             .await;
             Json(StopResponse { ok: true }).into_response()
@@ -523,7 +583,7 @@ pub(super) async fn stop_handler(
         Ok(Ok(ContainerStopDecision::NotFound)) => {
             record_audit(
                 &state,
-                stop_audit_entry(&identity.project, DecisionKind::Denied, "not_found"),
+                stop_audit_entry(&identity.workspace_name, DecisionKind::Denied, "not_found"),
             )
             .await;
             (
@@ -538,7 +598,7 @@ pub(super) async fn stop_handler(
         Ok(Err(_)) | Err(_) => {
             record_audit(
                 &state,
-                stop_audit_entry(&identity.project, DecisionKind::TimedOut, "timeout"),
+                stop_audit_entry(&identity.workspace_name, DecisionKind::TimedOut, "timeout"),
             )
             .await;
             (
@@ -650,7 +710,7 @@ pub(super) async fn workspace_launch_handler(
 /// here so each match arm above stays a one-liner.
 fn stop_audit_entry(project: &str, decision: DecisionKind, reason: &str) -> AuditEntry {
     AuditEntry {
-        project: project.to_string(),
+        workspace_name: project.to_string(),
         argv: vec!["container/stop".to_string(), reason.to_string()],
         cwd: String::new(),
         decision,
@@ -754,10 +814,14 @@ pub(super) fn require_session_context(
 }
 
 pub(super) async fn record_audit(state: &ServerState, entry: AuditEntry) {
-    let _ = state.audit_tx.send(entry.clone()).await;
+    if state.audit_tx.send(entry.clone()).await.is_err() {
+        warn!("audit event channel is closed; continuing with durable log write");
+    }
     let state_clone = state.state.clone();
     tokio::task::spawn_blocking(move || {
-        let _ = state_clone.log_audit(&entry);
+        if let Err(error) = state_clone.log_audit(&entry) {
+            warn!(error = %error, "failed to write audit event to disk");
+        }
     });
 }
 
@@ -795,14 +859,22 @@ mod tests {
         registry.insert(
             "session".to_string(),
             SessionIdentity {
-                project: "workspace".to_string(),
+                workspace_name: "workspace".to_string(),
                 container_id: "container".to_string(),
+                mount_target: "/workspace".to_string(),
+            },
+        );
+        registry.insert(
+            "other-session".to_string(),
+            SessionIdentity {
+                workspace_name: "workspace".to_string(),
+                container_id: "other-container".to_string(),
                 mount_target: "/workspace".to_string(),
             },
         );
 
         let identity = registry.get("session").expect("session identity");
-        assert_eq!(identity.project, "workspace");
+        assert_eq!(identity.workspace_name, "workspace");
         assert_eq!(identity.container_id, "container");
 
         registry.remove("session");
@@ -815,7 +887,7 @@ mod tests {
         registry.insert(
             "session".to_string(),
             SessionIdentity {
-                project: "workspace".to_string(),
+                workspace_name: "workspace".to_string(),
                 container_id: "container".to_string(),
                 mount_target: "/workspace".to_string(),
             },
@@ -831,7 +903,7 @@ mod tests {
         let (session_token, identity) =
             require_session_context(&state, &headers).expect("session context");
         assert_eq!(session_token, "session");
-        assert_eq!(identity.project, "workspace");
+        assert_eq!(identity.workspace_name, "workspace");
     }
 
     #[tokio::test]
@@ -840,8 +912,16 @@ mod tests {
         registry.insert(
             "session".to_string(),
             SessionIdentity {
-                project: "workspace".to_string(),
+                workspace_name: "workspace".to_string(),
                 container_id: "container".to_string(),
+                mount_target: "/workspace".to_string(),
+            },
+        );
+        registry.insert(
+            "other-session".to_string(),
+            SessionIdentity {
+                workspace_name: "workspace".to_string(),
+                container_id: "other-container".to_string(),
                 mount_target: "/workspace".to_string(),
             },
         );
@@ -850,7 +930,8 @@ mod tests {
         exec_jobs.insert(ExecJobStatus {
             state: ExecJobState::Complete,
             job_id: job_id.to_string(),
-            project: "workspace".to_string(),
+            workspace_name: "workspace".to_string(),
+            session_token: "session".to_string(),
             container: Some("container".to_string()),
             timeout_secs: 60,
             argv: vec!["curl".to_string(), "example.com".to_string()],
@@ -866,6 +947,7 @@ mod tests {
             reason: None,
             cancel_flag: None,
             stdin_tx: None,
+            created_at: Instant::now(),
         });
         let state = test_server_state(registry, exec_jobs);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -889,6 +971,16 @@ mod tests {
         assert_eq!(status_response.status(), StatusCode::OK);
         let status_body: serde_json::Value = status_response.json().await.expect("job status json");
         assert_eq!(status_body["job_id"], job_id);
+        assert!(status_body.get("stdout").is_none());
+
+        let cross_session_response = client
+            .get(format!("http://{addr}/exec/jobs/{job_id}"))
+            .bearer_auth("token")
+            .header("x-harness-hat-session-token", "other-session")
+            .send()
+            .await
+            .expect("cross-session job request");
+        assert_eq!(cross_session_response.status(), StatusCode::NOT_FOUND);
 
         let output_response = client
             .get(format!("http://{addr}/exec/jobs/{job_id}/output"))

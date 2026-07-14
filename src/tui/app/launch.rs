@@ -7,7 +7,7 @@ impl App {
         ctr.command.clone()
     }
 
-    pub(crate) fn workspace_templates_for_project(
+    pub(crate) fn workspace_templates_for_workspace(
         &mut self,
         workspace_idx: usize,
     ) -> Vec<crate::config::ContainerDef> {
@@ -33,12 +33,12 @@ impl App {
         })
     }
 
-    pub(crate) fn workspace_template_for_project(
+    pub(crate) fn workspace_template_for_workspace(
         &mut self,
         workspace_idx: usize,
         template_idx: usize,
     ) -> Option<crate::config::ContainerDef> {
-        let templates = self.workspace_templates_for_project(workspace_idx);
+        let templates = self.workspace_templates_for_workspace(workspace_idx);
         templates.get(template_idx).cloned()
     }
 
@@ -140,7 +140,7 @@ impl App {
                 )),
             );
         };
-        let templates = self.workspace_templates_for_project(workspace_idx);
+        let templates = self.workspace_templates_for_workspace(workspace_idx);
         let Some(template_idx) = templates.iter().position(|c| c.name == template) else {
             return finish_launch_stream(
                 &event_tx,
@@ -177,7 +177,7 @@ impl App {
                 let _ = event_tx.try_send(LaunchEvent::Status {
                     message: format!("image {image} not found locally — building"),
                 });
-                self.build_project_idx = Some(workspace_idx);
+                self.build_workspace_idx = Some(workspace_idx);
                 self.build_container_idx = Some(template_idx);
                 self.build_session_group = None;
                 self.build_cursor = 0; // "build + launch" branch
@@ -203,7 +203,7 @@ impl App {
                 // Image present (or check failed — fall through and let docker
                 // surface the real error, matching `preflight_image_or_prompt_build`'s
                 // legacy behavior). Launch synchronously, finish the stream.
-                if matches!(other, Err(_)) {
+                if other.is_err() {
                     let _ = event_tx.try_send(LaunchEvent::Status {
                         message: format!(
                             "could not inspect image {image}; attempting launch anyway"
@@ -224,7 +224,7 @@ impl App {
         }
     }
 
-    /// Run `do_launch_container_on_project_with_priority_and_env` and convert
+    /// Run `do_launch_container_on_workspace_with_priority_and_env` and convert
     /// the "did sessions grow?" indirection into a `Result` carrying the new
     /// session's identifiers. Shared by the immediate-launch and post-build
     /// launch paths.
@@ -236,7 +236,7 @@ impl App {
         template: &str,
     ) -> Result<WorkspaceLaunchResponse, String> {
         let before_len = self.sessions.len();
-        self.do_launch_container_on_project_with_priority_and_env(
+        self.do_launch_container_on_workspace_with_priority_and_env(
             workspace_idx,
             template_idx,
             crate::proxy::SourcePriority::Primary,
@@ -262,14 +262,14 @@ impl App {
         })
     }
 
-    pub(crate) fn do_launch_container_on_project_with_priority(
+    pub(crate) fn do_launch_container_on_workspace_with_priority(
         &mut self,
         pi: usize,
         ctr_idx: usize,
         proxy_priority: crate::proxy::SourcePriority,
         session_group: Option<usize>,
     ) {
-        self.do_launch_container_on_project_with_priority_and_env(
+        self.do_launch_container_on_workspace_with_priority_and_env(
             pi,
             ctr_idx,
             proxy_priority,
@@ -278,7 +278,7 @@ impl App {
         );
     }
 
-    pub(crate) fn do_launch_container_on_project_with_priority_and_env(
+    pub(crate) fn do_launch_container_on_workspace_with_priority_and_env(
         &mut self,
         pi: usize,
         ctr_idx: usize,
@@ -286,7 +286,7 @@ impl App {
         extra_env: &[(String, String)],
         session_group: Option<usize>,
     ) {
-        let Some(ctr) = self.workspace_template_for_project(pi, ctr_idx) else {
+        let Some(ctr) = self.workspace_template_for_workspace(pi, ctr_idx) else {
             return;
         };
 
@@ -308,7 +308,7 @@ impl App {
         }
 
         let mount_source_path = proj.canonical_path.clone();
-        self.log_project_rules_status(&proj);
+        self.log_workspace_rules_status(&proj);
 
         let control_port = cfg.defaults.control.server_port;
         let control_host = &cfg.defaults.control.server_host;
@@ -361,7 +361,7 @@ impl App {
         self.session_registry.insert(
             session_token.clone(),
             crate::server::SessionIdentity {
-                project: proj.name.clone(),
+                workspace_name: proj.name.clone(),
                 container_id: String::new(),
                 mount_target: crate::config::container_path_string(&ctr.mount_target),
             },
@@ -392,7 +392,7 @@ impl App {
                     self.session_registry.insert(
                         s.session_token.clone(),
                         crate::server::SessionIdentity {
-                            project: s.project.clone(),
+                            workspace_name: s.workspace_name.clone(),
                             container_id: s.container_id.clone(),
                             mount_target: s.mount_target.clone(),
                         },
@@ -424,6 +424,22 @@ impl App {
             }
         }
     }
+}
+
+/// Emit a terminal `Launched` or `Error` event on `event_tx`. The caller's
+/// owned `event_tx` clone (or a reference, since `Sender` is `Clone`) is then
+/// dropped, which closes the streaming HTTP response body on the CLI side.
+/// `try_send` is best-effort: if the CLI hung up partway, the manager
+/// shouldn't block its event loop on a now-dead pipe.
+pub(crate) fn finish_launch_stream(
+    event_tx: &tokio_mpsc::Sender<LaunchEvent>,
+    outcome: Result<WorkspaceLaunchResponse, String>,
+) {
+    let event = match outcome {
+        Ok(resp) => LaunchEvent::Launched(resp),
+        Err(reason) => LaunchEvent::Error { reason },
+    };
+    let _ = event_tx.try_send(event);
 }
 
 #[cfg(test)]
@@ -494,20 +510,4 @@ mod tests {
         };
         assert_eq!(App::container_command_for_profile(&profile), None);
     }
-}
-
-/// Emit a terminal `Launched` or `Error` event on `event_tx`. The caller's
-/// owned `event_tx` clone (or a reference, since `Sender` is `Clone`) is then
-/// dropped, which closes the streaming HTTP response body on the CLI side.
-/// `try_send` is best-effort: if the CLI hung up partway, the manager
-/// shouldn't block its event loop on a now-dead pipe.
-pub(crate) fn finish_launch_stream(
-    event_tx: &tokio_mpsc::Sender<LaunchEvent>,
-    outcome: Result<WorkspaceLaunchResponse, String>,
-) {
-    let event = match outcome {
-        Ok(resp) => LaunchEvent::Launched(resp),
-        Err(reason) => LaunchEvent::Error { reason },
-    };
-    let _ = event_tx.try_send(event);
 }

@@ -1,9 +1,8 @@
 //! Non-macOS placeholder for the native approval dialog.
 //!
-//! Windows will get a `TaskDialogIndirect`-backed implementation. Linux
-//! support is best-effort and may stay as the TUI modal indefinitely. Until
-//! then we deliberately return `Cancelled` so the parent blocks the request
-//! without persisting a rule.
+//! Windows and Linux currently use the in-TUI approval flow. If this fallback
+//! subprocess is invoked directly, it returns `Cancelled` so the request is
+//! blocked without persisting a rule.
 
 use tracing::debug;
 

@@ -58,7 +58,7 @@ Options:
       when needed, then prints the job id once the command starts.
 
   list
-      List tracked hostdo jobs visible to this workspace.
+      List tracked hostdo jobs owned by this session.
       Add --running to show only running jobs.
       Add --json to print structured output.
 
@@ -113,7 +113,7 @@ Host-side commands:
   - Use `hostdo tail <job-id> --all` to read full captured output.
   - Use `hostdo send <job-id> "text"` to send one input line, or pipe data into
     `hostdo send <job-id>` to forward stdin as-is.
-  - Use `hostdo list` to see tracked jobs for this workspace.
+  - Use `hostdo list` to see tracked jobs for this session.
   - Use `hostdo list --running` to show only currently running jobs.
   - `hostdo` requests are policy checked against the `[hostdo]` rules below
     and may prompt the developer.
@@ -246,7 +246,7 @@ def _no_proxy_opener() -> urllib.request.OpenerDirector:
     """
     Return a URL opener that bypasses HTTP_PROXY / HTTPS_PROXY env vars.
 
-    The harness-hat control channel must never be routed through the MITM proxy
+    The harness-hat control channel must never be routed through the policy proxy
     that harness-hat itself is managing — doing so would create a dependency loop
     and cause the approval request to be intercepted before it reaches the
     manager.

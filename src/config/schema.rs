@@ -190,9 +190,7 @@ pub(crate) fn join_container_path(base: &str, rel: &Path) -> String {
         return base;
     }
 
-    if base.is_empty() {
-        format!("/{rel}")
-    } else if base == "/" {
+    if base.is_empty() || base == "/" {
         format!("/{rel}")
     } else {
         format!("{base}/{rel}")

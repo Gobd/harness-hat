@@ -8,7 +8,7 @@ impl App {
         label: &str,
         docker_commands: Vec<Vec<String>>,
         command_display: String,
-        launch_project_idx: usize,
+        launch_workspace_idx: usize,
         launch_container_idx: usize,
     ) {
         if self.build_task.is_some() {
@@ -19,15 +19,15 @@ impl App {
         self.build_output.clear();
         self.build_finished = None;
         self.build_scroll = 0;
-        if self.build_project_idx.is_none() {
-            self.build_project_idx = self.selected_project_idx();
+        if self.build_workspace_idx.is_none() {
+            self.build_workspace_idx = self.selected_workspace_idx();
         }
         self.active_session = None;
         self.focus = Focus::ImageBuild;
         self.push_log(format!("starting {label}"), false);
         self.push_log(format!("$ {command_display}"), false);
 
-        if let Some(pi) = self.build_project_idx {
+        if let Some(pi) = self.build_workspace_idx {
             let items = self.sidebar_items();
             if let Some(pos) = items
                 .iter()
@@ -48,7 +48,7 @@ impl App {
             run_build_docker_commands(
                 label,
                 docker_commands,
-                launch_project_idx,
+                launch_workspace_idx,
                 launch_container_idx,
                 launch_session_group,
                 task_cancel,
@@ -160,14 +160,14 @@ impl App {
         image: &str,
         build_session_group: Option<usize>,
     ) {
-        self.build_project_idx = Some(pi);
+        self.build_workspace_idx = Some(pi);
         self.build_container_idx = Some(ctr_idx);
         self.build_session_group = build_session_group;
         self.build_cursor = 0;
         self.build_output.clear();
         self.build_scroll = 0;
         self.active_session = None;
-        self.active_settings_project = None;
+        self.active_settings_workspace = None;
         self.container_picker = None;
         self.build_finished = None;
         self.focus = Focus::ImageBuild;
