@@ -234,6 +234,7 @@ mod tests {
     };
     use crate::config::Config;
     use std::fs;
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
@@ -347,15 +348,16 @@ mod tests {
         fs::create_dir_all(&canon).expect("create canon");
         fs::create_dir_all(&docker_dir).expect("create docker dir");
 
+        let toml_path = |path: &Path| toml::Value::String(path.display().to_string()).to_string();
         let raw = format!(
             r#"
-docker_dir = "{}"
+docker_dir = {}
 
 [manager]
-global_rules_file = "{}"
+global_rules_file = {}
 "#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display(),
+            toml_path(&docker_dir),
+            toml_path(&root.join("global-rules.toml")),
         );
         fs::write(&config_path, raw).expect("write base config");
 
@@ -381,15 +383,16 @@ global_rules_file = "{}"
         fs::create_dir_all(&canon).expect("create canon");
         fs::create_dir_all(&docker_dir).expect("create docker dir");
 
+        let toml_path = |path: &Path| toml::Value::String(path.display().to_string()).to_string();
         let raw = format!(
             r#"
-docker_dir = "{}"
+docker_dir = {}
 
 [manager]
-global_rules_file = "{}"
+global_rules_file = {}
 "#,
-            docker_dir.display(),
-            root.join("global-rules.toml").display(),
+            toml_path(&docker_dir),
+            toml_path(&root.join("global-rules.toml")),
         );
         fs::write(&config_path, raw).expect("write base config");
 

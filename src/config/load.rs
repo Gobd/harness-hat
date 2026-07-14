@@ -1077,11 +1077,26 @@ mod security_tests {
 
     #[test]
     fn rejects_broad_and_credential_bearing_mount_roots() {
-        assert!(sensitive_path_hit(Path::new("/")).is_some());
-        assert!(sensitive_path_hit(Path::new("/etc")).is_some());
-        assert!(sensitive_path_hit(Path::new("/proc/self")).is_some());
+        // Production passes canonical workspace paths into this helper. Use the
+        // current filesystem's canonical root so the assertion covers `/` on
+        // Unix and the active drive root (for example `C:\`) on Windows.
+        let cwd = std::env::current_dir().expect("current directory");
+        let root = cwd
+            .ancestors()
+            .last()
+            .expect("filesystem root")
+            .canonicalize()
+            .expect("canonical filesystem root");
+        assert!(sensitive_path_hit(&root).is_some());
+
+        #[cfg(unix)]
+        {
+            assert!(sensitive_path_hit(Path::new("/etc")).is_some());
+            assert!(sensitive_path_hit(Path::new("/proc/self")).is_some());
+        }
         if let Some(home) = dirs::home_dir() {
-            assert!(sensitive_path_hit(&home).is_some());
+            let canonical_home = home.canonicalize().expect("canonical home directory");
+            assert!(sensitive_path_hit(&canonical_home).is_some());
             assert!(sensitive_path_hit(&home.join(".aws/credentials")).is_some());
         }
     }

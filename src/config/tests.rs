@@ -83,19 +83,21 @@ fn load_resolves_template_resource_fields() {
     std::fs::create_dir_all(&workspace).expect("workspace");
     std::fs::create_dir_all(&docker_dir).expect("docker");
     let config_path = root.path().join("harness-hat.toml");
+    let toml_path =
+        |path: &std::path::Path| toml::Value::String(path.display().to_string()).to_string();
     std::fs::write(
         &config_path,
         format!(
             r#"
 version = 1
-docker_dir = "{}"
+docker_dir = {}
 
 [manager]
-global_rules_file = "{}"
+global_rules_file = {}
 
 [[workspaces]]
 name = "repo"
-canonical_path = "{}"
+canonical_path = {}
 
 [defaults.containers]
 memory = "2g"
@@ -105,9 +107,9 @@ shm_size = "512m"
 [container_profiles.dev]
 image = "default"
 "#,
-            docker_dir.display(),
-            root.path().join("global-rules.toml").display(),
-            workspace.display()
+            toml_path(&docker_dir),
+            toml_path(&root.path().join("global-rules.toml")),
+            toml_path(&workspace)
         ),
     )
     .expect("write config");
@@ -126,18 +128,23 @@ image = "default"
     assert_eq!(template.memory.as_deref(), Some("2g"));
     assert_eq!(template.cpus.as_deref(), Some("1.5"));
     assert_eq!(template.shm_size.as_deref(), Some("512m"));
-    let home = root.path();
+    // `dirs` uses the Windows Known Folder API rather than the Unix HOME
+    // variable, so derive the expected profile exactly as production does.
+    // On Unix the test's HOME override still resolves to the temp directory.
+    let home = with_temp_home(root.path(), || {
+        dirs::home_dir().expect("platform home directory")
+    });
     // The keyring mount host is `dirs::data_dir()` joined under the (temp) home,
     // matching `shared_container_keyring_mount`. This resolves differently per
     // platform (`~/.local/share` on Linux via XDG, `~/Library/Application
     // Support` on macOS), so derive it the same way the code does rather than
     // hardcoding a Linux path.
-    let keyring_host = with_temp_home(home, || {
+    let keyring_host = with_temp_home(root.path(), || {
         dirs::data_dir()
             .expect("data dir")
             .join("harness-hat/container-keyrings")
     });
-    let expected_session_mounts = [
+    let optional_session_mounts = [
         (home.join(".claude.json"), "/home/coder/.claude.json"),
         (
             home.join(".claude/.claude.json"),
@@ -148,8 +155,12 @@ image = "default"
         (home.join(".config/codex"), "/home/coder/.config/codex"),
         (home.join(".gemini"), "/home/coder/.gemini"),
         (home.join(".pi"), "/home/coder/.pi"),
-        (keyring_host.clone(), "/home/coder/.local/share/keyrings"),
     ];
+    let mut expected_session_mounts: Vec<_> = optional_session_mounts
+        .into_iter()
+        .filter(|(host, _)| host.exists())
+        .collect();
+    expected_session_mounts.push((keyring_host.clone(), "/home/coder/.local/share/keyrings"));
     for (host, container) in &expected_session_mounts {
         assert!(
             template.mounts.iter().any(|mount| {
