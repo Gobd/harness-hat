@@ -1,7 +1,26 @@
-use anyhow::{Context, Result};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::Result;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
+
+/// Render a host path without leaking Windows' internal extended-length prefix
+/// into user-facing text. `Path::canonicalize` returns `\\?\C:\...` (or
+/// `\\?\UNC\server\share`) on Windows even for ordinary paths.
+pub(crate) fn display_host_path(path: &Path) -> String {
+    normalize_windows_extended_path(&path.as_os_str().to_string_lossy())
+}
+
+pub(crate) fn normalize_windows_extended_path(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{unc}")
+    } else if let Some(local) = path.strip_prefix("\\\\?\\") {
+        local.to_string()
+    } else {
+        path.to_string()
+    }
+}
 
 pub(crate) fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
     let mut options = OpenOptions::new();
@@ -63,7 +82,23 @@ pub(crate) fn is_valid_env_name(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::write_env_file_entry;
+    use super::{normalize_windows_extended_path, write_env_file_entry};
+
+    #[test]
+    fn windows_extended_paths_render_as_standard_paths() {
+        assert_eq!(
+            normalize_windows_extended_path(r"\\?\C:\Users\example\repo"),
+            r"C:\Users\example\repo"
+        );
+        assert_eq!(
+            normalize_windows_extended_path(r"\\?\UNC\server\share\repo"),
+            r"\\server\share\repo"
+        );
+        assert_eq!(
+            normalize_windows_extended_path(r"C:\Users\example\repo"),
+            r"C:\Users\example\repo"
+        );
+    }
 
     #[test]
     fn env_file_entry_rejects_newline_values() {

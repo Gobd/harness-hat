@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use std::env;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerUsageStats {
@@ -8,23 +10,44 @@ pub struct ContainerUsageStats {
     pub memory_usage: String,
 }
 
-pub(crate) fn read_container_id(cidfile: &Path, docker_name: &str) -> Result<String> {
-    for _ in 0..400 {
+pub(crate) fn read_container_id(
+    cidfile: &Path,
+    docker_name: &str,
+    process_exited: &AtomicBool,
+) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
         if let Ok(contents) = std::fs::read_to_string(cidfile) {
             let id = contents.trim().to_string();
             if !id.is_empty() {
                 return Ok(id);
             }
         }
-        if let Some(id) = inspect_container_id(docker_name)? {
-            return Ok(id);
+
+        if process_exited.load(Ordering::Relaxed) || Instant::now() >= deadline {
+            break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        std::thread::sleep(Duration::from_millis(20));
     }
+
+    // The cidfile is Docker's primary launch handshake. Inspect once as a
+    // race-safe fallback, rather than spawning `docker inspect` hundreds of
+    // times on the TUI thread after an early docker-run failure.
+    if let Some(id) = inspect_container_id(docker_name)? {
+        return Ok(id);
+    }
+
+    if process_exited.load(Ordering::Relaxed) {
+        anyhow::bail!(
+            "docker run exited before creating container {docker_name} or writing {}",
+            cidfile.display()
+        );
+    }
+
     anyhow::bail!(
-        "failed to read docker container id from {} or inspect container {}",
+        "timed out waiting for docker container {docker_name} or cidfile {}",
         cidfile.display(),
-        docker_name
     );
 }
 

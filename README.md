@@ -2,7 +2,7 @@
 
 > Docker-backed development sessions with proxy-mediated network policy — driven from a terminal UI.
 
-Harness Hat (`hh`) is a session manager for running coding agents and dev workflows inside disposable, network-filtered Docker containers. You register a workspace, pick a language template, and get an interactive shell in a sandbox whose outbound traffic is steered through a policy-enforcing proxy governed by per-workspace allow/deny rules.
+Harness Hat (`hht`) is a session manager for running coding agents and dev workflows inside disposable, network-filtered Docker containers. You register a workspace, pick a language template, and get an interactive shell in a sandbox whose outbound traffic is steered through a policy-enforcing proxy governed by per-workspace allow/deny rules.
 
 ## Why
 
@@ -40,8 +40,8 @@ Harness Hat overlaps with several development-environment, agent-sandbox, and co
 ## Quick start
 
 ```sh
-cargo install harness-hat              # binary is `hh`
-hh  # will prompt you to create config, or launch the manager if config exists
+cargo install harness-hat              # binary is `hht`
+hht  # will prompt you to create config, or launch the manager if config exists
 ```
 
 Inside the TUI: pick a workspace, pick a template, get a shell. From inside the container, run `killme` to ask Harness Hat to stop the session.
@@ -49,17 +49,17 @@ Inside the TUI: pick a workspace, pick a template, get a shell. From inside the 
 With the manager running in another terminal, you can also attach to or start the session for your current directory:
 
 ```sh
-hh workspace                  # match $PWD to a workspace, launch if needed, then attach
-hh workspace --template rust  # skip the template picker
-hh workspace claude --resume  # runs "claude --resume" inside the session
+hht workspace                  # match $PWD to a workspace, launch if needed, then attach
+hht workspace --template rust  # skip the template picker
+hht workspace claude --resume  # runs "claude --resume" inside the session
 ```
 
 To attach to an already-running session from a separate terminal:
 
 ```sh
-hh shell           # lists running sessions
-hh shell <ID>      # attaches via `docker exec -it`
-hh shell <ID> CMD  # runs CMD via docker exec
+hht shell           # lists running sessions
+hht shell <ID>      # attaches via `docker exec -it`
+hht shell <ID> CMD  # runs CMD via docker exec
 ```
 
 ### VSCode-like editors (VS Code, Cursor, Windsurf, etc.)
@@ -87,6 +87,8 @@ You can attach these editors directly to a running Harness Hat container using t
 ## Built-in templates
 
 The base image is Ubuntu 24.04 with Node 22, bundled agent CLIs (`claude`, `codex`, `agy`, `pi`), and the shared proxy/control plumbing. Stacked on top:
+
+On Windows, Codex auth, config, rules, skills, and plugins are copied into private container-local state at session startup. Its SQLite databases, logs, and caches stay inside the Linux container instead of being opened through Docker Desktop's Windows bind filesystem, which does not provide the locking semantics Codex requires. Host state is mounted read-only during this seed step.
 
 | Stem         | Toolchain                                                          |
 |--------------|--------------------------------------------------------------------|
@@ -313,13 +315,13 @@ Hostdo children never see harness-hat's own control-plane variables (`HARNESS_HA
 ## CLI
 
 ```
-hh                       # launch interactive workspace manager (default)
-hh --config PATH         # use a specific config
-hh init [PATH]           # write a starter config (default: ./harness-hat.toml)
-hh workspace             # attach to or start a session for the current directory
-hh workspace --template NAME [COMMAND...]
-hh shell                 # list running sessions
-hh shell <ID> [COMMAND...] # docker exec into a running session
+hht                       # launch interactive workspace manager (default)
+hht --config PATH         # use a specific config
+hht init [PATH]           # write a starter config (default: ./harness-hat.toml)
+hht workspace             # attach to or start a session for the current directory
+hht workspace --template NAME [COMMAND...]
+hht shell                 # list running sessions
+hht shell <ID> [COMMAND...] # docker exec into a running session
 ```
 
 ## Upgrading
@@ -328,7 +330,7 @@ hh shell <ID> [COMMAND...] # docker exec into a running session
 cargo install harness-hat --force
 ```
 
-Container images are built locally from the Dockerfiles under `docker_dir` and tagged `harness-hat-base:local`. After upgrading `hh` or changing a Dockerfile, rebuild the image from the TUI so new sessions pick up the changes — running sessions keep their existing image until restarted.
+Container images are built locally from the Dockerfiles under `docker_dir` and tagged `harness-hat-base:local`. After upgrading `hht` or changing a Dockerfile, rebuild the image from the TUI so new sessions pick up the changes — running sessions keep their existing image until restarted.
 
 ## License
 

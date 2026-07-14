@@ -19,7 +19,7 @@ use crate::config::{ContainerDef, MountMode, container_path_file_name, container
 use crate::container::core::{
     LABEL_ALIAS, LABEL_SESSION, LABEL_TEMPLATE, LABEL_WORKSPACE, TERMINAL_SCROLLBACK_LINES,
     TermSize, docker_bind_mount_args, loopback_to_host_docker, parse_docker_label,
-    sanitize_docker_name,
+    sanitize_docker_name, terminal_bottom_lines,
 };
 use crate::container::helpers::detect_default_colors;
 use crate::container::{ContainerSession, SessionEventProxy, read_container_id};
@@ -32,10 +32,22 @@ const CLAUDE_CODE_OAUTH_SCOPES_ENV: &str = "CLAUDE_CODE_OAUTH_SCOPES";
 const CLAUDE_CODE_HOST_AUTH_ENV_VAR_ENV: &str = "CLAUDE_CODE_HOST_AUTH_ENV_VAR";
 const CLAUDE_CODE_DEFAULT_OAUTH_SCOPES: &str = "user:inference";
 const CLAUDE_CONFIG_CONTAINER_PATH: &str = "/home/coder/.claude.json";
+const CODEX_HOME_CONTAINER_PATH: &str = "/home/coder/.codex";
+const CODEX_SEED_CONTAINER_PATH: &str = "/run/harness-hat/codex-seed";
+const CODEX_SEED_ENV: &str = "HARNESS_HAT_CODEX_SEED";
 
 /// Launch `docker run` for a container definition and wire it to a PTY-backed
 /// terminal session.
-#[instrument(skip(ctr, command_argv, workspace_path, extra_env, scoped_proxy))]
+#[instrument(skip(
+    ctr,
+    command_argv,
+    workspace_path,
+    session_token,
+    token,
+    proxy_url,
+    extra_env,
+    scoped_proxy
+))]
 pub fn spawn(
     ctr: &ContainerDef,
     command_argv: Option<&[String]>,
@@ -71,7 +83,7 @@ pub fn spawn(
         .as_ref()
         .map(|proxy| proxy.proxy_auth_token().to_string())
         .unwrap_or_default();
-    let launch_notes = Vec::new();
+    let mut launch_notes = Vec::new();
 
     let mut docker_args: Vec<String> = vec![
         "run".to_string(),
@@ -83,7 +95,7 @@ pub fn spawn(
         cidfile.display().to_string(),
     ];
 
-    // Discovery labels so `hh shell` can find and identify this session
+    // Discovery labels so `hht shell` can find and identify this session
     // without the manager process being alive.
     //
     // `docker ps --format '{{.Labels}}'` serializes labels as a single
@@ -364,6 +376,40 @@ pub fn spawn(
         .iter()
         .any(|mount| container_path_string(&mount.container) == CLAUDE_CONFIG_CONTAINER_PATH);
     for mount in &sorted_mounts {
+        if should_seed_codex_directory(mount) {
+            if !mount.host.exists() {
+                warn!(
+                    host = %mount.host.display(),
+                    container = CODEX_HOME_CONTAINER_PATH,
+                    "skipping Codex state seed because host source does not exist"
+                );
+                continue;
+            }
+
+            // SQLite locking is not reliable when a Linux container opens its
+            // databases through Docker Desktop's Windows bind filesystem. It is
+            // also unsafe for the host and container Codex processes to share
+            // the same live databases concurrently. Give Codex a container-local
+            // anonymous volume and expose the host state read-only at a staging
+            // path; the init script copies only portable auth/config/plugin state
+            // into the volume before dropping to the coder user.
+            docker_args.extend_from_slice(&[
+                "--mount".to_string(),
+                format!("type=volume,target={CODEX_HOME_CONTAINER_PATH}"),
+            ]);
+            docker_args.extend(docker_bind_mount_args(
+                &mount.host.display().to_string(),
+                CODEX_SEED_CONTAINER_PATH,
+                &MountMode::Ro,
+            )?);
+            write_env_file_entry(&mut env_file, CODEX_SEED_ENV, CODEX_SEED_CONTAINER_PATH)?;
+            launch_notes.push(
+                "Codex state is copied into container-local storage on Windows so its SQLite databases can start safely"
+                    .to_string(),
+            );
+            continue;
+        }
+
         let seeded = seed_private_mount(mount, claude_oauth_token_available)?;
         if seeded.is_none() && !mount.host.exists() {
             warn!(
@@ -472,11 +518,7 @@ pub fn spawn(
         proxy.clone(),
     )));
 
-    let mut options = tty::Options::default();
-    options.shell = Some(tty::Shell::new("docker".to_string(), docker_args));
-    options.working_directory = None;
-    options.drain_on_exit = false;
-    options.env = HashMap::new();
+    let options = docker_pty_options(docker_args);
 
     let pty = tty::new(&options, window_size, 0).context("open PTY")?;
     let event_loop = EventLoop::new(Arc::clone(&term), proxy.clone(), pty, false, false)
@@ -488,8 +530,25 @@ pub fn spawn(
     }
     let _handle = event_loop.spawn();
 
-    let container_id =
-        read_container_id(&cidfile, &docker_run_name).context("reading docker container id")?;
+    let container_id = match read_container_id(&cidfile, &docker_run_name, &exited) {
+        Ok(id) => id,
+        Err(error) => {
+            let docker_output = {
+                let term = term.lock();
+                terminal_bottom_lines(&*term, 8)
+                    .into_iter()
+                    .map(|line| line.trim().to_string())
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            };
+            let _ = std::fs::remove_file(&cidfile);
+            if docker_output.is_empty() {
+                return Err(error).context("reading docker container id");
+            }
+            return Err(error).context(format!("docker run failed: {docker_output}"));
+        }
+    };
     let docker_name = docker_run_name.clone();
     let _ = std::fs::remove_file(&cidfile);
 
@@ -523,6 +582,25 @@ pub fn spawn(
     ))
 }
 
+fn docker_pty_options(docker_args: Vec<String>) -> tty::Options {
+    let mut options = tty::Options::default();
+    options.shell = Some(tty::Shell::new("docker".to_string(), docker_args));
+    options.working_directory = None;
+    options.drain_on_exit = false;
+    options.env = HashMap::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        // alacritty_terminal passes the program and argv to CreateProcessW as
+        // one command-line string. Its default leaves arguments unescaped,
+        // which splits Windows workspace and tempfile paths containing spaces
+        // before docker.exe receives them.
+        options.escape_args = true;
+    }
+
+    options
+}
+
 /// Pick a zero-padded 4-digit id not currently used by a running harness-hat
 /// container. Randomness is derived from a fresh UUID to avoid pulling in a
 /// dedicated RNG dependency. Collisions among the ~10k space are rare; we retry
@@ -549,7 +627,7 @@ fn random_four_digit() -> String {
 ///
 /// Returns `Err` when `docker ps` fails — silently returning an empty set
 /// would let `allocate_session_alias` happily mint an alias that collides with
-/// a live container, breaking `hh shell <alias>` (ambiguous lookup).
+/// a live container, breaking `hht shell <alias>` (ambiguous lookup).
 fn running_session_aliases() -> Result<std::collections::HashSet<String>> {
     let output = std::process::Command::new("docker")
         .args([
@@ -585,13 +663,14 @@ fn running_session_aliases() -> Result<std::collections::HashSet<String>> {
 }
 
 fn prepare_executable_helper_script(path: &Path, prefix: &str) -> Result<NamedTempFile> {
-    let contents = std::fs::read(path)
+    let contents = std::fs::read_to_string(path)
         .with_context(|| format!("reading helper script '{}'", path.display()))?;
+    let contents = normalize_script_line_endings(&contents);
     let mut file = tempfile::Builder::new()
         .prefix(prefix)
         .tempfile()
         .context("creating helper script temp file")?;
-    file.write_all(&contents)
+    file.write_all(contents.as_bytes())
         .context("writing helper script temp file")?;
     file.flush().context("flushing helper script temp file")?;
 
@@ -610,6 +689,10 @@ fn prepare_executable_helper_script(path: &Path, prefix: &str) -> Result<NamedTe
     }
 
     Ok(file)
+}
+
+fn normalize_script_line_endings(contents: &str) -> String {
+    contents.replace("\r\n", "\n")
 }
 
 fn proxy_addr_without_auth(proxy_url: &str) -> String {
@@ -676,6 +759,12 @@ fn should_inject_coder_home(mounts: &[crate::config::ContainerMount]) -> bool {
     mounts
         .iter()
         .any(|mount| mount.container.starts_with(CODER_HOME))
+}
+
+fn should_seed_codex_directory(mount: &crate::config::ContainerMount) -> bool {
+    cfg!(target_os = "windows")
+        && container_path_string(&mount.container) == CODEX_HOME_CONTAINER_PATH
+        && mount.host.is_dir()
 }
 
 fn has_nonempty_env_source(
@@ -948,10 +1037,12 @@ fn read_claude_oauth_credentials_full() -> Option<ClaudeOAuthCredentials> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use super::docker_pty_options;
     use super::{
         ensure_claude_interactive_onboarding, format_localhost_forwards, has_nonempty_env_source,
-        proxy_addr_without_auth, seed_claude_oauth_onboarding_config, seed_private_mount,
-        should_inject_coder_home,
+        normalize_script_line_endings, proxy_addr_without_auth,
+        seed_claude_oauth_onboarding_config, seed_private_mount, should_inject_coder_home,
     };
     use crate::config::{ContainerMount, LocalhostForward, MountMode};
     use std::collections::HashMap;
@@ -965,6 +1056,44 @@ mod tests {
             mode: MountMode::Rw,
             seed,
         }
+    }
+
+    #[test]
+    fn helper_scripts_are_normalized_for_linux_containers() {
+        assert_eq!(
+            normalize_script_line_endings("#!/usr/bin/env python3\r\nprint('ok')\r\n"),
+            "#!/usr/bin/env python3\nprint('ok')\n"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn docker_pty_escapes_windows_command_line_arguments() {
+        let options = docker_pty_options(vec![
+            "run".to_string(),
+            "--mount".to_string(),
+            "type=bind,source=C:\\Users\\Example User\\repo,target=/workspace".to_string(),
+        ]);
+
+        assert!(options.escape_args);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_codex_directory_uses_container_local_state() {
+        let source = tempfile::tempdir().expect("create Codex state directory");
+        let codex = mount(
+            source.path().to_str().expect("UTF-8 temp path"),
+            "/home/coder/.codex",
+            None,
+        );
+
+        assert!(super::should_seed_codex_directory(&codex));
+        assert!(!super::should_seed_codex_directory(&mount(
+            source.path().to_str().expect("UTF-8 temp path"),
+            "/home/coder/.claude",
+            None,
+        )));
     }
 
     #[test]

@@ -1,4 +1,5 @@
-use super::{ContainerPickerState, SidebarItem, move_wrapping_cursor};
+use super::{ContainerPickerState, SidebarItem, move_wrapping_cursor, should_handle_key_event};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 #[test]
 fn container_picker_steps_are_distinct() {
@@ -34,4 +35,13 @@ fn sidebar_items_cover_session_and_creation_entries() {
     assert_eq!(SidebarItem::NewSession, SidebarItem::NewSession);
     assert_eq!(SidebarItem::Session(1), SidebarItem::Session(1));
     assert_ne!(SidebarItem::Session(1), SidebarItem::Session(2));
+}
+
+#[test]
+fn key_release_events_are_not_handled_as_repeated_input() {
+    let key = |kind| KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, kind);
+
+    assert!(should_handle_key_event(&key(KeyEventKind::Press)));
+    assert!(should_handle_key_event(&key(KeyEventKind::Repeat)));
+    assert!(!should_handle_key_event(&key(KeyEventKind::Release)));
 }

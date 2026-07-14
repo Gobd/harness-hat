@@ -1,4 +1,4 @@
-//! `hh shell` — open an interactive shell in a running session.
+//! `hht shell` — open an interactive shell in a running session.
 //!
 //! This is a pure-Docker passthrough: it discovers sessions purely from the
 //! discovery labels stamped at launch (`harness-hat.alias` etc.) and attaches
@@ -8,7 +8,7 @@
 //! Sessions only exist while the manager is running. Each session container is
 //! launched as `docker run --rm -it` owned by the manager's PTY, so quitting
 //! the manager (or that session's terminal) tears the container down and
-//! `--rm` removes it. `hh shell` therefore only finds a session while the
+//! `--rm` removes it. `hht shell` therefore only finds a session while the
 //! manager that launched it is still running — run it from a second terminal
 //! alongside the live manager.
 
@@ -26,7 +26,10 @@ use crate::container::{
 /// an id, prints the running sessions and their ids (and `args` is ignored).
 pub fn run(id: Option<String>, args: Vec<OsString>) -> Result<i32> {
     if which::which("docker").is_err() {
-        bail!("docker not found in PATH — `hh shell` requires Docker");
+        bail!(
+            "docker not found in PATH — `{} shell` requires Docker",
+            crate::cli::COMMAND_NAME
+        );
     }
     match id {
         Some(id) => attach(&id, &args),
@@ -85,7 +88,7 @@ pub(crate) fn running_sessions() -> Result<Vec<Session>> {
 }
 
 /// Normalize a user-supplied id to the stored form: numeric ids are
-/// zero-padded to the 4-digit width that's shown in the UI, so `hh shell 42`
+/// zero-padded to the 4-digit width that's shown in the UI, so `hht shell 42`
 /// matches the displayed `0042`. Non-numeric or longer ids pass through.
 fn normalize_id(id: &str) -> String {
     if !id.is_empty() && id.len() < 4 && id.bytes().all(|b| b.is_ascii_digit()) {
@@ -102,8 +105,9 @@ fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
 
     let name = match matches.as_slice() {
         [] => bail!(
-            "no running session with id '{wanted}'. Run `hh shell` to list sessions. \
-             (Sessions only exist while the manager is running — is it still open?)"
+            "no running session with id '{wanted}'. Run `{} shell` to list sessions. \
+             (Sessions only exist while the manager is running — is it still open?)",
+            crate::cli::COMMAND_NAME
         ),
         [session] => session.name.clone(),
         many => {
@@ -123,7 +127,7 @@ fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
 /// Run `docker exec` against a container with optional trailing argv (or
 /// `/bin/bash` when empty), with the same TTY auto-detect + signal guarding +
 /// host-terminal cleanup the interactive shell flow needs. Reused by
-/// `hh workspace`.
+/// `hht workspace`.
 ///
 /// Don't `exec()` into docker exec. If the manager exits while this shell is
 /// attached, the `docker run --rm` container dies and `docker exec` is ripped
@@ -141,7 +145,7 @@ fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
 pub(crate) fn exec_into_container(container_name: &str, extra_args: &[OsString]) -> Result<i32> {
     // `-it` requires a TTY on stdin; without one (e.g. piped input) docker
     // exec refuses to start. Drop `-t` when stdin isn't a terminal so
-    // `echo ... | hh shell ID cat` works.
+    // `echo ... | hht shell ID cat` works.
     let stdin_is_tty = std::io::stdin().is_terminal();
     let mut command = Command::new("docker");
     command.args([
@@ -263,7 +267,8 @@ fn list() -> Result<()> {
     if sessions.is_empty() {
         println!(
             "No running harness-hat sessions. Sessions only exist while the manager is \
-             running — launch one in the manager, then run `hh shell` from another terminal."
+             running — launch one in the manager, then run `{} shell` from another terminal.",
+            crate::cli::COMMAND_NAME
         );
         return Ok(());
     }
@@ -299,7 +304,7 @@ fn list() -> Result<()> {
             tpl = tpl_width
         );
     }
-    println!("\nAttach with: hh shell <ID>");
+    println!("\nAttach with: {} shell <ID>", crate::cli::COMMAND_NAME);
     Ok(())
 }
 

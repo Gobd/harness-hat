@@ -153,7 +153,7 @@ pub(crate) fn render_session_detail(
         .workspaces
         .iter()
         .find(|workspace| workspace.name == project)
-        .map(|workspace| workspace.canonical_path.display().to_string())
+        .map(|workspace| crate::fs_util::display_host_path(&workspace.canonical_path))
         .unwrap_or_else(|| "<unknown>".to_string());
     let templates = app.workspace_templates_for_name(&project);
     let template = templates
@@ -296,7 +296,7 @@ pub(crate) fn render_session_detail(
         mount_rows.push((
             label,
             label_color,
-            mount.host.display().to_string(),
+            crate::fs_util::display_host_path(&mount.host),
             arrow,
             crate::config::container_path_string(&mount.container),
             if seeded {

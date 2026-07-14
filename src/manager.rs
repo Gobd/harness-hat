@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-/// Run the interactive workspace manager (the default `hh` action).
+/// Run the interactive workspace manager (the default `hht` action).
 pub async fn run(cli: crate::cli::Cli) -> Result<()> {
     crate::container::ensure_docker_installed_and_running()?;
 

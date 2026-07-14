@@ -3,8 +3,10 @@ use clap::{Parser, Subcommand};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+pub const COMMAND_NAME: &str = "hht";
+
 #[derive(Debug, Clone, Parser)]
-#[command(name = "hh", version, about = "Harness Hat — manager UI")]
+#[command(name = COMMAND_NAME, version, about = "Harness Hat — manager UI")]
 struct CliOptions {
     /// Path to config file. Used by the interactive workspace manager (the
     /// default action when no subcommand is given).
@@ -15,7 +17,7 @@ struct CliOptions {
     command: Option<Command>,
 }
 
-/// Subcommands. When none is given, `hh` launches the interactive manager.
+/// Subcommands. When none is given, `hht` launches the interactive manager.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
     /// Generate a sample config file (defaults to ./harness-hat.toml).
@@ -26,7 +28,7 @@ pub enum Command {
     /// Open an interactive shell in a running session. With no id, lists the
     /// running sessions and their ids. Any args after the id are passed
     /// verbatim to `docker exec` as the command to run instead of bash —
-    /// e.g. `hh shell 0042 claude --resume`.
+    /// e.g. `hht shell 0042 claude --resume`.
     Shell {
         #[arg(value_name = "ID")]
         id: Option<String>,
@@ -46,7 +48,7 @@ pub enum Command {
     /// config file using the directory's basename as the workspace name.
     ///
     /// Any args after the subcommand are passed verbatim to `docker exec`
-    /// (same passthrough behavior as `hh shell ID …`).
+    /// (same passthrough behavior as `hht shell ID …`).
     Workspace {
         /// Use a specific container template instead of prompting.
         #[arg(long, value_name = "NAME")]
@@ -110,9 +112,11 @@ pub fn parse() -> Result<Cli> {
 }
 
 pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
-    const USAGE: &str = "Usage: hh [--config PATH] [init [PATH] | shell [ID] [COMMAND...] | workspace [OPTIONS] [COMMAND...]]";
+    let usage = format!(
+        "Usage: {COMMAND_NAME} [--config PATH] [init [PATH] | shell [ID] [COMMAND...] | workspace [OPTIONS] [COMMAND...]]"
+    );
     if raw.is_empty() {
-        bail!("missing argv[0]. {USAGE}");
+        bail!("missing argv[0]. {usage}");
     }
 
     // `Error::exit()` prints --help/--version to stdout and exits 0, and prints
@@ -140,24 +144,24 @@ mod tests {
 
     #[test]
     fn bare_invocation_has_no_subcommand() {
-        let cli = parse_from(argv(&["hh"])).expect("parse");
+        let cli = parse_from(argv(&["hht"])).expect("parse");
         assert!(cli.command.is_none());
         assert!(cli.config.is_none());
     }
 
     #[test]
     fn config_flag_applies_to_default_action() {
-        let cli = parse_from(argv(&["hh", "--config", "/tmp/x.toml"])).expect("parse");
+        let cli = parse_from(argv(&["hht", "--config", "/tmp/x.toml"])).expect("parse");
         assert!(cli.command.is_none());
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/x.toml")));
     }
 
     #[test]
     fn init_subcommand_takes_optional_path() {
-        let cli = parse_from(argv(&["hh", "init"])).expect("parse");
+        let cli = parse_from(argv(&["hht", "init"])).expect("parse");
         assert!(matches!(cli.command, Some(Command::Init { path: None })));
 
-        let cli = parse_from(argv(&["hh", "init", "custom.toml"])).expect("parse");
+        let cli = parse_from(argv(&["hht", "init", "custom.toml"])).expect("parse");
         assert!(
             matches!(cli.command, Some(Command::Init { path: Some(p) }) if p == PathBuf::from("custom.toml"))
         );
@@ -165,13 +169,13 @@ mod tests {
 
     #[test]
     fn shell_subcommand_takes_optional_id() {
-        let cli = parse_from(argv(&["hh", "shell"])).expect("parse");
+        let cli = parse_from(argv(&["hht", "shell"])).expect("parse");
         assert!(matches!(
             cli.command,
             Some(Command::Shell { id: None, ref args }) if args.is_empty()
         ));
 
-        let cli = parse_from(argv(&["hh", "shell", "0042"])).expect("parse");
+        let cli = parse_from(argv(&["hht", "shell", "0042"])).expect("parse");
         assert!(matches!(
             cli.command,
             Some(Command::Shell { id: Some(id), ref args }) if id == "0042" && args.is_empty()
@@ -180,7 +184,7 @@ mod tests {
 
     #[test]
     fn workspace_subcommand_parses_template_and_trailing_args() {
-        let cli = parse_from(argv(&["hh", "workspace"])).expect("parse");
+        let cli = parse_from(argv(&["hht", "workspace"])).expect("parse");
         let Some(Command::Workspace { template, args }) = cli.command else {
             panic!("expected Workspace");
         };
@@ -188,7 +192,7 @@ mod tests {
         assert!(args.is_empty());
 
         let cli = parse_from(argv(&[
-            "hh",
+            "hht",
             "workspace",
             "--template",
             "dev",
@@ -210,7 +214,7 @@ mod tests {
 
     #[test]
     fn shell_subcommand_collects_trailing_args_verbatim() {
-        let cli = parse_from(argv(&["hh", "shell", "0042", "claude", "--resume"])).expect("parse");
+        let cli = parse_from(argv(&["hht", "shell", "0042", "claude", "--resume"])).expect("parse");
         let Some(Command::Shell { id, args }) = cli.command else {
             panic!("expected Shell subcommand");
         };

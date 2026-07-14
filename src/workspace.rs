@@ -1,6 +1,6 @@
-//! `hh workspace` — attach to (or start) a session for `$PWD`.
+//! `hht workspace` — attach to (or start) a session for `$PWD`.
 //!
-//! This subcommand needs a running manager (the `hh` default action) to do
+//! This subcommand needs a running manager (the `hht` default action) to do
 //! anything useful: it discovers the manager via the same config file the
 //! manager itself loaded, then either docker-execs into an existing session
 //! for the matched workspace or asks the manager (via `POST /workspace/launch`)
@@ -26,11 +26,19 @@ pub fn run(
     explicit_config: Option<PathBuf>,
 ) -> Result<i32> {
     if which::which("docker").is_err() {
-        bail!("docker not found in PATH — `hh workspace` requires Docker");
+        bail!(
+            "docker not found in PATH — `{} workspace` requires Docker",
+            crate::cli::COMMAND_NAME
+        );
     }
 
     let config_path = crate::manager::resolve_or_prompt_config_path(explicit_config)?
-        .context("no harness-hat config available; run `hh init` to create one")?;
+        .with_context(|| {
+            format!(
+                "no harness-hat config available; run `{} init` to create one",
+                crate::cli::COMMAND_NAME
+            )
+        })?;
     let mut config = crate::config::load(&config_path)?;
 
     let token_path = config.logging.log_dir.join("token");
@@ -47,7 +55,8 @@ pub fn run(
     );
     probe_manager(&control_url).with_context(|| {
         format!(
-            "manager is not reachable at {control_url} — start it in another terminal with `hh`"
+            "manager is not reachable at {control_url} — start it in another terminal with `{}`",
+            crate::cli::COMMAND_NAME
         )
     })?;
 

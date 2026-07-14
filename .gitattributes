@@ -1,0 +1,2 @@
+*.dockerfile text eol=lf
+docker/scripts/*.py text eol=lf

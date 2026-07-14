@@ -517,7 +517,7 @@ pub async fn run_with_listener(
     Ok(())
 }
 
-/// Liveness probe used by `hh workspace` to fail fast with a clear message
+/// Liveness probe used by `hht workspace` to fail fast with a clear message
 /// when the manager isn't running. Intentionally no auth — the response
 /// contains nothing sensitive, and requiring the token would force every CLI
 /// caller to load and parse it just to print "manager not running."

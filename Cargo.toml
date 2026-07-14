@@ -11,10 +11,10 @@ homepage = "https://github.com/only-cliches/harness-hat"
 keywords = ["docker", "sandbox", "proxy", "tui", "isolation"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["target/", ".git/", ".github/"]
-default-run = "hh"
+default-run = "hht"
 
 [[bin]]
-name = "hh"
+name = "hht"
 path = "src/main.rs"
 
 [dependencies]
@@ -74,7 +74,7 @@ sha2 = "0.10"
 hex = "0.4"
 notify-rust = "4"
 
-# Native system dialogs (spawned in a subprocess via `hh __dialog ...` to
+# Native system dialogs (spawned in a subprocess via `hht __dialog ...` to
 # avoid taking over the parent's main thread). macOS uses NSAlert with a
 # suppression checkbox; Windows and Linux use the existing TUI modal.
 [target.'cfg(target_os = "macos")'.dependencies]

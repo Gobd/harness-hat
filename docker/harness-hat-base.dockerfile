@@ -106,7 +106,8 @@ RUN set -eu; \
     && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/killme.py /usr/local/bin/killme
-RUN chmod 755 /usr/local/bin/killme
+RUN sed -i 's/\r$//' /usr/local/bin/killme \
+    && chmod 755 /usr/local/bin/killme
 COPY --from=tun2proxy-build /usr/local/cargo/bin/tun2proxy-bin /usr/local/bin/tun2proxy-bin
 
 RUN cat > /usr/local/bin/harness-hat-user-session.sh << 'SCRIPT'
@@ -129,11 +130,44 @@ fi
 
 exec "$@"
 SCRIPT
-RUN chmod 755 /usr/local/bin/harness-hat-user-session.sh
+RUN sed -i 's/\r$//' /usr/local/bin/harness-hat-user-session.sh \
+    && chmod 755 /usr/local/bin/harness-hat-user-session.sh
 
 RUN cat > /usr/local/bin/harness-hat-init.sh << 'SCRIPT'
 #!/bin/sh
 set -e
+
+seed_codex_state() {
+    source_dir="${HARNESS_HAT_CODEX_SEED:-}"
+    [ -n "$source_dir" ] && [ -d "$source_dir" ] || return 0
+
+    target_dir="${HOME:-/home/coder}/.codex"
+    mkdir -p "$target_dir"
+
+    # Codex's SQLite databases and runtime caches must remain on the Linux
+    # filesystem. Copy only portable state from the host; auth refreshes and
+    # other writes then land in this container's private Docker volume.
+    for entry in \
+        auth.json \
+        config.toml \
+        installation_id \
+        version.json \
+        rules \
+        skills \
+        plugins
+    do
+        if [ -e "$source_dir/$entry" ]; then
+            rm -rf "$target_dir/$entry"
+            cp -R "$source_dir/$entry" "$target_dir/$entry"
+        fi
+    done
+
+    if [ "$(id -u)" = "0" ]; then
+        chown -R 1000:1000 "$target_dir"
+    fi
+}
+
+seed_codex_state
 
 start_localhost_forwards() {
     HH_LOCALHOST_FORWARDS="${HARNESS_HAT_LOCALHOST_FORWARDS:-}"
@@ -445,7 +479,8 @@ if [ "$(id -u)" = "0" ]; then
 fi
 exec dbus-run-session -- /usr/local/bin/harness-hat-user-session.sh "$@"
 SCRIPT
-RUN chmod 755 /usr/local/bin/harness-hat-init.sh
+RUN sed -i 's/\r$//' /usr/local/bin/harness-hat-init.sh \
+    && chmod 755 /usr/local/bin/harness-hat-init.sh
 
 # npm registry packages are integrity-checked by npm against the registry
 # metadata; pinning the versions (H5) makes the build reproducible and stops a
@@ -500,7 +535,7 @@ ENV DISABLE_AUTOUPDATER=1
 
 # Coder-compatible user at uid/gid 1000.
 USER coder
-RUN mkdir -p /home/coder/.local/bin \
+RUN mkdir -p /home/coder/.local/bin /home/coder/.codex \
     && printf '#!/bin/sh\nexec claude --dangerously-skip-permissions "$@"\n' \
        > /home/coder/.local/bin/claude-yolo \
     && printf '#!/bin/sh\nexec codex --yolo "$@"\n' \

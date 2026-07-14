@@ -3,7 +3,7 @@
 //! The manager process owns the OS main thread for its tokio current-thread
 //! executor and TUI, which leaves no run loop free for AppKit / Win32 modal
 //! dialogs. Rather than restructure startup, we spawn a hidden
-//! `hh __dialog network-approval ...` subprocess per prompt; the subprocess
+//! `hht __dialog network-approval ...` subprocess per prompt; the subprocess
 //! has its own main thread and run loop, displays the native dialog, prints
 //! a single machine-readable line to stdout, and exits.
 //!

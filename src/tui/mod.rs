@@ -7,7 +7,7 @@ use crossterm::{
     cursor,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableMouseCapture, Event, EventStream,
-        KeyCode, KeyEvent, KeyModifiers, MouseEvent,
+        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
     },
     execute,
     style::ResetColor,
@@ -252,7 +252,7 @@ pub struct App {
     pub launch_pending_rx: mpsc::Receiver<WorkspaceLaunchItem>,
     pub(crate) workspace_launch_pending: Option<WorkspaceLaunchPending>,
     pub net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
-    // Native OS approval dialog (macOS): results of finished `hh __dialog`
+    // Native OS approval dialog (macOS): results of finished `hht __dialog`
     // subprocesses come back here; `inflight` holds the activity id of the one
     // dialog currently on screen so we never pop two at once.
     background_channels: BackgroundUiChannels,
@@ -600,7 +600,9 @@ async fn event_loop(
         tokio::select! {
             maybe_event = events.next() => {
                 match maybe_event {
-                    Some(Ok(Event::Key(key))) => app.handle_key(key),
+                    Some(Ok(Event::Key(key))) if should_handle_key_event(&key) => {
+                        app.handle_key(key)
+                    }
                     Some(Ok(Event::Mouse(mouse))) => app.handle_mouse(mouse),
                     Some(Ok(Event::Paste(text))) => {
                         if app.focus == Focus::NewWorkspace {
@@ -628,6 +630,10 @@ async fn event_loop(
     }
 
     Ok(())
+}
+
+fn should_handle_key_event(key: &KeyEvent) -> bool {
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
 }
 
 fn ring_terminal_bell<W: std::io::Write>(writer: &mut W) -> std::io::Result<()> {

@@ -21,6 +21,7 @@ use tempfile::NamedTempFile;
 
 use crate::config::MountMode;
 use crate::container::helpers::{blend_toward_bg, luma_u8, xterm_256_index_to_rgb};
+use crate::fs_util::normalize_windows_extended_path;
 use tracing::{instrument, warn};
 
 const INPUT_ECHO_GRACE: Duration = Duration::from_millis(350);
@@ -29,7 +30,7 @@ const INPUT_ECHO_GRACE: Duration = Duration::from_millis(350);
 pub const TERMINAL_SCROLLBACK_LINES: usize = 10_000;
 
 /// Docker label keys stamped on every harness-hat container so that other
-/// processes (e.g. `hh shell`) can discover and identify running sessions
+/// processes (e.g. `hht shell`) can discover and identify running sessions
 /// without depending on the manager being alive.
 pub const LABEL_ALIAS: &str = "harness-hat.alias";
 pub const LABEL_WORKSPACE: &str = "harness-hat.workspace";
@@ -65,7 +66,7 @@ pub struct ContainerSession {
     pub container_name: String,
     pub container_id: String,
     pub docker_name: String,
-    /// Short random id (zero-padded 4 digits) used by `hh shell <alias>`.
+    /// Short random id (zero-padded 4 digits) used by `hht shell <alias>`.
     pub alias: String,
     pub workspace_name: String,
     pub session_token: String,
@@ -254,7 +255,7 @@ impl ContainerSession {
 
     /// Friendly hint shown in the UI for shelling into this session.
     pub fn shell_in_hint(&self) -> String {
-        format!("hh shell {}", self.alias)
+        format!("{} shell {}", crate::cli::COMMAND_NAME, self.alias)
     }
 
     fn terminal_visible_hash(&self) -> u64 {
@@ -396,7 +397,7 @@ fn recent_input_may_have_echoed(last_input_at: Option<Instant>, now: Instant) ->
     last_input_at.is_some_and(|last_input_at| now.duration_since(last_input_at) <= INPUT_ECHO_GRACE)
 }
 
-fn terminal_bottom_lines<T: EventListener>(term: &Term<T>, rows: usize) -> Vec<String> {
+pub(crate) fn terminal_bottom_lines<T: EventListener>(term: &Term<T>, rows: usize) -> Vec<String> {
     let total_rows = term.total_lines();
     if total_rows == 0 || term.columns() == 0 {
         return Vec::new();
@@ -497,7 +498,8 @@ pub(crate) fn docker_bind_mount_args(
     target: &str,
     mode: &MountMode,
 ) -> Result<Vec<String>> {
-    validate_docker_mount_value(source, "mount source")?;
+    let source = normalize_windows_extended_path(source);
+    validate_docker_mount_value(&source, "mount source")?;
     validate_docker_mount_value(target, "mount target")?;
 
     let mut spec = format!("type=bind,source={source},target={target}");
@@ -529,6 +531,26 @@ mod tests {
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     };
+
+    #[test]
+    fn docker_bind_mount_strips_windows_extended_length_prefix() {
+        use crate::config::MountMode;
+        use crate::container::core::docker_bind_mount_args;
+
+        assert_eq!(
+            docker_bind_mount_args(r"\\?\C:\Users\example\repo", "/workspace", &MountMode::Rw,)
+                .expect("mount args"),
+            vec![
+                "--mount".to_string(),
+                r"type=bind,source=C:\Users\example\repo,target=/workspace".to_string(),
+            ]
+        );
+        assert_eq!(
+            docker_bind_mount_args(r"\\?\UNC\server\share\repo", "/workspace", &MountMode::Ro,)
+                .expect("UNC mount args")[1],
+            r"type=bind,source=\\server\share\repo,target=/workspace,readonly"
+        );
+    }
 
     #[test]
     fn loopback_to_host_docker_rewrites_host_without_adding_slash() {

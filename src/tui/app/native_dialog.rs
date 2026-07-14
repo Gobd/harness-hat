@@ -3,7 +3,7 @@
 //!
 //! The manager process owns the OS main thread (current-thread tokio + the
 //! TUI), so it can't host an AppKit/Win32 modal directly. Instead it spawns a
-//! short-lived `hh __dialog network-approval ...` subprocess that has its own
+//! short-lived `hht __dialog network-approval ...` subprocess that has its own
 //! main thread, shows the dialog, and prints a single result line. This module
 //! launches that subprocess for the front pending item, collects its result,
 //! and feeds the decision back through the existing approve/deny paths.
