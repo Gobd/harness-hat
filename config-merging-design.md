@@ -226,6 +226,96 @@ Manager detects platform at startup and picks the right notification backend. Al
 
 **Responsibility split:** hht owns hht prompts (broadcast to all tabs automatically). Claude Code notifications are the user's responsibility — set up hooks using `hostdo` exactly as they did before hht, nothing changes from their perspective.
 
+## Agent Context Injection
+
+At container startup, harness-hat generates an instructions block and injects it into one or more agent context files in the workspace. This tells every major AI coding tool what environment it's in, what commands are available, and what the network policy is — without the user having to write any of this manually.
+
+### How it works
+
+At launch, harness-hat serializes the instructions into a `HARNESS_HAT_AGENT_CONTEXT` env var. `harness-hat-init.sh` reads it and, for each configured target file, either:
+- **Appends** a harness-hat section to an existing file (idempotent — replaces the section if it's already there)
+- **Creates** a minimal file with just the section if none exists
+
+Target files are configured per-project in `harness-rules.toml` (so all "what to tell the agent" lives in one place):
+
+```toml
+# harness-rules.toml
+[agent_context]
+inject_targets = ["CLAUDE.md", ".github/copilot-instructions.md", "AGENTS.md"]
+# default when unset: ["CLAUDE.md"]
+# set to [] to disable entirely
+```
+
+The section is delimited with markers so re-runs are idempotent and project authors can keep their own content above/below:
+
+```
+<!-- harness-hat: begin -->
+...generated content...
+<!-- harness-hat: end -->
+```
+
+For files that use different comment syntax (`.cursorrules`, Cursor's `.cursor/rules/*.mdc`), the markers adapt to that format.
+
+### What the generated block says
+
+Auto-generated from facts known at launch — no user config needed for the basics:
+
+```markdown
+## Environment
+
+You are running inside a Docker container managed by harness-hat.
+Your workspace is mounted at `/workspace` (maps to the project directory on the host).
+You are operating as `coder` (uid 1000) on Linux.
+
+## Commands available on the host
+
+Run a command on the host and capture its output inline:
+  hostdo output <cmd> [args...]
+
+Run a command on the host in the background (returns immediately):
+  hostdo run <cmd> [args...]
+
+Examples:
+  TOKEN=$(hostdo output az account get-access-token --query accessToken -o tsv)
+  hostdo run open https://localhost:3000
+  hostdo output gh pr view --json title,body
+
+Stop and remove this container (only when the user explicitly asks):
+  killme
+
+## Network policy
+
+All outbound HTTP/HTTPS traffic is proxied through harness-hat.
+Requests to unknown hosts will surface a prompt to the developer — do not assume all hosts are reachable.
+
+Pre-approved hosts (no prompt needed):
+- github.com, api.github.com, raw.githubusercontent.com
+- api.anthropic.com, downloads.claude.ai
+- registry.npmjs.org, crates.io, index.crates.io
+- ... (merged from harness-rules.toml allowlist at launch)
+
+Hard-denied hosts (requests will fail immediately, no prompt):
+- ... (from harness-rules.toml denylist)
+```
+
+Any `llm_instructions` set in `harness-rules.toml` are appended after the auto-generated block, so project-specific instructions compose naturally with the standard harness-hat content.
+
+### OSS design principle
+
+The default output is intentionally generic — no company-specific tooling, org names, or requirements. Forks configure their own `inject_targets` and supply custom `llm_instructions` in `harness-rules.toml`. The OSS repo ships only the mechanism; org-specific instructions live in the fork or in the project's own `harness-rules.toml`.
+
+### Section markers by file type
+
+| File | Section style |
+|---|---|
+| `CLAUDE.md`, `AGENTS.md`, `*.md` | `<!-- harness-hat: begin -->` / `<!-- harness-hat: end -->` |
+| `.github/copilot-instructions.md` | same (Markdown) |
+| `.cursorrules` | `# harness-hat: begin` / `# harness-hat: end` |
+| `.cursor/rules/*.mdc` | `<!-- harness-hat: begin -->` / `<!-- harness-hat: end -->` |
+| `.windsurfrules` | `# harness-hat: begin` / `# harness-hat: end` |
+
+---
+
 ## Implementation Order
 
 Two foundational pieces everything else depends on:
