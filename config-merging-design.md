@@ -144,13 +144,13 @@ No detached sessions, no reconnecting, no naming needed. If you want parallel wo
 ```
 hht start                    → start container for cwd, attach shell (walk-up finds config)
 hht start /path/to/project   → start container for explicit path, attach shell
-hht shell                    → attach additional shell to already-running container for cwd
 hht stop                     → stop container for cwd
 hht stop --all               → stop all hht containers
 hht ps                       → list all running hht containers (path, template, uptime)
 hht logs                     → tail container logs for cwd
 hht worktree <branch>        → create worktree + start container for it (see below)
-hht rules add <host>         → append allow rule to project harness-rules.toml
+hht service install/uninstall → manage the background daemon
+hht restart                  → restart the daemon (upgrade path)
 ```
 
 `hht` with no args is an alias for `hht start` in cwd.
@@ -161,7 +161,7 @@ No docker commands needed — containers are tagged at launch (`harness-hat=true
 
 ```
 ✗ container already running for ~/Developer/trust-service
-  attach a new shell:  hht shell
+  use !command in your session for one-off commands
   parallel work:       hht worktree <branch>
 ```
 
@@ -200,6 +200,8 @@ hht worktree list            → show worktrees for this repo (wraps git worktre
 ```
 
 No `hht worktree remove` — use `git worktree remove` directly, that's git's job.
+
+Path and branch collision are handled by `git worktree add` itself — we surface the git error as-is rather than adding a duplicate check.
 
 ### Notifications
 
@@ -318,15 +320,20 @@ The default output is intentionally generic — no company-specific tooling, org
 
 ## Implementation Order
 
-Two foundational pieces everything else depends on:
+**1. Manager becomes a true background daemon** ← foundational, everything depends on this
+Currently too coupled to the TUI process. Needs to: fork+detach at startup, survive the launching process exiting, accept multiple client connections over the Unix socket, broadcast prompt events to all connected clients. Replace TCP control server with Unix socket.
 
-**1. Manager becomes a true background daemon**
-Currently too coupled to the TUI process. Needs to: fork+detach from the terminal at startup, survive the launching process exiting, accept multiple client connections over the Unix socket, broadcast prompt events to all connected clients.
+**2. `hht start` becomes a thin pty passthrough** ← depends on (1)
+Raw terminal in/out to the container pty (`portable-pty` / `rustix-openpty` already in lock file), crossterm for the one-line status bar, connects to manager Unix socket to receive broadcast prompts. Replaces the full ratatui TUI.
 
-**2. `hht start` becomes a thin pty passthrough**
-Raw terminal in/out to the container pty (via `portable-pty` or `rustix-openpty` already in the lock file), crossterm for the one-line status bar, connects to manager socket to receive broadcast prompts. Replaces the current full ratatui TUI.
+**3. Config simplification** ← depends on (1), can overlap with (2)
+Delete `[[workspaces]]` / `WorkspaceConfig` / `best_matching_workspace()`. Implement walk-up discovery. Two-layer merge (global defaults + local `harness-hat.toml`). Add `claude_settings` seeding at container start.
 
-Everything else (config simplification, worktree command, notifications, `hht ps`/`hht stop --all`) is smaller work that builds on top of these two.
+**4. CLI reshaping** ← depends on (1)(2)(3)
+Replace `workspace` / `shell` subcommands with `start`, `stop`, `stop --all`, `ps`, `logs`, `worktree`, `rules add`, `service install/uninstall`, `restart`. `hht` bare = `hht start` in cwd.
+
+**5. Smaller features** ← build on top
+`hht worktree <branch>` wrapper, notifications via `hostdo`, `hht ps` / `hht logs`, service management (launchd/systemd). Agent context injection.
 
 ## Service Management
 
@@ -352,3 +359,60 @@ hht restart            → restart the manager (picks up new binary and config)
 - `version` field
 - Full TUI — replaced by thin pty passthrough + status bar
 - `sidebar_hotkey` — no sidebar
+
+### hostdo language
+
+Currently Python — ships as a script, requires Python in every container image (that's the only reason Python is in the base image). 
+
+Options for the rewrite:
+- **Go** — small static binary, trivial cross-compile for Linux/amd64, stdlib HTTP, single file. Natural fit.
+- **Rust** — same result, reuses the existing codebase language.
+- **Keep Python** — no build step, works anywhere, stdlib only. Fine if image size doesn't matter.
+
+Recommendation: rewrite in Go. Compile in `docker/build.sh`, `COPY` the binary into the base image, remove Python from the Dockerfile entirely.
+
+ (Ready to PR)
+
+### 1. `hostdo output` — run and capture inline
+
+Previously `hostdo` only had `run` (background job returning a UUID). Added `output` subcommand that runs a command, waits for completion, and prints stdout/stderr inline — making it usable in command substitution:
+
+```bash
+TOKEN=$(hostdo output az account get-access-token --resource ... --query accessToken -o tsv)
+```
+
+### 2. `attach_shell` config option
+
+New field on `[defaults.containers]` and `[container_profiles.*]` — sets the shell launched when starting a container. Defaults to `/bin/bash` for backwards compatibility. Stamped as a Docker label at launch.
+
+```toml
+[defaults.containers]
+attach_shell = "/bin/zsh"
+```
+
+### 3. `claude_settings` — per-session settings.json override
+
+New field on `[defaults.containers]` and `[container_profiles.*]`. When set, seeds a private per-session copy of the specified file as the container's `~/.claude/settings.json`. The host `settings.json` is never touched. Useful for having different Claude Code settings inside hht vs on the host (e.g. different MCP servers, different permissions).
+
+```toml
+[defaults.containers]
+claude_settings = "~/.claude/hht-settings.json"
+```
+
+### 4. Zsh + Oh My Zsh in base image
+
+Base image now installs zsh, sets it as the default shell for the `coder` user, and installs Oh My Zsh with `plugins=(git)`. Per-workspace shell history via `HISTFILE=/workspace/.zsh_history` — history persists in the project directory across sessions.
+
+### 5. `docker/build.sh` — convenience rebuild script
+
+New script to rebuild base + language images in one command, with parallel language image builds:
+
+```bash
+./docker/build.sh           # rebuild all
+./docker/build.sh go python # rebuild specific images only
+```
+
+### 6. Better error messages
+
+- `hostdo`: unknown command now lists valid subcommands including `output`
+- Launch failure now suggests where to find logs (the "check the manager TUI logs" message is too vague — logs are at `~/.local/share/harness-hat/harness-hat.log`)
