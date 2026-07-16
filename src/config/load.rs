@@ -172,6 +172,8 @@ pub fn select_workspace_sidebar_hotkey(
         name: workspace_name.to_string(),
         canonical_path: PathBuf::new(),
         sidebar_hotkey: None,
+        template: None,
+        mount_cwd: false,
     });
     resolve_workspace_sidebar_hotkeys(&workspaces)
         .into_iter()
@@ -287,7 +289,13 @@ pub(crate) fn materialize_container_def(
         None => &ContainerProfile::default(),
     };
 
-    let mounts = merge_mounts(&defaults.mounts, session_state_mounts, &profile.mounts);
+    let explicit_mounts = merge_mounts(&defaults.mounts, session_state_mounts, &profile.mounts);
+
+    let allowed_hosts = merge_unique_strings(
+        &defaults.allowed_hosts,
+        &profile.allowed_hosts,
+        &[],
+    );
 
     // Prefer the profile's value for an `Option` field, else the default's.
     macro_rules! prefer {
@@ -306,10 +314,10 @@ pub(crate) fn materialize_container_def(
         command: profile.command.clone(),
         grayscale_palette: prefer!(grayscale_palette).unwrap_or(false),
         starter_network_allowlist: profile.starter_network_allowlist.clone(),
-        allowed_hosts: merge_unique_strings(&defaults.allowed_hosts, &profile.allowed_hosts, &[]),
+        allowed_hosts,
         mcp_log_paths: merge_unique_paths(&defaults.mcp_log_paths, &profile.mcp_log_paths),
         mcp_log_pattern: prefer!(mcp_log_pattern),
-        mounts,
+        mounts: explicit_mounts,
         env: merge_env_vars(&defaults.env, &profile.env),
         env_passthrough: merge_unique_strings(
             &defaults.env_passthrough,
@@ -323,6 +331,7 @@ pub(crate) fn materialize_container_def(
         memory: prefer!(memory),
         cpus: prefer!(cpus),
         shm_size: prefer!(shm_size),
+        attach_shell: prefer!(attach_shell),
     }
 }
 
@@ -558,10 +567,9 @@ fn reject_sensitive_workspace_path(name: &str, canonical: &Path) -> Result<()> {
 /// `/etc`, or `/var/run/docker.sock` (the last being a full host-root escape)
 /// straight into the container (H4).
 fn reject_sensitive_mount_source(context: &str, host: &Path) -> Result<()> {
-    // Compare against the resolved form when the path exists (defeats symlink /
-    // `..` tricks); fall back to the literal path when it does not yet exist.
     let resolved = host.canonicalize();
     let candidate: &Path = resolved.as_deref().unwrap_or(host);
+
     if let Some(hit) = sensitive_path_hit(candidate) {
         anyhow::bail!(
             "{context}: mount.host {} resolves under a sensitive path ({}); refusing to mount",
@@ -575,6 +583,10 @@ fn reject_sensitive_mount_source(context: &str, host: &Path) -> Result<()> {
 /// Return the sensitive root a path equals or lives under, if any. Covers
 /// `/etc`, `~/.ssh`, `~/.gnupg`, and the Docker socket at its common locations.
 fn sensitive_path_hit(candidate: &Path) -> Option<PathBuf> {
+    // Resolve symlinks so `/etc` → `/private/etc` on macOS, etc.
+    let candidate_resolved = candidate.canonicalize();
+    let candidate = candidate_resolved.as_deref().unwrap_or(candidate);
+
     let mut exact_only: Vec<PathBuf> = vec![
         PathBuf::from("/"),
         PathBuf::from("/home"),
@@ -601,8 +613,9 @@ fn sensitive_path_hit(candidate: &Path) -> Option<PathBuf> {
         sensitive.push(home.join(".ssh"));
         sensitive.push(home.join(".gnupg"));
         sensitive.push(home.join(".aws"));
-        sensitive.push(home.join(".azure"));
+
         sensitive.push(home.join(".config/gcloud"));
+        sensitive.push(home.join(".config/gh"));
         sensitive.push(home.join(".docker"));
         sensitive.push(home.join(".kube"));
         sensitive.push(home.join(".netrc"));
@@ -615,8 +628,6 @@ fn sensitive_path_hit(candidate: &Path) -> Option<PathBuf> {
         }
     }
     for s in &sensitive {
-        // Canonicalize the sensitive root too so we compare apples to apples
-        // (e.g. `/etc` may itself be a symlink on some distros).
         let s_can = s.canonicalize();
         let s_ref: &Path = s_can.as_deref().unwrap_or(s.as_path());
         if candidate == s_ref || candidate.starts_with(s_ref) {
@@ -897,7 +908,10 @@ fn validate(config: &Config) -> Result<()> {
                 ctr.name,
                 container_path_string(&mount.container)
             );
-            reject_sensitive_mount_source(&format!("container '{}'", ctr.name), &mount.host)?;
+            reject_sensitive_mount_source(
+                &format!("container '{}'", ctr.name),
+                &mount.host,
+            )?;
         }
         for (key, value) in &ctr.env {
             anyhow::ensure!(

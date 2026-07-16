@@ -52,6 +52,24 @@ RUN set -eu; \
     mkdir -p "${GOPATH}/bin"; \
     chown -R coder:coder "${GOPATH}"
 
+# gofumpt: stricter gofmt, pinned release binary verified against sha256.
+ARG GOFUMPT_VERSION=0.10.0
+ARG GOFUMPT_SHA256_AMD64=48ee398ec72afdaca6accb70f5ed741349d5dcccb52c5bb4c4469d698980b186
+ARG GOFUMPT_SHA256_ARM64=5d239f93b1ed2dfe74d39b25112bb770a04f6581f986d4b4f5d380521e12ca61
+RUN set -eu; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+        amd64|x86_64)  gf_arch="amd64"; gf_sha="${GOFUMPT_SHA256_AMD64}" ;; \
+        arm64|aarch64) gf_arch="arm64"; gf_sha="${GOFUMPT_SHA256_ARM64}" ;; \
+        *) echo "unsupported gofumpt architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL \
+        -o /tmp/gofumpt \
+        "https://github.com/mvdan/gofumpt/releases/download/v${GOFUMPT_VERSION}/gofumpt_v${GOFUMPT_VERSION}_linux_${gf_arch}"; \
+    echo "${gf_sha}  /tmp/gofumpt" | sha256sum -c -; \
+    install -m 0755 /tmp/gofumpt /usr/local/bin/gofumpt; \
+    rm -f /tmp/gofumpt; \
+    gofumpt --version
+
 USER coder
 
 ENV GOPATH=/home/coder/go

@@ -104,6 +104,8 @@ impl App {
         let WorkspaceLaunchItem {
             workspace_name,
             template,
+            force_rebuild,
+            cwd,
             event_tx,
         } = item;
 
@@ -153,7 +155,13 @@ impl App {
             message: format!("checking docker image {image}"),
         });
 
-        match docker_image_exists(&image) {
+        let image_check = if force_rebuild {
+            Ok(false) // treat as missing to force a build
+        } else {
+            docker_image_exists(&image)
+        };
+
+        match image_check {
             Ok(false) => {
                 // Another build is already in flight: refuse rather than
                 // clobber `build_task` / `workspace_launch_pending`.
@@ -181,6 +189,7 @@ impl App {
                 self.build_container_idx = Some(template_idx);
                 self.build_session_group = None;
                 self.build_cursor = 0; // "build + launch" branch
+                self.pending_force_rebuild = force_rebuild;
                 self.run_build_action();
                 if self.build_task.is_none() {
                     return finish_launch_stream(
@@ -197,6 +206,7 @@ impl App {
                     template,
                     workspace_idx,
                     template_idx,
+                    cwd,
                 });
             }
             other => {
@@ -218,6 +228,7 @@ impl App {
                     template_idx,
                     &workspace_name,
                     &template,
+                    cwd,
                 );
                 finish_launch_stream(&event_tx, outcome);
             }
@@ -234,6 +245,7 @@ impl App {
         template_idx: usize,
         workspace_name: &str,
         template: &str,
+        cwd: Option<PathBuf>,
     ) -> Result<WorkspaceLaunchResponse, String> {
         let before_len = self.sessions.len();
         self.do_launch_container_on_workspace_with_priority_and_env(
@@ -242,6 +254,7 @@ impl App {
             crate::proxy::SourcePriority::Primary,
             &[],
             None,
+            cwd,
         );
         if self.sessions.len() == before_len {
             return Err(format!(
@@ -275,6 +288,7 @@ impl App {
             proxy_priority,
             &[],
             session_group,
+            None,
         );
     }
 
@@ -285,6 +299,7 @@ impl App {
         proxy_priority: crate::proxy::SourcePriority,
         extra_env: &[(String, String)],
         session_group: Option<usize>,
+        launch_cwd: Option<PathBuf>,
     ) {
         let Some(ctr) = self.workspace_template_for_workspace(pi, ctr_idx) else {
             return;
@@ -307,7 +322,11 @@ impl App {
             return;
         }
 
-        let mount_source_path = proj.canonical_path.clone();
+        let mount_source_path = if proj.mount_cwd {
+            launch_cwd.unwrap_or_else(|| proj.canonical_path.clone())
+        } else {
+            proj.canonical_path.clone()
+        };
         self.log_workspace_rules_status(&proj);
 
         let control_port = cfg.defaults.control.server_port;
@@ -473,6 +492,7 @@ mod tests {
             memory: None,
             cpus: None,
             shm_size: None,
+            attach_shell: None,
         };
 
         assert_eq!(
@@ -507,6 +527,7 @@ mod tests {
             memory: None,
             cpus: None,
             shm_size: None,
+            attach_shell: None,
         };
         assert_eq!(App::container_command_for_profile(&profile), None);
     }

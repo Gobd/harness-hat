@@ -18,7 +18,7 @@ use std::io::{IsTerminal, Write};
 use std::process::Command;
 
 use crate::container::{
-    LABEL_ALIAS, LABEL_TEMPLATE, LABEL_WORKSPACE, SHELL_HOME, SHELL_USER, parse_docker_label,
+    LABEL_ALIAS, LABEL_TEMPLATE, LABEL_WORKSPACE, LABEL_SHELL, SHELL_HOME, SHELL_USER, parse_docker_label,
 };
 
 /// Entry point for the `shell` subcommand. With an id, attaches to that
@@ -126,6 +126,18 @@ fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
 
 /// Run `docker exec` against a container with optional trailing argv (or
 /// `/bin/bash` when empty), with the same TTY auto-detect + signal guarding +
+fn read_container_label(container_name: &str, label: &str) -> Result<String> {
+    let output = Command::new("docker")
+        .args(["inspect", "-f", &format!("{{{{index .Config.Labels \"{label}\"}}}}"), container_name])
+        .output()
+        .context("running docker inspect")?;
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() || value == "<no value>" {
+        anyhow::bail!("label {label} not set on container {container_name}");
+    }
+    Ok(value)
+}
+
 /// host-terminal cleanup the interactive shell flow needs. Reused by
 /// `hht workspace`.
 ///
@@ -143,10 +155,13 @@ fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
 /// by `docker exec` (which forwards them through the PTY) and we survive to
 /// run the cleanup.
 pub(crate) fn exec_into_container(container_name: &str, extra_args: &[OsString]) -> Result<i32> {
-    // `-it` requires a TTY on stdin; without one (e.g. piped input) docker
-    // exec refuses to start. Drop `-t` when stdin isn't a terminal so
-    // `echo ... | hht shell ID cat` works.
     let stdin_is_tty = std::io::stdin().is_terminal();
+
+    // Read the shell label stamped at launch time; fall back to bash for
+    // containers started before this feature existed.
+    let attach_shell = read_container_label(container_name, LABEL_SHELL)
+        .unwrap_or_else(|_| "/bin/bash".to_string());
+
     let mut command = Command::new("docker");
     command.args([
         "exec",
@@ -158,7 +173,7 @@ pub(crate) fn exec_into_container(container_name: &str, extra_args: &[OsString])
         container_name,
     ]);
     if extra_args.is_empty() {
-        command.arg("/bin/bash");
+        command.arg(&attach_shell);
     } else {
         command.args(extra_args);
     }

@@ -49,10 +49,14 @@ Inside the TUI: pick a workspace, pick a template, get a shell. From inside the 
 With the manager running in another terminal, you can also attach to or start the session for your current directory:
 
 ```sh
-hht workspace                  # match $PWD to a workspace, launch if needed, then attach
-hht workspace --template rust  # skip the template picker
-hht workspace claude --resume  # runs "claude --resume" inside the session
+hht workspace                          # match $PWD to a workspace, launch if needed, attach
+hht workspace --template go         # skip the template picker, use a specific profile
+hht workspace --name trust-service     # jump to a named workspace without cd-ing in
+hht workspace --rebuild                # rebuild the image (--no-cache) before launching
+hht workspace claude --resume          # runs "claude --resume" inside the session
 ```
+
+The first time you launch a workspace, `hht workspace` saves the chosen template to your config. Every subsequent launch skips the picker and goes straight in. Pass `--template` to override it.
 
 To attach to an already-running session from a separate terminal:
 
@@ -90,15 +94,40 @@ The base image is Ubuntu 24.04 with Node 22, bundled agent CLIs (`claude`, `code
 
 On Windows, Codex auth, config, rules, skills, and plugins are copied into private container-local state at session startup. Its SQLite databases, logs, and caches stay inside the Linux container instead of being opened through Docker Desktop's Windows bind filesystem, which does not provide the locking semantics Codex requires. Host state is mounted read-only during this seed step.
 
-| Stem         | Toolchain                                                          |
-|--------------|--------------------------------------------------------------------|
-| `default`    | Node, pnpm, TypeScript, `tsx`, Bun                                 |
-| `typescript` | TypeScript, Bun, npm, Node, pnpm, Vite, ESLint, Prettier           |
-| `go`         | Go, `gopls`, Delve, `staticcheck`, `golangci-lint`                 |
-| `rust`       | Rust stable + rustfmt, clippy, rust-analyzer, nextest, audit, deny |
-| `php`        | PHP CLI/dev, Composer, PHPUnit, PHP-CS-Fixer, PHPStan, Pint, Xdebug, PCOV |
+| Stem         | Toolchain                                                                   |
+|--------------|-----------------------------------------------------------------------------|
+| `default`    | Node, pnpm, TypeScript, `tsx`, Bun                                          |
+| `typescript` | TypeScript, Bun, npm, Node, pnpm, Vite, ESLint, Prettier                    |
+| `go`         | Go, `gopls`, Delve, `staticcheck`, `golangci-lint`                          |
+| `rust`       | Rust stable + rustfmt, clippy, rust-analyzer, nextest, audit, deny          |
+| `python`     | uv, Python 3.13 (via uv)                                                    |
+| `kotlin`     | Temurin JDK 21, kotlinc, Gradle                                             |
+| `csharp`     | .NET 10 SDK (LTS) + .NET 8 SDK                                              |
+| `php`        | PHP CLI/dev, Composer, PHPUnit, PHP-CS-Fixer, PHPStan, Pint, Xdebug, PCOV  |
 
 Drop your own `something.dockerfile` under `docker_dir` and reference it as `image = "something"`. Workspace-local `*.dockerfile` files are also auto-discovered as launch templates when their first non-comment instruction is `FROM harness-hat-base:local`.
+
+### SDK/runtime version management
+
+Each template handles language version selection differently:
+
+**Python (`python`)** — `uv` manages Python versions automatically. Set `requires-python = ">=3.11"` in `pyproject.toml` or add a `.python-version` file and `uv sync` / `uv run` will download and use the right Python without any extra steps. The image pre-installs Python 3.13 to seed the uv cache; other versions are fetched on demand.
+
+**Go (`go`)** — `GOTOOLCHAIN=auto` is set in the image. If a module's `go.mod` specifies a newer toolchain than the one installed, Go downloads it automatically on first use.
+
+**C# (`csharp`)** — Both .NET 10 (LTS, active until 2028) and .NET 8 (maintenance until 2026) SDKs are installed side-by-side. The `dotnet` CLI selects the right one via a [`global.json`](https://learn.microsoft.com/en-us/dotnet/core/tools/global-json) at the project root:
+```json
+{ "sdk": { "version": "8.0.400", "rollForward": "latestFeature" } }
+```
+If no `global.json` is present, the highest installed SDK (10) is used.
+
+**Kotlin/JVM (`kotlin`)** — The system `kotlinc` is for one-off scripts. Real projects use Gradle, which downloads the Kotlin version specified in `build.gradle.kts` automatically. For JDK version selection, add the [Foojay toolchain resolver](https://github.com/gradle/foojay-toolchains) to `settings.gradle.kts`:
+```kotlin
+plugins {
+    id("org.gradle.toolchains.foojay-resolver-convention") version "0.9.0"
+}
+```
+Then Gradle will auto-download whichever JDK version your build requests via `java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }`. Add `api.foojay.io` to the profile's `starter_network_allowlist` to allow the download.
 
 ### YOLO wrappers
 

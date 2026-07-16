@@ -411,10 +411,17 @@ impl App {
     const NEW_PROJECT_ROW_COUNT: usize = 5;
 
     pub(crate) fn open_new_workspace(&mut self) {
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let default_name = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_default();
         self.new_workspace = Some(NewWorkspaceState {
             cursor: 0,
-            name: String::new(),
-            workspace_dir: String::new(),
+            name: default_name,
+            workspace_dir: cwd,
             project_type: crate::new_project::ProjectType::None,
             error: None,
         });

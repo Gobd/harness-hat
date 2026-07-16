@@ -11,6 +11,12 @@ pub struct WorkspaceConfig {
     pub canonical_path: PathBuf,
     #[serde(default)]
     pub sidebar_hotkey: Option<String>,
+    #[serde(default)]
+    pub template: Option<String>,
+    /// When true, mount the cwd at launch time instead of `canonical_path`.
+    /// `canonical_path` is still used for workspace matching.
+    #[serde(default)]
+    pub mount_cwd: bool,
 }
 
 impl Default for WorkspaceConfig {
@@ -19,6 +25,8 @@ impl Default for WorkspaceConfig {
             name: String::new(),
             canonical_path: PathBuf::new(),
             sidebar_hotkey: None,
+            template: None,
+            mount_cwd: false,
         }
     }
 }
@@ -89,6 +97,10 @@ pub struct ContainerDef {
     /// Optional Docker shared memory size, e.g. `1g`.
     #[serde(default)]
     pub shm_size: Option<String>,
+    /// Shell binary to use when attaching to this container, e.g. `/bin/zsh`.
+    /// Defaults to `/bin/bash` when unset.
+    #[serde(default)]
+    pub attach_shell: Option<String>,
 }
 
 /// Named container profile used directly as a launch target.
@@ -127,6 +139,8 @@ pub struct ContainerProfile {
     pub cpus: Option<String>,
     #[serde(default)]
     pub shm_size: Option<String>,
+    #[serde(default)]
+    pub attach_shell: Option<String>,
 }
 
 /// Shared defaults merged into every container definition.
@@ -157,6 +171,8 @@ pub struct ContainerDefaults {
     pub cpus: Option<String>,
     #[serde(default)]
     pub shm_size: Option<String>,
+    #[serde(default)]
+    pub attach_shell: Option<String>,
 }
 
 pub(crate) fn default_mount_target() -> PathBuf {
@@ -235,6 +251,17 @@ pub struct ContainerMount {
 }
 
 impl ContainerMount {
+    /// Convenience constructor for a read-only mount. The container path is
+    /// always a string literal so unwrap is safe.
+    pub fn ro(host: PathBuf, container: &str) -> Self {
+        Self {
+            host,
+            container: PathBuf::from(container),
+            mode: MountMode::Ro,
+            seed: None,
+        }
+    }
+
     /// Whether this mount is seeded as a private per-session copy rather than
     /// bind-mounted live (see [`ContainerMount::seed`]). When `seed` is unset,
     /// defaults to seeding only `.claude.json`. This is the single source of

@@ -23,6 +23,8 @@ use crate::config::{Config, ContainerDef, WorkspaceConfig};
 pub fn run(
     args: Vec<OsString>,
     template_override: Option<String>,
+    name_override: Option<String>,
+    force_rebuild: bool,
     explicit_config: Option<PathBuf>,
 ) -> Result<i32> {
     if which::which("docker").is_err() {
@@ -65,7 +67,14 @@ pub fn run(
         .canonicalize()
         .context("canonicalizing current working directory")?;
 
-    if let Some(matched) = best_matching_workspace(&config, &pwd) {
+    // Match workspace by --name flag first, then by cwd.
+    let matched = if let Some(ref n) = name_override {
+        config.workspaces.iter().find(|w| w.name == *n).cloned()
+    } else {
+        best_matching_workspace(&config, &pwd).cloned()
+    };
+
+    if let Some(matched) = matched {
         println!(
             "using workspace \"{}\" at {}",
             matched.name,
@@ -75,12 +84,21 @@ pub fn run(
             println!("attaching to running session {}", session.alias);
             return crate::shell::exec_into_container(&session.name, &args);
         }
+        // Use saved template as default if no override provided.
+        let effective_override = template_override
+            .as_deref()
+            .or(matched.template.as_deref());
         let template = choose_template(
             &config,
             matched.canonical_path.as_path(),
-            template_override.as_deref(),
+            effective_override,
         )?;
-        let resp = post_launch(&control_url, &token, &matched.name, &template)?;
+        // Persist chosen template back to config if it changed.
+        if matched.template.as_deref() != Some(&template) {
+            let _ = save_workspace_template(&config_path, &matched.name, &template);
+        }
+        let launch_cwd = matched.mount_cwd.then(|| pwd.to_str()).flatten();
+        let resp = post_launch(&control_url, &token, &matched.name, &template, force_rebuild, launch_cwd)?;
         println!(
             "launched session {} ({}); attaching",
             resp.alias, resp.docker_name
@@ -105,9 +123,12 @@ pub fn run(
         name: workspace_name.clone(),
         canonical_path: pwd.clone(),
         sidebar_hotkey: None,
+        template: None,
+        mount_cwd: false,
     });
     let template = choose_template(&config, pwd.as_path(), template_override.as_deref())?;
-    let resp = post_launch(&control_url, &token, &workspace_name, &template)?;
+    let _ = save_workspace_template(&config_path, &workspace_name, &template);
+    let resp = post_launch(&control_url, &token, &workspace_name, &template, force_rebuild, None)?;
     println!(
         "launched session {} ({}); attaching",
         resp.alias, resp.docker_name
@@ -180,11 +201,27 @@ pub(crate) fn best_matching_workspace<'a>(
         .max_by_key(|w| w.canonical_path.components().count())
 }
 
+
+fn save_workspace_template(config_path: &Path, workspace_name: &str, template: &str) -> Result<()> {
+    use toml_edit::DocumentMut;
+    let raw = std::fs::read_to_string(config_path)?;
+    let mut doc = raw.parse::<DocumentMut>()?;
+    if let Some(workspaces) = doc.get_mut("workspaces").and_then(|v| v.as_array_of_tables_mut()) {
+        for entry in workspaces.iter_mut() {
+            if entry.get("name").and_then(|v| v.as_str()) == Some(workspace_name) {
+                entry["template"] = toml_edit::value(template);
+                break;
+            }
+        }
+    }
+    crate::config::atomic_write_with_lock(config_path, doc.to_string().as_bytes())?;
+    Ok(())
+}
+
 /// Dedupe a candidate workspace name against `config.workspaces` by appending
 /// `-2`, `-3`, … until a free slot is found. Mirrors what users would write by
 /// hand when two repos share a directory basename.
-pub(crate) fn dedupe_workspace_name(config: &Config, base: &str) -> String {
-    let base = base.trim();
+pub(crate) fn dedupe_workspace_name(config: &Config, base: &str) -> String {    let base = base.trim();
     let base = if base.is_empty() { "workspace" } else { base };
     let used: std::collections::HashSet<&str> =
         config.workspaces.iter().map(|w| w.name.as_str()).collect();
@@ -344,6 +381,8 @@ fn post_launch(
     token: &str,
     workspace_name: &str,
     template: &str,
+    force_rebuild: bool,
+    cwd: Option<&str>,
 ) -> Result<LaunchResponse> {
     // No total-request timeout: a long build (cold image pull + multi-stage)
     // can legitimately take many minutes, and a `timeout` here would abort
@@ -354,10 +393,14 @@ fn post_launch(
         .connect_timeout(Duration::from_secs(5))
         .build()
         .context("building http client")?;
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "workspace_name": workspace_name,
         "template": template,
+        "force_rebuild": force_rebuild,
     });
+    if let Some(cwd) = cwd {
+        body["cwd"] = serde_json::Value::String(cwd.to_string());
+    }
     let resp = client
         .post(format!("{control_url}/workspace/launch"))
         .bearer_auth(token)
@@ -438,6 +481,8 @@ mod tests {
             name: name.to_string(),
             canonical_path: PathBuf::from(canonical_path),
             sidebar_hotkey: None,
+            template: None,
+            mount_cwd: false,
         }
     }
 

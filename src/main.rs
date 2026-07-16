@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
             let code = harness_hat::shell::run(id, args)?;
             std::process::exit(code);
         }
-        Some(Command::Workspace { template, args }) => {
+        Some(Command::Workspace { template, name, rebuild, args }) => {
             // `workspace::run` uses `reqwest::blocking`, which spins up an
             // inner tokio runtime and drops it on the way out. Doing that
             // from inside `#[tokio::main]`'s runtime context panics
@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
             // runtime thread.
             let config = cli.config.clone();
             let code = tokio::task::spawn_blocking(move || {
-                harness_hat::workspace::run(args, template, config)
+                harness_hat::workspace::run(args, template, name, rebuild, config)
             })
             .await
             .context("workspace task panicked")??;

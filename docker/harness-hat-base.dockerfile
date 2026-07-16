@@ -1,3 +1,7 @@
+# harness-hat base image — shared foundation for all language images.
+# After modifying this file, rebuild with: ./docker/build.sh
+# (This also rebuilds all language images that extend it.)
+
 FROM rust:1.88-slim-bookworm AS tun2proxy-build
 
 ENV GIT_HASH=crates-io
@@ -68,6 +72,7 @@ RUN apt-get update -o APT::Update::Error-Mode=any && apt-get install -y --no-ins
       python3-pip \
       python3-venv \
       unzip \
+      ripgrep \
       bubblewrap \
       htop \
       iproute2 \
@@ -76,17 +81,41 @@ RUN apt-get update -o APT::Update::Error-Mode=any && apt-get install -y --no-ins
       dbus-user-session \
       gnome-keyring \
       libsecret-tools \
+      zsh \
     && rm -rf /var/lib/apt/lists/*
+
+# ast-grep: structural/AST-aware code search across all supported languages.
+# Pinned release binary verified against sha256 from GitHub release assets.
+ARG ASTGREP_VERSION=0.44.1
+ARG ASTGREP_SHA256_AMD64=611f9e5e76f2611ecea1a35dd3468ceedf600641a11224b80341d79c6ee7b9dd
+ARG ASTGREP_SHA256_AARCH64=077a4ab0c628154ef3cb79fecaf11dabca7f8a41f2c7260c022f263a52c1b021
+ARG TARGETARCH
+RUN set -eu; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+        amd64|x86_64)  sg_arch="x86_64-unknown-linux-gnu";   sg_sha="${ASTGREP_SHA256_AMD64}" ;; \
+        arm64|aarch64) sg_arch="aarch64-unknown-linux-gnu"; sg_sha="${ASTGREP_SHA256_AARCH64}" ;; \
+        *) echo "unsupported ast-grep architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL \
+        -o /tmp/sg.zip \
+        "https://github.com/ast-grep/ast-grep/releases/download/${ASTGREP_VERSION}/app-${sg_arch}.zip"; \
+    echo "${sg_sha}  /tmp/sg.zip" | sha256sum -c -; \
+    unzip -q /tmp/sg.zip -d /tmp/sg-extract; \
+    cp /tmp/sg-extract/sg /usr/local/bin/sg; \
+    cp /tmp/sg-extract/ast-grep /usr/local/bin/ast-grep; \
+    chmod 0755 /usr/local/bin/sg /usr/local/bin/ast-grep; \
+    rm -rf /tmp/sg.zip /tmp/sg-extract; \
+    sg --version
 
 # Match Coder's conventional non-root user while keeping uid/gid 1000 for
 # host-mounted auth and workspace files.
 RUN set -eu; \
     if getent passwd ubuntu >/dev/null 2>&1; then \
       groupmod -n coder ubuntu; \
-      usermod -l coder -d /home/coder -m -s /bin/bash ubuntu; \
+      usermod -l coder -d /home/coder -m -s /bin/zsh ubuntu; \
     elif ! getent passwd coder >/dev/null 2>&1; then \
       groupadd -g 1000 coder; \
-      useradd -m -u 1000 -g 1000 -s /bin/bash coder; \
+      useradd -m -u 1000 -g 1000 -s /bin/zsh coder; \
     fi; \
     # Keep /home/ubuntu as a legacy alias for older configs and mounts.
     if [ ! -e /home/ubuntu ]; then \
@@ -546,9 +575,24 @@ RUN mkdir -p /home/coder/.local/bin /home/coder/.codex \
                  /home/coder/.local/bin/codex-yolo \
                  /home/coder/.local/bin/agy-yolo
 
+# Minimal zshrc: per-workspace history.
+RUN cat > /home/coder/.zshrc <<'EOF'
+HISTFILE="/workspace/.zsh_history"
+HISTSIZE=10000
+SAVEHIST=10000
+setopt SHARE_HISTORY APPEND_HISTORY HIST_IGNORE_DUPS
+EOF
+
+# Oh My Zsh with git plugin.
+RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended \
+    && sed -i 's/^plugins=.*/plugins=(git)/' /home/coder/.zshrc \
+    && echo 'HISTFILE="/workspace/.zsh_history"' >> /home/coder/.zshrc \
+    && echo 'HISTSIZE=10000' >> /home/coder/.zshrc \
+    && echo 'SAVEHIST=10000' >> /home/coder/.zshrc
+
 # Keep user-installed tools and the bundled wrappers ahead of system paths.
 ENV PATH="/home/coder/.local/bin:${PATH}"
 WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/harness-hat-init.sh"]
-CMD ["/bin/bash"]
+CMD ["/bin/zsh"]

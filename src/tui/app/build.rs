@@ -109,20 +109,27 @@ impl App {
         image: &str,
         dockerfile_context: &Path,
         base_dockerfile_dir: &Path,
+        no_cache: bool,
     ) -> (Vec<String>, Option<Vec<String>>) {
-        let cmd = vec![
-            "build".to_string(),
+        let mut cmd = vec!["build".to_string()];
+        if no_cache {
+            cmd.push("--no-cache".to_string());
+        }
+        cmd.extend([
             "-t".to_string(),
             image.to_string(),
             "-f".to_string(),
             dockerfile_path.display().to_string(),
             dockerfile_context.display().to_string(),
-        ];
+        ]);
         let base_cmd = if image == Self::BASE_IMAGE_TAG {
             None
         } else {
-            Some(vec![
-                "build".to_string(),
+            let mut base = vec!["build".to_string()];
+            if no_cache {
+                base.push("--no-cache".to_string());
+            }
+            base.extend([
                 "-t".to_string(),
                 Self::BASE_IMAGE_TAG.to_string(),
                 "-f".to_string(),
@@ -131,7 +138,8 @@ impl App {
                     .display()
                     .to_string(),
                 base_dockerfile_dir.display().to_string(),
-            ])
+            ]);
+            Some(base)
         };
         (cmd, base_cmd)
     }

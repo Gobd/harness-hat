@@ -53,6 +53,14 @@ pub enum Command {
         /// Use a specific container template instead of prompting.
         #[arg(long, value_name = "NAME")]
         template: Option<String>,
+        /// Jump directly to a named workspace instead of matching by cwd.
+        #[arg(long, value_name = "WORKSPACE")]
+        name: Option<String>,
+        /// Rebuild the container image (and its base) before launching,
+        /// bypassing the Docker layer cache. Useful after updating Dockerfiles
+        /// or to pick up a newer version of an installed tool (e.g. claude-code).
+        #[arg(long)]
+        rebuild: bool,
         #[arg(
             value_name = "COMMAND",
             trailing_var_arg = true,
@@ -185,7 +193,7 @@ mod tests {
     #[test]
     fn workspace_subcommand_parses_template_and_trailing_args() {
         let cli = parse_from(argv(&["hht", "workspace"])).expect("parse");
-        let Some(Command::Workspace { template, args }) = cli.command else {
+        let Some(Command::Workspace { template, args, .. }) = cli.command else {
             panic!("expected Workspace");
         };
         assert!(template.is_none());
@@ -200,7 +208,7 @@ mod tests {
             "--resume",
         ]))
         .expect("parse");
-        let Some(Command::Workspace { template, args }) = cli.command else {
+        let Some(Command::Workspace { template, args, .. }) = cli.command else {
             panic!("expected Workspace");
         };
         assert_eq!(template.as_deref(), Some("dev"));

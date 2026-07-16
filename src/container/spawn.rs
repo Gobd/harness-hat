@@ -17,7 +17,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::config::{ContainerDef, MountMode, container_path_file_name, container_path_string};
 use crate::container::core::{
-    LABEL_ALIAS, LABEL_SESSION, LABEL_TEMPLATE, LABEL_WORKSPACE, TERMINAL_SCROLLBACK_LINES,
+    LABEL_ALIAS, LABEL_SESSION, LABEL_SHELL, LABEL_TEMPLATE, LABEL_WORKSPACE, TERMINAL_SCROLLBACK_LINES,
     TermSize, docker_bind_mount_args, loopback_to_host_docker, parse_docker_label,
     sanitize_docker_name, terminal_bottom_lines,
 };
@@ -107,11 +107,15 @@ pub fn spawn(
     let label_workspace = sanitize_label_value(project_name);
     let label_template = sanitize_label_value(ctr.name.as_str());
     let label_session = sanitize_label_value(session_token);
+    let label_shell = sanitize_label_value(
+        ctr.attach_shell.as_deref().unwrap_or("/bin/bash"),
+    );
     for (key, value) in [
         (LABEL_ALIAS, label_alias.as_str()),
         (LABEL_WORKSPACE, label_workspace.as_str()),
         (LABEL_TEMPLATE, label_template.as_str()),
         (LABEL_SESSION, label_session.as_str()),
+        (LABEL_SHELL, label_shell.as_str()),
     ] {
         docker_args.push("--label".to_string());
         docker_args.push(format!("{key}={value}"));
