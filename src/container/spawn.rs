@@ -365,10 +365,25 @@ pub fn spawn(
     //
     // Mounts are sorted by container path depth (shortest first) so that
     // directory mounts are applied before any file mounts nested inside them.
+    // If a claude_settings source is configured, inject a seeded mount for the
+    // container's settings.json so it gets a private copy without touching the
+    // host file. This is built as an owned vec so it survives the borrow below.
+    let claude_settings_mount: Option<crate::config::ContainerMount> =
+        ctr.claude_settings.as_ref().map(|src| crate::config::ContainerMount {
+            host: src.clone(),
+            container: std::path::PathBuf::from("/home/coder/.claude/settings.json"),
+            mode: crate::config::MountMode::Rw,
+            seed: Some(true),
+        });
+    let mut all_mounts: Vec<crate::config::ContainerMount> = ctr.mounts.clone();
+    if let Some(m) = claude_settings_mount {
+        all_mounts.push(m);
+    }
+
     // Docker applies bind mounts in order, so a file mount on e.g.
     // `/home/coder/.claude/.claude.json` must come *after* the directory mount
     // on `/home/coder/.claude` — otherwise the directory mount overwrites it.
-    let mut sorted_mounts: Vec<&crate::config::ContainerMount> = ctr.mounts.iter().collect();
+    let mut sorted_mounts: Vec<&crate::config::ContainerMount> = all_mounts.iter().collect();
     sorted_mounts.sort_by_key(|m| {
         container_path_string(&m.container)
             .split('/')

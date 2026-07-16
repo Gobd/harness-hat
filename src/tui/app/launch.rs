@@ -493,6 +493,7 @@ mod tests {
             cpus: None,
             shm_size: None,
             attach_shell: None,
+        claude_settings: None,
         };
 
         assert_eq!(
@@ -528,6 +529,7 @@ mod tests {
             cpus: None,
             shm_size: None,
             attach_shell: None,
+        claude_settings: None,
         };
         assert_eq!(App::container_command_for_profile(&profile), None);
     }

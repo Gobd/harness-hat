@@ -101,6 +101,11 @@ pub struct ContainerDef {
     /// Defaults to `/bin/bash` when unset.
     #[serde(default)]
     pub attach_shell: Option<String>,
+    /// Host path to seed as the container's `~/.claude/settings.json`.
+    /// When set, the container gets a private copy of this file at launch —
+    /// the host settings.json is never modified.
+    #[serde(default)]
+    pub claude_settings: Option<PathBuf>,
 }
 
 /// Named container profile used directly as a launch target.
@@ -141,6 +146,8 @@ pub struct ContainerProfile {
     pub shm_size: Option<String>,
     #[serde(default)]
     pub attach_shell: Option<String>,
+    #[serde(default)]
+    pub claude_settings: Option<PathBuf>,
 }
 
 /// Shared defaults merged into every container definition.
@@ -173,6 +180,8 @@ pub struct ContainerDefaults {
     pub shm_size: Option<String>,
     #[serde(default)]
     pub attach_shell: Option<String>,
+    #[serde(default)]
+    pub claude_settings: Option<PathBuf>,
 }
 
 pub(crate) fn default_mount_target() -> PathBuf {

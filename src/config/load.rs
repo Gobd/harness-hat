@@ -332,6 +332,9 @@ pub(crate) fn materialize_container_def(
         cpus: prefer!(cpus),
         shm_size: prefer!(shm_size),
         attach_shell: prefer!(attach_shell),
+        claude_settings: prefer!(claude_settings)
+            .map(|p| expand_path(&p).ok())
+            .flatten(),
     }
 }
 

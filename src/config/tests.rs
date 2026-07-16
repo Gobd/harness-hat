@@ -31,6 +31,7 @@ fn container_def_for_test(name: &str, image: &str, image_stem: &str) -> Containe
         cpus: None,
         shm_size: None,
         attach_shell: None,
+        claude_settings: None,
     }}
 
 fn with_temp_home<R>(home: &Path, f: impl FnOnce() -> R) -> R {
@@ -194,12 +195,14 @@ fn workspace_hotkeys_are_assigned_without_duplicates() {
             canonical_path: std::path::PathBuf::from("/tmp/a"),
             sidebar_hotkey: Some("z".to_string()),
             template: None,
+            mount_cwd: false,
         },
         super::WorkspaceConfig {
             name: "beta".to_string(),
             canonical_path: std::path::PathBuf::from("/tmp/b"),
             sidebar_hotkey: Some("z".to_string()),
             template: None,
+            mount_cwd: false,
         },
     ];
     let hotkeys = resolve_workspace_sidebar_hotkeys(&workspaces);
@@ -251,6 +254,7 @@ fn workspace_container_templates_include_local_dockerfiles_with_base_tag() {
             localhost_forwards: Vec::new(),
             shm_size: Some("1g".to_string()),
             attach_shell: None,
+        claude_settings: None,
         };
 
         let templates = resolve_workspace_container_templates(&workspace, &defaults, &configured)
@@ -333,6 +337,7 @@ fn workspace_container_templates_merge_deduplicates_matching_names() {
             localhost_forwards: Vec::new(),
             shm_size: None,
             attach_shell: None,
+        claude_settings: None,
         };
 
         let templates = resolve_workspace_container_templates(&workspace, &defaults, &configured)
