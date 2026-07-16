@@ -226,9 +226,36 @@ Manager detects platform at startup and picks the right notification backend. Al
 
 **Responsibility split:** hht owns hht prompts (broadcast to all tabs automatically). Claude Code notifications are the user's responsibility — set up hooks using `hostdo` exactly as they did before hht, nothing changes from their perspective.
 
-## What Goes Away
+## Implementation Order
 
-- `[[workspaces]]` — removed, no migration shim
+Two foundational pieces everything else depends on:
+
+**1. Manager becomes a true background daemon**
+Currently too coupled to the TUI process. Needs to: fork+detach from the terminal at startup, survive the launching process exiting, accept multiple client connections over the Unix socket, broadcast prompt events to all connected clients.
+
+**2. `hht start` becomes a thin pty passthrough**
+Raw terminal in/out to the container pty (via `portable-pty` or `rustix-openpty` already in the lock file), crossterm for the one-line status bar, connects to manager socket to receive broadcast prompts. Replaces the current full ratatui TUI.
+
+Everything else (config simplification, worktree command, notifications, `hht ps`/`hht stop --all`) is smaller work that builds on top of these two.
+
+## Service Management
+
+The manager runs as a proper system service — survives reboots, no manual start needed. One binary, `hht daemon` subcommand.
+
+Platform integration:
+- **macOS** — launchd plist at `~/Library/LaunchAgents/com.harness-hat.manager.plist`
+- **Linux** — systemd user unit at `~/.config/systemd/user/harness-hat.service`
+- **Windows** — scheduled task at login (or Windows Service via `windows-service` crate)
+
+```
+hht service install    → install and start the manager as a system service
+hht service uninstall  → remove it
+hht restart            → restart the manager (picks up new binary and config)
+```
+
+`hht restart` is the upgrade path — `brew upgrade harness-hat && hht restart`. Running containers are left untouched on restart; stop them manually with `hht stop` if needed.
+
+## What Goes Away
 - `WorkspaceConfig` struct
 - `best_matching_workspace()`
 - `mount_cwd` flag (cwd mount is default behavior)
