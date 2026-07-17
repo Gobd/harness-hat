@@ -193,6 +193,7 @@ pub(crate) struct WorkspaceLaunchPending {
     pub(crate) template: String,
     pub(crate) workspace_idx: usize,
     pub(crate) template_idx: usize,
+    pub(crate) cwd: Option<std::path::PathBuf>,
 }
 
 /// Bounded channels used by background workers that feed best-effort UI data.
@@ -240,6 +241,7 @@ pub struct App {
     pub build_workspace_idx: Option<usize>,
     pub build_session_group: Option<usize>,
     pub build_cursor: usize,
+    pub pending_force_rebuild: bool,
     pub build_output: VecDeque<(String, bool)>,
     pub build_scroll: usize,
     pub sessions: Vec<ContainerSession>,

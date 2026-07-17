@@ -17,7 +17,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::config::{ContainerDef, MountMode, container_path_file_name, container_path_string};
 use crate::container::core::{
-    LABEL_ALIAS, LABEL_SESSION, LABEL_TEMPLATE, LABEL_WORKSPACE, TERMINAL_SCROLLBACK_LINES,
+    LABEL_ALIAS, LABEL_SESSION, LABEL_SHELL, LABEL_TEMPLATE, LABEL_WORKSPACE, TERMINAL_SCROLLBACK_LINES,
     TermSize, docker_bind_mount_args, loopback_to_host_docker, parse_docker_label,
     sanitize_docker_name, terminal_bottom_lines,
 };
@@ -107,11 +107,15 @@ pub fn spawn(
     let label_workspace = sanitize_label_value(project_name);
     let label_template = sanitize_label_value(ctr.name.as_str());
     let label_session = sanitize_label_value(session_token);
+    let label_shell = sanitize_label_value(
+        ctr.attach_shell.as_deref().unwrap_or("/bin/bash"),
+    );
     for (key, value) in [
         (LABEL_ALIAS, label_alias.as_str()),
         (LABEL_WORKSPACE, label_workspace.as_str()),
         (LABEL_TEMPLATE, label_template.as_str()),
         (LABEL_SESSION, label_session.as_str()),
+        (LABEL_SHELL, label_shell.as_str()),
     ] {
         docker_args.push("--label".to_string());
         docker_args.push(format!("{key}={value}"));
@@ -361,10 +365,25 @@ pub fn spawn(
     //
     // Mounts are sorted by container path depth (shortest first) so that
     // directory mounts are applied before any file mounts nested inside them.
+    // If a claude_settings source is configured, inject a seeded mount for the
+    // container's settings.json so it gets a private copy without touching the
+    // host file. This is built as an owned vec so it survives the borrow below.
+    let claude_settings_mount: Option<crate::config::ContainerMount> =
+        ctr.claude_settings.as_ref().map(|src| crate::config::ContainerMount {
+            host: src.clone(),
+            container: std::path::PathBuf::from("/home/coder/.claude/settings.json"),
+            mode: crate::config::MountMode::Rw,
+            seed: Some(true),
+        });
+    let mut all_mounts: Vec<crate::config::ContainerMount> = ctr.mounts.clone();
+    if let Some(m) = claude_settings_mount {
+        all_mounts.push(m);
+    }
+
     // Docker applies bind mounts in order, so a file mount on e.g.
     // `/home/coder/.claude/.claude.json` must come *after* the directory mount
     // on `/home/coder/.claude` — otherwise the directory mount overwrites it.
-    let mut sorted_mounts: Vec<&crate::config::ContainerMount> = ctr.mounts.iter().collect();
+    let mut sorted_mounts: Vec<&crate::config::ContainerMount> = all_mounts.iter().collect();
     sorted_mounts.sort_by_key(|m| {
         container_path_string(&m.container)
             .split('/')

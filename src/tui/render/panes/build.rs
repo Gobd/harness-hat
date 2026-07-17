@@ -207,6 +207,7 @@ pub(crate) fn render_image_build(frame: &mut Frame, app: &mut App, area: Rect, d
         image,
         dockerfile_context,
         docker_dir,
+        false,
     );
     let build_cmd_str = format!("docker {}", build_cmd.join(" "));
     let base_cmd_str = maybe_base_cmd

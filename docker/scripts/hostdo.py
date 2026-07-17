@@ -12,6 +12,7 @@ Environment variables:
   HARNESS_HAT_SESSION_TOKEN  Per-session token injected by harness-hat     (required)
 
 Usage:
+  hostdo output [--image <docker-image>] [--timeout <seconds>] <command> [args...]
   hostdo run [--image <docker-image>] [--timeout <seconds>] <command> [args...]
   hostdo list [--running] [--json]
   hostdo status <job-id>
@@ -44,6 +45,7 @@ Routes commands through the harness-hat host execution server for policy
 enforcement and developer approval.
 
 Usage:
+  hostdo output [--image <docker-image>] [--timeout <seconds>] <command> [args...]
   hostdo run [--image <docker-image>] [--timeout <seconds>] <command> [args...]
   hostdo list [--running] [--json]
   hostdo status <job-id>
@@ -54,8 +56,18 @@ Usage:
 
 Options:
   run
-      Start a hostdo command as a tracked job. This waits for developer approval
-      when needed, then prints the job id once the command starts.
+      Start a command as a background job. Waits for developer approval if
+      needed, then prints a job id to stdout once the command starts.
+      The job id is a UUID — not the output. To see output use:
+        hostdo tail <job-id> --all
+      To capture output in a variable use hostdo output instead.
+
+  output
+      Run a command and wait for it to finish, then print its stdout and stderr
+      inline. Exit code mirrors the command. Use this when you need the output
+      directly, e.g.:
+        TOKEN=$(hostdo output az account get-access-token ...)
+        hostdo output cargo build 2>&1
 
   list
       List tracked hostdo jobs owned by this session.
@@ -92,29 +104,26 @@ Options:
       Show this help text and exit.
 
 Host-side commands:
-  - Use `hostdo run ...` when you need host-side build/package tooling such as
-    cargo, npm, pnpm, yarn, go, make, pytest, or similar commands.
-  - Examples: `hostdo run cargo test`, `hostdo run npm install`,
-    `hostdo run go test ./...`.
-  - Only use `hostdo run --image <docker-image> ...` when the user explicitly asks
-    you to run against a Docker image or containerized runner.
-  - `hostdo run --image` runs a command in a short-lived Docker runner instead of
-    directly on the host.
-  - Examples: `hostdo run --image node:20 npm test`,
-    `hostdo run --image rust:1.88 cargo test`.
-  - Use `hostdo run ...` when command output needs to remain available after
-    launch, when you need to check status separately, or when you expect to
-    interact with the command over stdin.
-  - `hostdo run ...` waits for approval and command startup, then prints a job
-    id. Use `hostdo status <job-id>`, `hostdo tail <job-id>`, and
-    `hostdo stop <job-id>` to inspect or stop it.
+  Quick reference:
+    hostdo output <cmd>         — run and get output inline (most common)
+    hostdo run <cmd>            — run in background, returns job id
+    hostdo tail <job-id> --all  — get full output of a background job
+    hostdo list --running       — see what's currently running
+
+  - Use `hostdo output ...` when you just want to run something and capture its
+    output — it works like a normal shell command.
+  - Use `hostdo run ...` for long-running commands, commands you want to interact
+    with over stdin, or when you need to check status separately.
+  - `hostdo run ...` prints a job id (UUID) to stdout — that is NOT the command
+    output. Use `hostdo tail <job-id> --all` to get the output afterward.
   - Use `hostdo tail <job-id> --rows <lines>` to inspect recent output, and
     add `--stdout` or `--stderr` to select one stream.
-  - Use `hostdo tail <job-id> --all` to read full captured output.
   - Use `hostdo send <job-id> "text"` to send one input line, or pipe data into
     `hostdo send <job-id>` to forward stdin as-is.
   - Use `hostdo list` to see tracked jobs for this session.
-  - Use `hostdo list --running` to show only currently running jobs.
+  - Only use `hostdo run --image <docker-image> ...` or
+    `hostdo output --image <docker-image> ...` when the user explicitly asks
+    you to run against a Docker image or containerized runner.
   - `hostdo` requests are policy checked against the `[hostdo]` rules below
     and may prompt the developer.
   - Read this workspace's `harness-rules.toml` for the current allowlisted
@@ -171,7 +180,7 @@ Notes:
 
 def _print_usage(stream) -> None:
     print(
-        "usage: hostdo <run|list|status|tail|send|stop> ...",
+        "usage: hostdo <output|run|list|status|tail|send|stop> ...",
         file=stream,
     )
 
@@ -991,6 +1000,65 @@ def _run_detached(
     _print_job_id(data)
 
 
+def _run_inline(
+    opener: urllib.request.OpenerDirector,
+    base_url: str,
+    token: str,
+    session_token: str,
+    argv: list[str],
+) -> None:
+    command_argv, image, timeout_secs = _parse_hostdo_args(argv)
+    try:
+        cwd = os.getcwd()
+    except OSError as exc:
+        print(f"hostdo: cannot determine working directory: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    body_data: dict = {
+        "argv": command_argv,
+        "cwd": cwd,
+        "detach": True,
+    }
+    if image is not None:
+        body_data["image"] = image
+    if timeout_secs is not None:
+        body_data["timeout_secs"] = timeout_secs
+
+    data, selected_base = _json_request_with_fallback(
+        opener,
+        base_url,
+        "POST",
+        "/exec",
+        token,
+        session_token,
+        body_data=body_data,
+        timeout=_TIMEOUT,
+    )
+
+    job_id = data.get("job_id", "")
+    if not job_id:
+        print("hostdo: failed — response did not include a job id", file=sys.stderr)
+        sys.exit(1)
+
+    data = _poll_exec_job(opener, selected_base, job_id, token, session_token, data)
+
+    # Fetch full output now that the job is complete.
+    quoted_job_id = urllib.parse.quote(job_id, safe="")
+    output_data, _ = _json_request_with_fallback(
+        opener,
+        selected_base,
+        "GET",
+        f"/exec/jobs/{quoted_job_id}/output",
+        token,
+        session_token,
+    )
+    _print_job_output(output_data)
+
+    exit_code = data.get("exit_code")
+    if exit_code is not None and exit_code != 0:
+        sys.exit(exit_code)
+
+
 def _run_job_control(
     opener: urllib.request.OpenerDirector,
     base_url: str,
@@ -1002,6 +1070,13 @@ def _run_job_control(
         return False
 
     subcommand = argv[0]
+    if subcommand == "output":
+        if len(argv) == 1:
+            print("hostdo: output requires a command", file=sys.stderr)
+            sys.exit(1)
+        _run_inline(opener, base_url, token, session_token, argv[1:])
+        return True
+
     if subcommand == "run":
         if len(argv) == 1:
             print("hostdo: run requires a command", file=sys.stderr)

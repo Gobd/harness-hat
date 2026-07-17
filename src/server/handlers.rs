@@ -406,6 +406,10 @@ pub enum ContainerStopDecision {
 pub struct WorkspaceLaunchRequest {
     pub workspace_name: String,
     pub template: String,
+    #[serde(default)]
+    pub force_rebuild: bool,
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// Final-success payload included in a `LaunchEvent::Launched`.
@@ -442,6 +446,8 @@ pub enum LaunchEvent {
 pub struct WorkspaceLaunchItem {
     pub workspace_name: String,
     pub template: String,
+    pub force_rebuild: bool,
+    pub cwd: Option<PathBuf>,
     pub event_tx: mpsc::Sender<LaunchEvent>,
 }
 
@@ -664,6 +670,8 @@ pub(super) async fn workspace_launch_handler(
     let item = WorkspaceLaunchItem {
         workspace_name,
         template,
+        force_rebuild: req.force_rebuild,
+        cwd: req.cwd.map(PathBuf::from),
         event_tx,
     };
     if state.launch_tx.send(item).await.is_err() {

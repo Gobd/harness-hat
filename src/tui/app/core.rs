@@ -189,6 +189,7 @@ impl App {
             build_workspace_idx: None,
             build_session_group: None,
             build_cursor: 0,
+            pending_force_rebuild: false,
             build_output: VecDeque::new(),
             build_scroll: 0,
             sessions: vec![],

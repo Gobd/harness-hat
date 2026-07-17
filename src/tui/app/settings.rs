@@ -380,6 +380,7 @@ impl App {
                 crate::proxy::SourcePriority::Primary,
                 &[],
                 launch_session_group,
+                None,
             );
             return;
         }
@@ -515,11 +516,13 @@ impl App {
         }
 
         let dockerfile_context = dockerfile_path.parent().unwrap_or(cfg.docker_dir.as_path());
+        let no_cache = self.pending_force_rebuild;
         let (build_cmd, maybe_base_cmd) = Self::build_commands_for(
             &dockerfile_path,
             &ctr.image,
             dockerfile_context,
             &cfg.docker_dir,
+            no_cache,
         );
 
         let requested = match self.build_cursor {

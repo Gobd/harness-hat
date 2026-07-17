@@ -123,6 +123,7 @@ impl App {
                     if let Some(error) = error {
                         self.build_workspace_idx = None;
                         self.build_session_group = None;
+                        self.pending_force_rebuild = false;
                         self.push_log(format!("{label} failed: {error}"), true);
                         if let Some(diagnostic) = &diagnostic {
                             self.push_log(format!("  build detail: {diagnostic}"), true);
@@ -147,6 +148,7 @@ impl App {
                     if cancelled {
                         self.build_workspace_idx = None;
                         self.build_session_group = None;
+                        self.pending_force_rebuild = false;
                         self.push_log(format!("{label} cancelled"), true);
                         self.build_finished = Some(BuildFinished {
                             command,
@@ -166,6 +168,7 @@ impl App {
                     if success {
                         self.build_workspace_idx = None;
                         self.build_session_group = None;
+                        self.pending_force_rebuild = false;
                         self.build_finished = None;
                         self.push_log(format!("{label} finished successfully"), false);
                         self.build_container_idx = None;
@@ -182,6 +185,7 @@ impl App {
                                 pending.template_idx,
                                 &pending.workspace_name,
                                 &pending.template,
+                                pending.cwd.clone(),
                             );
                             crate::tui::app::launch::finish_launch_stream(
                                 &pending.event_tx,
@@ -198,6 +202,7 @@ impl App {
                     } else {
                         self.build_workspace_idx = None;
                         self.build_session_group = None;
+                        self.pending_force_rebuild = false;
                         let suffix = exit_code
                             .map(|code| format!(" (exit code {code})"))
                             .unwrap_or_default();

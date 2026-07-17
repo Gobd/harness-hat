@@ -36,6 +36,7 @@ pub const LABEL_ALIAS: &str = "harness-hat.alias";
 pub const LABEL_WORKSPACE: &str = "harness-hat.workspace";
 pub const LABEL_TEMPLATE: &str = "harness-hat.template";
 pub const LABEL_SESSION: &str = "harness-hat.session";
+pub const LABEL_SHELL: &str = "harness-hat.shell";
 
 /// Identity used when shelling into a running session.
 pub const SHELL_USER: &str = "1000:1000";

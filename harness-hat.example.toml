@@ -200,6 +200,61 @@ starter_network_allowlist = [
   "domain=index.crates.io",
 ]
 
+[container_profiles.python]
+image = "python"
+memory = "4g"
+cpus = "2"
+shm_size = "1g"
+starter_network_allowlist = [
+  "domain=github.com",
+  "domain=api.github.com",
+  "domain=raw.githubusercontent.com",
+  "domain=objects.githubusercontent.com",
+  # uv / pip package downloads
+  "domain=pypi.org",
+  "domain=files.pythonhosted.org",
+  "domain=*.pythonhosted.org",
+]
+
+[container_profiles.kotlin]
+image = "kotlin"
+memory = "4g"
+cpus = "2"
+shm_size = "1g"
+starter_network_allowlist = [
+  "domain=github.com",
+  "domain=api.github.com",
+  "domain=raw.githubusercontent.com",
+  "domain=objects.githubusercontent.com",
+  # Gradle plugin portal + Maven Central
+  "domain=plugins.gradle.org",
+  "domain=repo.maven.apache.org",
+  "domain=repo1.maven.org",
+  "domain=jcenter.bintray.com",
+  "domain=dl.google.com",
+  # Foojay toolchain resolver — auto-downloads the right JDK for the project
+  "domain=api.foojay.io",
+]
+
+[container_profiles.csharp]
+image = "csharp"
+memory = "4g"
+cpus = "2"
+shm_size = "1g"
+# .NET 10 (LTS) and .NET 8 SDKs are both installed. Projects with a
+# global.json pinning "sdk.version" to 8.x will use .NET 8 automatically.
+starter_network_allowlist = [
+  "domain=github.com",
+  "domain=api.github.com",
+  "domain=raw.githubusercontent.com",
+  "domain=objects.githubusercontent.com",
+  # NuGet package restore
+  "domain=api.nuget.org",
+  "domain=www.nuget.org",
+  "domain=globalcdn.nuget.org",
+  "domain=*.nuget.org",
+]
+
 [container_profiles.php]
 image = "php"
 memory = "4g"
@@ -247,26 +302,27 @@ memory = "8g"
 cpus = "4"
 shm_size = "2g"
 
-# Optional extra mounts for tool credentials or caches.
-# [[container_profiles.large.mounts]]
-# host = "~/.gitconfig"
-# container = "/home/coder/.gitconfig"
-# mode = "ro"
-
-# Optional fixed command override. Prefer leaving this unset for shell-first
-# sessions unless a template needs a specific entrypoint.
-# command = ["/bin/bash"]
-
-# Optional per-template env passthrough.
-# env_passthrough = ["OPENAI_API_KEY"]
-
-# Optional hosts allowed by default without network approval for this template.
-# allowed_hosts = ["api.example.com", "*.example.org"]
-
-# Optional container-local TCP forwards to host services.
-# [[container_profiles.large.localhost_forwards]]
-# container_port = 8081
-# host_port = 8081
+# ---------------------------------------------------------------------------
+# MCP servers
+#
+# Claude Code discovers MCP servers from ~/.claude/settings.json (already
+# mounted via the global ~/.claude mount). Add server definitions there and
+# they are available in every session automatically.
+#
+# The MCP server process runs inside the container. If it needs to reach an
+# external API, add that host to the profile's allowed_hosts or approve it
+# at runtime through the TUI network approval dialog.
+#
+# For tokens/secrets, use env_passthrough — the value never touches disk
+# inside the container:
+#   env_passthrough = ["MY_API_KEY"]
+#
+# harness-hat can scrape MCP server log files for startup diagnostics.
+# Point mcp_log_paths at the file(s) your server writes to, and optionally
+# set mcp_log_pattern to a grep pattern shown in the TUI on launch failure:
+#   mcp_log_paths = ["/home/coder/.cache/my-mcp/server.log"]
+#   mcp_log_pattern = "ERROR|WARN|listening on"
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Workspaces.
