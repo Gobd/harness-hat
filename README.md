@@ -177,9 +177,41 @@ Strict mode changes how the container is started:
 - **Linux**: the container starts with `--cap-drop ALL` and re-adds only `NET_ADMIN` (iptables + TUN setup), `SETUID`, and `SETGID` (the init's downward `gosu` drop to uid 1000), plus a `--device /dev/net/tun` passthrough — not full `--privileged`. If `/dev/net/tun` is missing on the host, the launch fails with an error instead of silently escalating.
 - **macOS and Windows 11 (Docker Desktop)**: the container is started `--privileged`, because Docker Desktop exposes `/dev/net/tun` to Linux containers through that mode.
 
+## Filesystem mounts
+
+Every session mounts the workspace at `/workspace`. Add extra host paths with `[[defaults.containers.mounts]]` for every template, or `[[container_profiles.<name>.mounts]]` for one template. Mount changes apply when a new session container starts; restart an existing session to pick them up.
+
+```toml
+[[defaults.containers.mounts]]
+host = "~/src/shared-tools"
+container = "/mnt/shared-tools"
+mode = "ro"
+
+[[container_profiles.typescript.mounts]]
+host = "~/.cache/harness-hat/npm"
+container = "/home/coder/.npm"
+mode = "rw"
+```
+
+`host` supports `~` expansion. `container` is the path where the file or directory appears inside the session. `mode` is `rw` by default; use `ro` for reference material or credentials the container should read but not change. Missing host paths are skipped instead of being created by Docker.
+
+For files that an agent rewrites in place, add `seed = true` to give each session a private copy:
+
+```toml
+[[defaults.containers.mounts]]
+host = "~/.some-agent.json"
+container = "/home/coder/.some-agent.json"
+mode = "rw"
+seed = true
+```
+
+Seeded mounts read the host file at launch, then write only to the session-local copy. This is the default for paths named `.claude.json`. If the same `container` path is configured in defaults and a profile, the profile mount wins.
+
+Harness Hat refuses broad or sensitive host paths such as `/`, `$HOME`, `~/.ssh`, `~/.aws`, and `~/.kube`. Mount only the narrow file or directory the tool actually needs.
+
 ## Localhost port passthrough
 
-Some tools need to reach a service already running on your laptop: a local model server, a dev database, a callback server, or an app backend. `localhost_forwards` exposes selected host-local TCP ports inside the container as `localhost:<container_port>` without opening general host networking.
+Some tools need to reach a service already running on your laptop: a local model server, a dev database, a callback server, or an app backend. `localhost_forwards` exposes selected host-local TCP ports inside the container as `localhost:<container_port>` without opening general host networking. Forward changes apply when a new session container starts; restart an existing session to pick them up.
 
 ```toml
 [[defaults.containers.localhost_forwards]]
@@ -192,7 +224,7 @@ container_port = 3000
 
 With the first rule, a process in the container that connects to `http://localhost:8081` reaches port `11434` on the host. With the second, `host_port` is omitted, so `localhost:3000` in that template reaches host port `3000`.
 
-Forwards can be set under `[defaults.containers]` for every template or under `[container_profiles.<name>]` for one template. A profile forward with the same `container_port` replaces the default forward for that port.
+Forwards can be set under `[defaults.containers]` for every template or under `[container_profiles.<name>]` for one template. A profile forward with the same `container_port` replaces the default forward for that port. Start the host service before the container process tries to connect; Harness Hat forwards TCP traffic, but it does not start the host service for you.
 
 In strict-network mode, configured forwards are added to the egress allowlist during container bootstrap. Other direct host or network destinations still go through the proxy policy or are blocked. This is not Docker `-p` publishing: it lets the container reach selected host services; it does not expose container ports back to the host or LAN.
 
@@ -296,6 +328,8 @@ The pieces that matter once more than a handful of developers are involved:
 
 Each container session runs Claude Code in a fresh environment. Harness Hat supports API-key auth, `claude setup-token` OAuth env auth, and on macOS can inject the local Claude Code Keychain access token into the seeded container session files.
 
+For long-running sessions, prefer API-key auth or `CLAUDE_CODE_OAUTH_TOKEN`. macOS Keychain injection is a convenience fallback: Harness Hat copies the current access token, not the refresh token, so the container cannot refresh it after it expires.
+
 **API key** (recommended for most setups):
 
 1. Generate a key at [console.anthropic.com](https://console.anthropic.com) → API Keys.
@@ -314,6 +348,7 @@ Each container session runs Claude Code in a fresh environment. Harness Hat supp
    ```bash
    export CLAUDE_CODE_OAUTH_TOKEN="<token>"
    ```
+3. Remove the contents of the `oauthAccount` key inside `~/.claude.json`. Claude Code can prefer the stored account data over `CLAUDE_CODE_OAUTH_TOKEN` when that key is populated. Harness Hat strips this key from seeded container copies when env-token auth is active, but clearing the host file avoids stale state in older sessions and local Claude Code runs.
 
 Either env var bypasses the interactive browser login flow, so new sessions start authenticated immediately. Run `/status` inside a session to confirm which method is active.
 

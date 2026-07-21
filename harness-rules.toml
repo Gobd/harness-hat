@@ -100,5 +100,8 @@ allowlist = [
     "domain=crates.io",
     "domain=main.vscode-cdn.net",
     "domain=mobile.events.data.microsoft.com",
+    "domain=auction-technology-group.getdx.net",
+    "domain=code.claude.com",
+    "domain=advisories.gitlab.com",
 ]
 denylist = ["domain=160.79.104.10"]

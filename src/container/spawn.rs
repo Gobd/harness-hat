@@ -27,6 +27,8 @@ use crate::fs_util::{is_valid_env_name, write_env_file_entry};
 
 const PRIMARY_PROXY_CONN_LIMIT: usize = 0;
 const CODER_HOME: &str = "/home/coder";
+const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+const ANTHROPIC_AUTH_TOKEN_ENV: &str = "ANTHROPIC_AUTH_TOKEN";
 const CLAUDE_CODE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 const CLAUDE_CODE_OAUTH_SCOPES_ENV: &str = "CLAUDE_CODE_OAUTH_SCOPES";
 const CLAUDE_CODE_HOST_AUTH_ENV_VAR_ENV: &str = "CLAUDE_CODE_HOST_AUTH_ENV_VAR";
@@ -269,8 +271,36 @@ pub fn spawn(
         }
     }
 
-    // Inject Claude Code OAuth credentials from the macOS Keychain so Claude can
-    // authenticate inside the Linux container without a Keychain of its own.
+    let host_env = |name: &str| std::env::var(name).ok();
+    let explicit_claude_oauth_token_available = has_nonempty_env_source(
+        CLAUDE_CODE_OAUTH_TOKEN_ENV,
+        &ctr.env,
+        extra_env,
+        &ctr.env_passthrough,
+        &host_env,
+    );
+    let explicit_claude_auth_available = explicit_claude_oauth_token_available
+        || has_nonempty_env_source(
+            ANTHROPIC_API_KEY_ENV,
+            &ctr.env,
+            extra_env,
+            &ctr.env_passthrough,
+            &host_env,
+        )
+        || has_nonempty_env_source(
+            ANTHROPIC_AUTH_TOKEN_ENV,
+            &ctr.env,
+            extra_env,
+            &ctr.env_passthrough,
+            &host_env,
+        );
+
+    // As a convenience fallback on macOS, inject Claude Code OAuth credentials
+    // from the Keychain so Claude can authenticate inside the Linux container
+    // without a Keychain of its own. Skip this when the user has supplied
+    // explicit auth env vars: setup-token/API-key auth is better for
+    // long-running sessions, while the Keychain path only gives the container
+    // the current short-lived access token.
     //
     // CLAUDE_CODE_OAUTH_TOKEN   — access token; used by both `-p` and TUI API calls.
     // CLAUDE_CODE_OAUTH_SCOPES  — required by `shouldUseClaudeAIAuth` (TUI auth path).
@@ -281,43 +311,37 @@ pub fn spawn(
     // Refresh token is intentionally NOT injected: the container cannot write
     // a refreshed token back to the macOS Keychain, so allowing refresh inside
     // the container rotates the host's refresh token (invalidating it) while the
-    // new token lives only in the ephemeral container. Every subsequent container
-    // launch would then start with an expired access token and an invalidated
-    // refresh token, breaking auth entirely. Sessions are instead bounded by the
-    // access token lifetime; users re-run Claude locally to keep the Keychain fresh.
+    // new token lives only in the ephemeral container. Keychain-backed sessions
+    // are therefore bounded by the access token lifetime; use
+    // CLAUDE_CODE_OAUTH_TOKEN for long-running sessions.
     let mut injected_claude_oauth_token = false;
     let mut injected_claude_oauth_scopes = false;
     let mut injected_claude_host_auth_env_var = false;
-    if let Some(creds) = read_claude_oauth_credentials_full() {
-        write_env_file_entry(
-            &mut env_file,
-            CLAUDE_CODE_OAUTH_TOKEN_ENV,
-            &creds.access_token,
-        )?;
-        injected_claude_oauth_token = true;
-        write_env_file_entry(&mut env_file, CLAUDE_CODE_OAUTH_SCOPES_ENV, &creds.scopes)?;
-        injected_claude_oauth_scopes = true;
-        write_env_file_entry(
-            &mut env_file,
-            CLAUDE_CODE_HOST_AUTH_ENV_VAR_ENV,
-            CLAUDE_CODE_OAUTH_TOKEN_ENV,
-        )?;
-        injected_claude_host_auth_env_var = true;
+    if !explicit_claude_auth_available {
+        if let Some(creds) = read_claude_oauth_credentials_full() {
+            write_env_file_entry(
+                &mut env_file,
+                CLAUDE_CODE_OAUTH_TOKEN_ENV,
+                &creds.access_token,
+            )?;
+            injected_claude_oauth_token = true;
+            write_env_file_entry(&mut env_file, CLAUDE_CODE_OAUTH_SCOPES_ENV, &creds.scopes)?;
+            injected_claude_oauth_scopes = true;
+            write_env_file_entry(
+                &mut env_file,
+                CLAUDE_CODE_HOST_AUTH_ENV_VAR_ENV,
+                CLAUDE_CODE_OAUTH_TOKEN_ENV,
+            )?;
+            injected_claude_host_auth_env_var = true;
+        }
     }
 
     // If the OAuth token is supplied by normal env passthrough instead of the
     // macOS Keychain path above, Claude still needs the host-auth marker for
     // interactive container sessions. Supply the minimum scope for setup-token
     // tokens unless the user already provided explicit scopes.
-    let host_env = |name: &str| std::env::var(name).ok();
-    let claude_oauth_token_available = injected_claude_oauth_token
-        || has_nonempty_env_source(
-            CLAUDE_CODE_OAUTH_TOKEN_ENV,
-            &ctr.env,
-            extra_env,
-            &ctr.env_passthrough,
-            &host_env,
-        );
+    let claude_oauth_token_available =
+        injected_claude_oauth_token || explicit_claude_oauth_token_available;
     if claude_oauth_token_available {
         if !injected_claude_host_auth_env_var
             && !has_nonempty_env_source(
@@ -907,10 +931,16 @@ fn seed_private_mount(
         return Ok(None);
     };
 
-    // For .claude.json, merge in macOS Keychain credentials so Claude can
-    // authenticate inside the Linux container.
+    // For .claude.json, merge in macOS Keychain credentials only when env-token
+    // auth is not already active. With CLAUDE_CODE_OAUTH_TOKEN, stale account
+    // metadata can make interactive Claude prefer stored OAuth state over the
+    // env token.
     let contents = if is_claude_config {
-        let contents = inject_keychain_credentials(contents)?;
+        let contents = if claude_oauth_token_available {
+            contents
+        } else {
+            inject_keychain_credentials(contents)?
+        };
         if claude_oauth_token_available {
             ensure_claude_interactive_onboarding(contents)?
         } else {
@@ -957,10 +987,11 @@ fn ensure_claude_interactive_onboarding(contents: Vec<u8>) -> Result<Vec<u8>> {
     }
     if let Some(obj) = config.as_object_mut() {
         // When CLAUDE_CODE_OAUTH_TOKEN is the launch auth source, stale
-        // claudeAiOauth access tokens in the copied host config can take
-        // precedence in interactive Claude and produce 401s even though
-        // `claude -p` works from the env token.
+        // claudeAiOauth tokens and oauthAccount metadata in the copied host
+        // config can take precedence in interactive Claude and produce 401s
+        // even though `claude -p` works from the env token.
         obj.remove("claudeAiOauth");
+        obj.remove("oauthAccount");
         obj.insert(
             "hasCompletedOnboarding".to_string(),
             serde_json::Value::Bool(true),
@@ -1214,7 +1245,9 @@ mod tests {
             .tempfile()
             .expect("create temp source");
         source
-            .write_all(br#"{"numStartups": 7, "claudeAiOauth": {"accessToken": "stale-token"}}"#)
+            .write_all(
+                br#"{"numStartups": 7, "claudeAiOauth": {"accessToken": "stale-token"}, "oauthAccount": {"emailAddress": "a@b.c"}}"#,
+            )
             .expect("write source");
         source.flush().expect("flush source");
         let config = mount(
@@ -1233,6 +1266,7 @@ mod tests {
         assert_eq!(seeded_json["numStartups"], 7);
         assert_eq!(seeded_json["hasCompletedOnboarding"], true);
         assert!(seeded_json.get("claudeAiOauth").is_none());
+        assert!(seeded_json.get("oauthAccount").is_none());
     }
 
     #[test]
@@ -1343,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn onboarding_patch_strips_stale_claude_oauth_tokens() {
+    fn onboarding_patch_strips_stale_claude_oauth_state() {
         let patched = ensure_claude_interactive_onboarding(
             br#"{"claudeAiOauth":{"accessToken":"stale"},"oauthAccount":{"emailAddress":"a@b.c"}}"#
                 .to_vec(),
@@ -1353,8 +1387,8 @@ mod tests {
             serde_json::from_slice(&patched).expect("patched file is valid JSON");
 
         assert_eq!(patched_json["hasCompletedOnboarding"], true);
-        assert_eq!(patched_json["oauthAccount"]["emailAddress"], "a@b.c");
         assert!(patched_json.get("claudeAiOauth").is_none());
+        assert!(patched_json.get("oauthAccount").is_none());
     }
 
     #[test]
