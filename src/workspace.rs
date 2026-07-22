@@ -85,9 +85,7 @@ pub fn run(
             return crate::shell::exec_into_container(&session.name, &args);
         }
         // Use saved template as default if no override provided.
-        let effective_override = template_override
-            .as_deref()
-            .or(matched.template.as_deref());
+        let effective_override = template_override.as_deref().or(matched.template.as_deref());
         let template = choose_template(
             &config,
             matched.canonical_path.as_path(),
@@ -98,7 +96,14 @@ pub fn run(
             let _ = save_workspace_template(&config_path, &matched.name, &template);
         }
         let launch_cwd = matched.mount_cwd.then(|| pwd.to_str()).flatten();
-        let resp = post_launch(&control_url, &token, &matched.name, &template, force_rebuild, launch_cwd)?;
+        let resp = post_launch(
+            &control_url,
+            &token,
+            &matched.name,
+            &template,
+            force_rebuild,
+            launch_cwd,
+        )?;
         println!(
             "launched session {} ({}); attaching",
             resp.alias, resp.docker_name
@@ -128,7 +133,14 @@ pub fn run(
     });
     let template = choose_template(&config, pwd.as_path(), template_override.as_deref())?;
     let _ = save_workspace_template(&config_path, &workspace_name, &template);
-    let resp = post_launch(&control_url, &token, &workspace_name, &template, force_rebuild, None)?;
+    let resp = post_launch(
+        &control_url,
+        &token,
+        &workspace_name,
+        &template,
+        force_rebuild,
+        None,
+    )?;
     println!(
         "launched session {} ({}); attaching",
         resp.alias, resp.docker_name
@@ -201,12 +213,14 @@ pub(crate) fn best_matching_workspace<'a>(
         .max_by_key(|w| w.canonical_path.components().count())
 }
 
-
 fn save_workspace_template(config_path: &Path, workspace_name: &str, template: &str) -> Result<()> {
     use toml_edit::DocumentMut;
     let raw = std::fs::read_to_string(config_path)?;
     let mut doc = raw.parse::<DocumentMut>()?;
-    if let Some(workspaces) = doc.get_mut("workspaces").and_then(|v| v.as_array_of_tables_mut()) {
+    if let Some(workspaces) = doc
+        .get_mut("workspaces")
+        .and_then(|v| v.as_array_of_tables_mut())
+    {
         for entry in workspaces.iter_mut() {
             if entry.get("name").and_then(|v| v.as_str()) == Some(workspace_name) {
                 entry["template"] = toml_edit::value(template);
@@ -221,7 +235,8 @@ fn save_workspace_template(config_path: &Path, workspace_name: &str, template: &
 /// Dedupe a candidate workspace name against `config.workspaces` by appending
 /// `-2`, `-3`, … until a free slot is found. Mirrors what users would write by
 /// hand when two repos share a directory basename.
-pub(crate) fn dedupe_workspace_name(config: &Config, base: &str) -> String {    let base = base.trim();
+pub(crate) fn dedupe_workspace_name(config: &Config, base: &str) -> String {
+    let base = base.trim();
     let base = if base.is_empty() { "workspace" } else { base };
     let used: std::collections::HashSet<&str> =
         config.workspaces.iter().map(|w| w.name.as_str()).collect();

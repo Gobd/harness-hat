@@ -2,7 +2,8 @@ use super::*;
 
 impl App {
     fn watched_rules_paths(cfg: &crate::config::Config) -> Vec<PathBuf> {
-        let mut paths = Vec::with_capacity(cfg.workspaces.len());
+        let mut paths = Vec::with_capacity(cfg.workspaces.len() + 1);
+        paths.push(cfg.manager.global_rules_file.clone());
         for workspace in &cfg.workspaces {
             paths.push(workspace.canonical_path.join("harness-rules.toml"));
         }
@@ -311,15 +312,30 @@ impl App {
                     let current = std::fs::read_to_string(&path).unwrap_or_default();
                     if current == pending.expected_content {
                         self.pending_base_rules_internal_write.remove(&path);
+                        if let Err(error) = self
+                            .config
+                            .trust_rules_file_if_contents(&path, &pending.expected_content)
+                        {
+                            self.push_log(
+                                format!(
+                                    "failed to verify Harness Hat's rules write '{}': {error}",
+                                    path.display()
+                                ),
+                                true,
+                            );
+                        }
                         continue;
                     }
                 }
                 self.pending_base_rules_internal_write.remove(&path);
             }
 
-            if self.base_rules_changed.is_none() {
-                self.base_rules_changed = Some(BaseRulesChangedState { path: path.clone() });
-            }
+            self.config.block_rules_file(&path);
+            self.base_rules_changed = Some(BaseRulesChangedState {
+                path: path.clone(),
+                expected_contents: std::fs::read(&path).ok(),
+                dialog_dismissed: false,
+            });
             self.push_log(
                 format!(
                     "SECURITY ALERT: rules file changed outside CLI: {}",

@@ -165,6 +165,8 @@ pub struct RemoveWorkspaceConfirmState {
 #[derive(Debug, Clone)]
 pub struct BaseRulesChangedState {
     pub path: PathBuf,
+    pub expected_contents: Option<Vec<u8>>,
+    pub dialog_dismissed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

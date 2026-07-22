@@ -1,6 +1,6 @@
 # harness-hat base image — shared foundation for all language images.
-# After modifying this file, rebuild with: ./docker/build.sh
-# (This also rebuilds all language images that extend it.)
+# After modifying this file, rebuild with: hht rebuild
+# (This also rebuilds every configured Dockerfile template that extends it.)
 
 FROM rust:1.88-slim-bookworm AS tun2proxy-build
 
@@ -583,12 +583,24 @@ SAVEHIST=10000
 setopt SHARE_HISTORY APPEND_HISTORY HIST_IGNORE_DUPS
 EOF
 
-# Oh My Zsh with git plugin.
-RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended \
-    && sed -i 's/^plugins=.*/plugins=(git)/' /home/coder/.zshrc \
-    && echo 'HISTFILE="/workspace/.zsh_history"' >> /home/coder/.zshrc \
-    && echo 'HISTSIZE=10000' >> /home/coder/.zshrc \
-    && echo 'SAVEHIST=10000' >> /home/coder/.zshrc
+# Oh My Zsh with git plugin. Pin both the source revision and archive hash so
+# image builds never execute mutable remote installer code.
+ARG OH_MY_ZSH_COMMIT=59a9740721b734835812121322d6fe4827b0853a
+ARG OH_MY_ZSH_SHA256=897a7ffb6bbf96b1f2914eb3da37c774cbd72be5f73242c568be7807dd2967e8
+RUN set -eu; \
+    curl -fsSL \
+        -o /tmp/oh-my-zsh.tar.gz \
+        "https://github.com/ohmyzsh/ohmyzsh/archive/${OH_MY_ZSH_COMMIT}.tar.gz"; \
+    echo "${OH_MY_ZSH_SHA256}  /tmp/oh-my-zsh.tar.gz" | sha256sum -c -; \
+    mkdir -p /home/coder/.oh-my-zsh; \
+    tar -xzf /tmp/oh-my-zsh.tar.gz --strip-components=1 -C /home/coder/.oh-my-zsh; \
+    rm -f /tmp/oh-my-zsh.tar.gz; \
+    printf '%s\n' \
+        'ZSH=/home/coder/.oh-my-zsh' \
+        'ZSH_THEME="robbyrussell"' \
+        'plugins=(git)' \
+        'source "$ZSH/oh-my-zsh.sh"' \
+        >> /home/coder/.zshrc
 
 # Keep user-installed tools and the bundled wrappers ahead of system paths.
 ENV PATH="/home/coder/.local/bin:${PATH}"

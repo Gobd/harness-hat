@@ -98,7 +98,7 @@ On Windows, Codex auth, config, rules, skills, and plugins are copied into priva
 |--------------|-----------------------------------------------------------------------------|
 | `default`    | Node, pnpm, TypeScript, `tsx`, Bun                                          |
 | `typescript` | TypeScript, Bun, npm, Node, pnpm, Vite, ESLint, Prettier                    |
-| `go`         | Go, `gopls`, Delve, `staticcheck`, `golangci-lint`                          |
+| `go`         | Go, `gopls`, Delve, `staticcheck`, `golangci-lint`, `gofumpt`               |
 | `rust`       | Rust stable + rustfmt, clippy, rust-analyzer, nextest, audit, deny          |
 | `python`     | uv, Python 3.13 (via uv)                                                    |
 | `kotlin`     | Temurin JDK 21, kotlinc, Gradle                                             |
@@ -106,6 +106,8 @@ On Windows, Codex auth, config, rules, skills, and plugins are copied into priva
 | `php`        | PHP CLI/dev, Composer, PHPUnit, PHP-CS-Fixer, PHPStan, Pint, Xdebug, PCOV  |
 
 Drop your own `something.dockerfile` under `docker_dir` and reference it as `image = "something"`. Workspace-local `*.dockerfile` files are also auto-discovered as launch templates when their first non-comment instruction is `FROM harness-hat-base:local`.
+
+Every template includes `rg` (ripgrep), `sg` / `ast-grep` for structural code search, and zsh with the Oh My Zsh git plugin. Use `attach_shell = "/bin/zsh"` in a container default or profile when `hht shell` and `hht workspace` attaches should open zsh instead of their default `/bin/bash`.
 
 ### SDK/runtime version management
 
@@ -135,7 +137,7 @@ The base image also ships `claude-yolo`, `codex-yolo`, and `agy-yolo` — thin w
 
 ## Network policy
 
-Each workspace can commit a `harness-rules.toml` next to its source. Harness Hat composes it with the global rules file at request time, so edits can take effect without restarting the container, and persists any "Allow forever" / "Deny forever" approvals from the TUI back into it.
+Each workspace can commit a `harness-rules.toml` next to its source. Harness Hat composes it with the global rules file at request time and persists any "Allow forever" / "Deny forever" approvals from the TUI back into it. An external change to either rules file immediately blocks new network and host-command decisions for the affected workspace until it is reviewed and explicitly trusted in a native system dialog; closing or failing to show that dialog stays blocked.
 
 ```toml
 version = 1
@@ -243,6 +245,7 @@ The proxy and control plane are hardened against the usual proxy-abuse classes:
 - The control server defaults to loopback-only, and the proxy exposes only authenticated per-session listeners; non-loopback binds require explicit `allow_remote_control = true`.
 - Broad workspace/mount roots (`/`, `$HOME`, system directories) and common credential paths such as `~/.ssh`, `~/.aws`, and `~/.kube` are refused.
 - Mount/container paths reject `:` and `,` to prevent `-v` argument injection.
+- Externally modified rules files fail closed: new proxy and host-command decisions remain blocked until the reviewed current version is explicitly trusted in the system dialog.
 
 ### Threat model — what Harness Hat does not protect against
 
@@ -273,6 +276,8 @@ strict_network = true
 
 [defaults.containers]
 env_passthrough = ["TERM", "COLORTERM", "COLORFGBG", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]
+attach_shell = "/bin/zsh"              # default shell for hht shell/workspace attaches
+claude_settings = "~/.claude/hht-settings.json" # private per-session settings.json copy
 allowed_hosts = [
   "api.anthropic.com",
   "claude.ai",
@@ -310,9 +315,16 @@ starter_network_allowlist = [
 [[workspaces]]
 name = "my-project"
 canonical_path = "~/src/my-project"
+# Mount the invoking subdirectory as /workspace when launched through hht workspace.
+# TUI launches continue to mount canonical_path.
+mount_cwd = false
 ```
 
 Full example: [`harness-hat.example.toml`](harness-hat.example.toml).
+
+`attach_shell` is inherited from `[defaults.containers]` and can be overridden by a profile. `claude_settings` follows the same inheritance rules and seeds its source file as the session's private `~/.claude/settings.json`; session changes never modify the host source. Its path supports `~` expansion and must not be a broad or credential-bearing host path.
+
+Set `mount_cwd = true` on a workspace to mount `hht workspace`'s invocation directory at `/workspace` instead of the configured workspace root. This is useful for a subdirectory in a larger workspace. The configured `canonical_path` continues to identify the workspace and locate its `harness-rules.toml` policy.
 
 ## Rolling out to a team
 
@@ -363,12 +375,15 @@ The first `agy` login should be done inside a Harness Hat session. After that, n
 Managed containers include `hostdo`, a small bridge for running approved host-side build, package, compiler, and test commands when the container is not the right execution environment.
 
 ```sh
+hostdo output cargo test
 hostdo run cargo test
 hostdo run --image node:20 npm test
 hostdo list
 hostdo tail <job-id> --rows 100
 hostdo stop <job-id>
 ```
+
+`hostdo output` waits for completion, prints captured stdout and stderr, and returns the underlying command's exit code. Use it when a command's result is needed immediately, for example `TOKEN=$(hostdo output az account get-access-token ...)`; use `hostdo run` when the job should remain independently inspectable or interactive.
 
 `hostdo` is the one deliberate hole in the sandbox: approved commands execute **on the host** (or, with `--image`, in a separate host-side Docker container), outside the session's network policy. Treat every rule you add as a host-execution grant.
 
@@ -383,7 +398,8 @@ hht                       # launch interactive workspace manager (default)
 hht --config PATH         # use a specific config
 hht init [PATH]           # write a starter config (default: ./harness-hat.toml)
 hht workspace             # attach to or start a session for the current directory
-hht workspace --template NAME [COMMAND...]
+hht workspace [--name WORKSPACE] [--template NAME] [--rebuild] [COMMAND...]
+hht rebuild [--no-cache] [TEMPLATE...] # rebuild base + selected/all templates
 hht shell                 # list running sessions
 hht shell <ID> [COMMAND...] # docker exec into a running session
 ```
@@ -395,6 +411,8 @@ cargo install harness-hat --force
 ```
 
 Container images are built locally from the Dockerfiles under `docker_dir` and tagged `harness-hat-base:local`. After upgrading `hht` or changing a Dockerfile, rebuild the image from the TUI so new sessions pick up the changes — running sessions keep their existing image until restarted.
+
+Use `hht rebuild` to rebuild the base image followed by every Dockerfile template in the configured `docker_dir`. Pass template stems to rebuild only selected images, for example `hht rebuild go python`; add `--no-cache` to bypass Docker's layer cache for both the base and template images. This command does not require the manager TUI to be running.
 
 ## License
 

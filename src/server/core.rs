@@ -129,6 +129,20 @@ pub(super) async fn exec_handler(
         }
     };
 
+    if let Err(e) = state
+        .config
+        .ensure_rules_trusted_for_workspace(Some(identity.workspace_name.as_str()))
+    {
+        return deny_with_audit(
+            &state,
+            &identity.workspace_name,
+            &req.argv,
+            &req.cwd,
+            format!("rules file change requires review: {e}"),
+        )
+        .await;
+    }
+
     let rules = match crate::config::load_composed_rules_for_workspace(
         &cfg,
         Some(identity.workspace_name.as_str()),
@@ -145,6 +159,19 @@ pub(super) async fn exec_handler(
                 .into_response();
         }
     };
+    if let Err(e) = state
+        .config
+        .ensure_rules_trusted_for_workspace(Some(identity.workspace_name.as_str()))
+    {
+        return deny_with_audit(
+            &state,
+            &identity.workspace_name,
+            &req.argv,
+            &req.cwd,
+            format!("rules file change requires review: {e}"),
+        )
+        .await;
+    }
 
     let matched_rule = rules.find_hostdo(&req.argv, req.image.as_deref());
     let matched_command = matched_rule.and_then(|entry| entry.name.clone());

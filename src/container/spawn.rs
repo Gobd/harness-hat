@@ -17,9 +17,9 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::config::{ContainerDef, MountMode, container_path_file_name, container_path_string};
 use crate::container::core::{
-    LABEL_ALIAS, LABEL_SESSION, LABEL_SHELL, LABEL_TEMPLATE, LABEL_WORKSPACE, TERMINAL_SCROLLBACK_LINES,
-    TermSize, docker_bind_mount_args, loopback_to_host_docker, parse_docker_label,
-    sanitize_docker_name, terminal_bottom_lines,
+    LABEL_ALIAS, LABEL_SESSION, LABEL_SHELL, LABEL_TEMPLATE, LABEL_WORKSPACE,
+    TERMINAL_SCROLLBACK_LINES, TermSize, docker_bind_mount_args, loopback_to_host_docker,
+    parse_docker_label, sanitize_docker_name, terminal_bottom_lines,
 };
 use crate::container::helpers::detect_default_colors;
 use crate::container::{ContainerSession, SessionEventProxy, read_container_id};
@@ -109,9 +109,7 @@ pub fn spawn(
     let label_workspace = sanitize_label_value(project_name);
     let label_template = sanitize_label_value(ctr.name.as_str());
     let label_session = sanitize_label_value(session_token);
-    let label_shell = sanitize_label_value(
-        ctr.attach_shell.as_deref().unwrap_or("/bin/bash"),
-    );
+    let label_shell = sanitize_label_value(ctr.attach_shell.as_deref().unwrap_or("/bin/bash"));
     for (key, value) in [
         (LABEL_ALIAS, label_alias.as_str()),
         (LABEL_WORKSPACE, label_workspace.as_str()),
@@ -392,8 +390,10 @@ pub fn spawn(
     // If a claude_settings source is configured, inject a seeded mount for the
     // container's settings.json so it gets a private copy without touching the
     // host file. This is built as an owned vec so it survives the borrow below.
-    let claude_settings_mount: Option<crate::config::ContainerMount> =
-        ctr.claude_settings.as_ref().map(|src| crate::config::ContainerMount {
+    let claude_settings_mount: Option<crate::config::ContainerMount> = ctr
+        .claude_settings
+        .as_ref()
+        .map(|src| crate::config::ContainerMount {
             host: src.clone(),
             container: std::path::PathBuf::from("/home/coder/.claude/settings.json"),
             mode: crate::config::MountMode::Rw,

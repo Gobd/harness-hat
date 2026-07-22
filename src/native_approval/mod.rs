@@ -14,11 +14,12 @@
 //!   `deny remember=false`
 //!   `cancelled`
 //!
-//! On targets without a native backend (currently anything not macOS) the
-//! subprocess returns `cancelled`, which the parent should interpret as
-//! "deny once, don't persist" so the request is blocked cleanly.
+//! Network and host-command approvals use the macOS implementation today.
+//! Rules-file tampering always uses a cross-platform system dialog; failure to
+//! show it is treated as a denial and keeps policy decisions blocked.
 
 use anyhow::{Context, Result, bail};
+use std::path::PathBuf;
 
 #[cfg(not(target_os = "macos"))]
 mod fallback;
@@ -43,6 +44,11 @@ pub struct HostdoApprovalRequest {
     pub workspace: Option<String>,
     pub image: Option<String>,
     pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RulesChangedRequest {
+    pub path: PathBuf,
 }
 
 /// What the user picked. `remember` is the "Remember this decision" checkbox
@@ -122,6 +128,38 @@ pub fn run_hostdo_approval(req: &HostdoApprovalRequest) -> Outcome {
     }
 }
 
+/// Ask whether the current externally modified rules file should be trusted.
+/// Every result other than the explicit trust button is a denial, which keeps
+/// the runtime rules guard fail-closed.
+pub fn run_rules_changed_dialog(req: &RulesChangedRequest) -> Outcome {
+    const KEEP_BLOCKED: &str = "Keep blocked";
+    const TRUST_REVIEWED_RULES: &str = "Trust reviewed rules";
+
+    let result = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title("Harness Hat: Rules File Changed")
+        .set_description(format!(
+            "This rules file changed outside Harness Hat:\n{}\n\nNew network and host-command decisions are blocked. Review the file before trusting this version.",
+            req.path.display()
+        ))
+        .set_buttons(rfd::MessageButtons::OkCancelCustom(
+            KEEP_BLOCKED.to_string(),
+            TRUST_REVIEWED_RULES.to_string(),
+        ))
+        .show();
+
+    rules_changed_outcome(result)
+}
+
+fn rules_changed_outcome(result: rfd::MessageDialogResult) -> Outcome {
+    if matches!(result, rfd::MessageDialogResult::Custom(ref label) if label == "Trust reviewed rules")
+    {
+        Outcome::Allow { remember: false }
+    } else {
+        Outcome::Deny { remember: false }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +190,24 @@ mod tests {
         assert_eq!(
             Outcome::decode("allow remember=true\n").unwrap(),
             Outcome::Allow { remember: true },
+        );
+    }
+
+    #[test]
+    fn only_the_explicit_rules_trust_button_allows() {
+        assert_eq!(
+            rules_changed_outcome(rfd::MessageDialogResult::Custom(
+                "Trust reviewed rules".to_string()
+            )),
+            Outcome::Allow { remember: false }
+        );
+        assert_eq!(
+            rules_changed_outcome(rfd::MessageDialogResult::Custom("Keep blocked".to_string())),
+            Outcome::Deny { remember: false }
+        );
+        assert_eq!(
+            rules_changed_outcome(rfd::MessageDialogResult::Cancel),
+            Outcome::Deny { remember: false }
         );
     }
 }

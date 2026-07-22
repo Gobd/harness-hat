@@ -211,13 +211,22 @@ fn expand_config_paths(config: &mut Config) -> Result<()> {
         for mount in &mut ctr.mounts {
             mount.host = expand_path(&mount.host)?;
         }
+        if let Some(path) = &mut ctr.claude_settings {
+            *path = expand_path(path)?;
+        }
     }
     for mount in &mut config.defaults.containers.mounts {
         mount.host = expand_path(&mount.host)?;
     }
+    if let Some(path) = &mut config.defaults.containers.claude_settings {
+        *path = expand_path(path)?;
+    }
     for profile in config.container_profiles.values_mut() {
         for mount in &mut profile.mounts {
             mount.host = expand_path(&mount.host)?;
+        }
+        if let Some(path) = &mut profile.claude_settings {
+            *path = expand_path(path)?;
         }
     }
     Ok(())
@@ -291,11 +300,7 @@ pub(crate) fn materialize_container_def(
 
     let explicit_mounts = merge_mounts(&defaults.mounts, session_state_mounts, &profile.mounts);
 
-    let allowed_hosts = merge_unique_strings(
-        &defaults.allowed_hosts,
-        &profile.allowed_hosts,
-        &[],
-    );
+    let allowed_hosts = merge_unique_strings(&defaults.allowed_hosts, &profile.allowed_hosts, &[]);
 
     // Prefer the profile's value for an `Option` field, else the default's.
     macro_rules! prefer {
@@ -332,9 +337,7 @@ pub(crate) fn materialize_container_def(
         cpus: prefer!(cpus),
         shm_size: prefer!(shm_size),
         attach_shell: prefer!(attach_shell),
-        claude_settings: prefer!(claude_settings)
-            .map(|p| expand_path(&p).ok())
-            .flatten(),
+        claude_settings: prefer!(claude_settings),
     }
 }
 
@@ -911,9 +914,17 @@ fn validate(config: &Config) -> Result<()> {
                 ctr.name,
                 container_path_string(&mount.container)
             );
+            reject_sensitive_mount_source(&format!("container '{}'", ctr.name), &mount.host)?;
+        }
+        if let Some(path) = &ctr.claude_settings {
+            anyhow::ensure!(
+                !path.as_os_str().is_empty(),
+                "container '{}': claude_settings must not be empty",
+                ctr.name
+            );
             reject_sensitive_mount_source(
-                &format!("container '{}'", ctr.name),
-                &mount.host,
+                &format!("container '{}': claude_settings", ctr.name),
+                path,
             )?;
         }
         for (key, value) in &ctr.env {
@@ -1091,6 +1102,7 @@ pub fn expand_path(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod security_tests {
     use super::*;
+    use crate::config::ContainerDef;
 
     #[test]
     fn rejects_broad_and_credential_bearing_mount_roots() {
@@ -1116,5 +1128,30 @@ mod security_tests {
             assert!(sensitive_path_hit(&canonical_home).is_some());
             assert!(sensitive_path_hit(&home.join(".aws/credentials")).is_some());
         }
+    }
+
+    #[test]
+    fn rejects_sensitive_claude_settings_source() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let mut config = Config::default();
+        let mut container: ContainerDef =
+            serde_json::from_value(serde_json::json!({"name": "test"}))
+                .expect("minimal container definition");
+        container.claude_settings = Some(home.join(".ssh/settings.json"));
+        config.containers.push(container);
+
+        let error = validate(&config).expect_err("sensitive Claude settings must be rejected");
+        assert!(error.to_string().contains("claude_settings"));
+    }
+
+    #[test]
+    fn rejects_invalid_tilde_expansion_in_claude_settings_source() {
+        let mut config = Config::default();
+        config.defaults.containers.claude_settings =
+            Some(std::path::PathBuf::from("~other/settings.json"));
+
+        assert!(expand_config_paths(&mut config).is_err());
     }
 }

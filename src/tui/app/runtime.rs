@@ -45,8 +45,8 @@ impl App {
                 Err(_) => break,
             }
         }
-        // macOS: pop a native dialog for the front pending item (no-op on other
-        // platforms, which use the in-TUI overlay).
+        // Rules-file changes always use a system dialog. Network and hostdo
+        // approvals use one on macOS and retain the TUI fallback elsewhere.
         self.maybe_launch_native_dialog();
         self.refresh_session_terminal_states();
         for _ in 0..64 {

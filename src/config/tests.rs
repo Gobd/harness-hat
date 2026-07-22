@@ -32,7 +32,8 @@ fn container_def_for_test(name: &str, image: &str, image_stem: &str) -> Containe
         shm_size: None,
         attach_shell: None,
         claude_settings: None,
-    }}
+    }
+}
 
 fn with_temp_home<R>(home: &Path, f: impl FnOnce() -> R) -> R {
     let _guard = crate::TEST_ENV_LOCK.lock().expect("test env lock");
@@ -254,7 +255,7 @@ fn workspace_container_templates_include_local_dockerfiles_with_base_tag() {
             localhost_forwards: Vec::new(),
             shm_size: Some("1g".to_string()),
             attach_shell: None,
-        claude_settings: None,
+            claude_settings: None,
         };
 
         let templates = resolve_workspace_container_templates(&workspace, &defaults, &configured)
@@ -337,7 +338,7 @@ fn workspace_container_templates_merge_deduplicates_matching_names() {
             localhost_forwards: Vec::new(),
             shm_size: None,
             attach_shell: None,
-        claude_settings: None,
+            claude_settings: None,
         };
 
         let templates = resolve_workspace_container_templates(&workspace, &defaults, &configured)

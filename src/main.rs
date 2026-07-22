@@ -50,6 +50,10 @@ async fn main() -> Result<()> {
                     };
                     harness_hat::native_approval::run_hostdo_approval(&req)
                 }
+                DialogCommand::RulesChanged { path } => {
+                    let req = harness_hat::native_approval::RulesChangedRequest { path };
+                    harness_hat::native_approval::run_rules_changed_dialog(&req)
+                }
             };
             println!("{}", outcome.encode());
             return Ok(());
@@ -69,7 +73,12 @@ async fn main() -> Result<()> {
             let code = harness_hat::shell::run(id, args)?;
             std::process::exit(code);
         }
-        Some(Command::Workspace { template, name, rebuild, args }) => {
+        Some(Command::Workspace {
+            template,
+            name,
+            rebuild,
+            args,
+        }) => {
             // `workspace::run` uses `reqwest::blocking`, which spins up an
             // inner tokio runtime and drops it on the way out. Doing that
             // from inside `#[tokio::main]`'s runtime context panics
@@ -84,6 +93,12 @@ async fn main() -> Result<()> {
             .await
             .context("workspace task panicked")??;
             std::process::exit(code);
+        }
+        Some(Command::Rebuild {
+            no_cache,
+            templates,
+        }) => {
+            harness_hat::rebuild::run(templates, no_cache, cli.config.clone())?;
         }
         None => harness_hat::manager::run(cli).await?,
     }

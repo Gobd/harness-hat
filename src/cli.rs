@@ -68,6 +68,16 @@ pub enum Command {
         )]
         args: Vec<OsString>,
     },
+    /// Rebuild the base image followed by selected templates, or every
+    /// Dockerfile template in the configured docker_dir when none are named.
+    Rebuild {
+        /// Disable Docker's layer cache for the base and template builds.
+        #[arg(long)]
+        no_cache: bool,
+        /// Dockerfile template stems to rebuild, for example `go` or `python`.
+        #[arg(value_name = "TEMPLATE")]
+        templates: Vec<String>,
+    },
     /// Internal: pop a native system dialog and print the result to stdout.
     /// Invoked by the manager as a subprocess so the dialog has its own
     /// main thread / event loop; not intended for direct end-user use.
@@ -106,6 +116,11 @@ pub enum DialogCommand {
         #[arg(long, value_name = "WORKSPACE")]
         workspace: Option<String>,
     },
+    /// Rules-file tampering prompt. Only explicit trust unblocks decisions.
+    RulesChanged {
+        #[arg(long, value_name = "PATH")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -121,7 +136,7 @@ pub fn parse() -> Result<Cli> {
 
 pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
     let usage = format!(
-        "Usage: {COMMAND_NAME} [--config PATH] [init [PATH] | shell [ID] [COMMAND...] | workspace [OPTIONS] [COMMAND...]]"
+        "Usage: {COMMAND_NAME} [--config PATH] [init [PATH] | shell [ID] [COMMAND...] | workspace [OPTIONS] [COMMAND...] | rebuild [OPTIONS] [TEMPLATE...]]"
     );
     if raw.is_empty() {
         bail!("missing argv[0]. {usage}");
@@ -142,7 +157,7 @@ pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, parse_from};
+    use super::{Command, DialogCommand, parse_from};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -221,6 +236,21 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_subcommand_parses_cache_and_template_options() {
+        let cli =
+            parse_from(argv(&["hht", "rebuild", "--no-cache", "go", "python"])).expect("parse");
+        let Some(Command::Rebuild {
+            no_cache,
+            templates,
+        }) = cli.command
+        else {
+            panic!("expected Rebuild subcommand");
+        };
+        assert!(no_cache);
+        assert_eq!(templates, vec!["go", "python"]);
+    }
+
+    #[test]
     fn shell_subcommand_collects_trailing_args_verbatim() {
         let cli = parse_from(argv(&["hht", "shell", "0042", "claude", "--resume"])).expect("parse");
         let Some(Command::Shell { id, args }) = cli.command else {
@@ -233,5 +263,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["claude".to_string(), "--resume".to_string()],
         );
+    }
+
+    #[test]
+    fn rules_changed_dialog_parses_its_file_path() {
+        let cli = parse_from(argv(&[
+            "hht",
+            "__dialog",
+            "rules-changed",
+            "--path",
+            "/tmp/harness-rules.toml",
+        ]))
+        .expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Dialog(DialogCommand::RulesChanged { path }))
+                if path == PathBuf::from("/tmp/harness-rules.toml")
+        ));
     }
 }

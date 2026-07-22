@@ -29,13 +29,6 @@ impl App {
             return;
         }
 
-        if self.base_rules_changed.is_some() {
-            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-                self.base_rules_changed = None;
-            }
-            return;
-        }
-
         if self.remove_workspace_confirm.is_some() {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {

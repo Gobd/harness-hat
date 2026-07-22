@@ -13,10 +13,17 @@
 - Default `starter_network_allowlist` in the example config now includes Antigravity CLI's runtime domains: `antigravity-unleash.goog`, `play.googleapis.com`, `oauth2.googleapis.com`, `www.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, `lh3.googleusercontent.com`, and the Playwright CDN domains (`playwright.azureedge.net`, `playwright-akamai.azureedge.net`, `playwright-verizon.azureedge.net`).
 - New `hht init [PATH]` subcommand to generate a sample config (replaces the old `--init` flag; defaults to `./harness-hat.toml`).
 - Built-in Docker templates for TypeScript/Bun/Node/pnpm, Go, Rust, and PHP development environments (`docker/typescript.dockerfile`, `docker/go.dockerfile`, `docker/rust.dockerfile`, `docker/php.dockerfile`).
+- Built-in Docker templates for Python (`uv` with Python 3.13), Kotlin/JVM (Temurin 21, Kotlin, and Gradle), and C#/.NET (SDKs 10 and 8), with profile-specific starter network allowlists.
+- `hht workspace --name <WORKSPACE>` to start or attach to a named workspace without changing directories, and `hht workspace --rebuild` to rebuild its base and template images with Docker's layer cache disabled. The selected template is now saved on the workspace and used as its default on later launches.
+- Per-container `attach_shell` configuration, recorded on launched containers and used by `hht shell` / `hht workspace` attaches; the base image now includes zsh with Oh My Zsh and workspace-local history.
+- Per-container `claude_settings` configuration to seed a private `~/.claude/settings.json` from a host file for each session.
+- `hostdo output [--image IMAGE] [--timeout SECONDS] COMMAND...` for synchronous host-side command execution with captured output and the underlying exit code.
+- `hht rebuild [--no-cache] [TEMPLATE...]` to rebuild the base image and all, or selected, Dockerfile templates from the configured `docker_dir`; and a tag-triggered GitHub Actions workflow that publishes macOS, Windows, and Linux release artifacts.
 - Per-template Docker resource controls: `memory`, `cpus`, and `shm_size`.
 - Per-session seeded mounts (`ContainerMount.seed`): files like `~/.claude.json` and `~/.claude/.claude.json` are copied per session instead of bind-mounted, so concurrent sessions don't corrupt a file the agent rewrites in place. The TUI mounts view visually distinguishes seeded mounts.
 - Default container mounts for agent session state (`~/.claude.json`, `~/.claude/.claude.json`, `~/.claude`, `~/.codex`, `~/.config/codex`, `~/.gemini`, `~/.local/share/harness-hat/container-keyrings`, `~/.pi`) under `[defaults.containers.mounts]`; mounts whose host source is absent are skipped. The `~/.gemini` passthrough covers Antigravity CLI's `~/.gemini/antigravity-cli` settings/history state, while the dedicated keyrings mount persists its OS-keyring auth tokens.
 - The base image now starts a headless DBus Secret Service (`gnome-keyring`) for user sessions so Antigravity CLI can store and reuse login credentials inside Harness Hat containers.
+- The base image now includes `ripgrep`, ast-grep (`sg`), and zsh; the Go image includes `gofumpt`.
 - Automated macOS Keychain OAuth credentials injection: on macOS, reads the Claude Code OAuth credentials from the system Keychain and merges them into the seeded `.claude.json` and `~/.claude/.claude.json` container files on startup, allowing Claude Code to authenticate seamlessly without manual token config.
 - `[defaults.control].allow_remote_control` opt-in required to bind the control server or proxy to non-loopback addresses.
 - Persistent build pane: failed/cancelled builds keep their output and a banner with an `[r] Rebuild` shortcut.
@@ -43,6 +50,7 @@
 - README rewritten around the new workspace/template/shell workflow.
 
 ### Removed
+- `docker/build.sh` (replaced by `hht rebuild [--no-cache] [TEMPLATE...]`).
 - **Breaking:** root certificate injection and MITM TLS support (`src/ca.rs`, CA field from `ProxyState`, transparent TLS handler). Containers can no longer intercept HTTPS traffic; CONNECT requests now tunnel directly without certificate signing. This simplifies the proxy architecture and removes the need for injecting self-signed CAs into containers.
 - **Breaking:** `bypass_proxy` configuration field (migrated to `allowed_hosts`). Use `allowed_hosts` in `harness-hat.toml` instead for hosts that should be automatically allowed without network approval.
 - HTTP request type filtering and request-smuggling protections (H4 method validation, CR3 line-ending and body-framing validation). The proxy now accepts all HTTP methods and simplified body reading.
@@ -53,6 +61,9 @@
 - The unused PWA scaffold, source-export helper, and tracked OS/Python generated artifacts.
 
 ### Security
+- External changes to global or workspace `harness-rules.toml` now immediately block new proxy and hostdo policy decisions. Harness Hat opens a native system dialog; only an explicit trust of the reviewed current file version clears the block. Closing, cancelling, or failing to display the dialog remains blocked.
+- `claude_settings` sources now use the same path expansion and sensitive-path refusal as ordinary mounts. Invalid `~user` paths now fail configuration loading instead of being silently ignored.
+- Oh My Zsh is installed from a pinned, checksum-verified source archive rather than by executing its mutable remote installer during image builds.
 - Bearer-token and proxy-authorization comparisons now use constant-time equality.
 - Incoming hostnames are now canonicalized (lowercase, trailing-dot strip, IDNA) before rule matching on the plain-HTTP, CONNECT, and SNI paths; deny rules can no longer be bypassed via case, trailing dot, or punycode. CONNECT requests whose host fails canonicalization are rejected with 400.
 - Path matching now strips the query string, percent-decodes, and collapses `..`/`//` before evaluation.

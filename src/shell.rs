@@ -18,7 +18,8 @@ use std::io::{IsTerminal, Write};
 use std::process::Command;
 
 use crate::container::{
-    LABEL_ALIAS, LABEL_TEMPLATE, LABEL_WORKSPACE, LABEL_SHELL, SHELL_HOME, SHELL_USER, parse_docker_label,
+    LABEL_ALIAS, LABEL_SHELL, LABEL_TEMPLATE, LABEL_WORKSPACE, SHELL_HOME, SHELL_USER,
+    parse_docker_label,
 };
 
 /// Entry point for the `shell` subcommand. With an id, attaches to that
@@ -128,7 +129,12 @@ fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
 /// `/bin/bash` when empty), with the same TTY auto-detect + signal guarding +
 fn read_container_label(container_name: &str, label: &str) -> Result<String> {
     let output = Command::new("docker")
-        .args(["inspect", "-f", &format!("{{{{index .Config.Labels \"{label}\"}}}}"), container_name])
+        .args([
+            "inspect",
+            "-f",
+            &format!("{{{{index .Config.Labels \"{label}\"}}}}"),
+            container_name,
+        ])
         .output()
         .context("running docker inspect")?;
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();

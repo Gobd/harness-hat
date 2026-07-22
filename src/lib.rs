@@ -24,6 +24,7 @@ pub mod native_approval;
 pub mod new_project;
 pub mod notifications;
 pub mod proxy;
+pub mod rebuild;
 pub mod rules;
 pub mod server;
 pub mod shared_config;

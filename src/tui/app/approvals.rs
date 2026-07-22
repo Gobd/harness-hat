@@ -14,6 +14,18 @@ impl App {
         if idx >= self.pending_exec.len() {
             return;
         }
+        let workspace_name = self.pending_exec[idx].workspace_name.clone();
+        if let Err(error) = self
+            .config
+            .ensure_rules_trusted_for_workspace(Some(&workspace_name))
+        {
+            self.push_log(
+                format!("blocked host command approval until rules are reviewed: {error}"),
+                true,
+            );
+            self.deny_exec(idx);
+            return;
+        }
         let remembered = if remember {
             let item = &self.pending_exec[idx];
             let image = item.image.clone();
@@ -87,6 +99,17 @@ impl App {
         let argv = item.argv.clone();
         let project = item.workspace_name.clone();
         let rule_cwd = item.rule_cwd.clone();
+        if let Err(error) = self
+            .config
+            .ensure_rules_trusted_for_workspace(Some(&project))
+        {
+            self.push_log(
+                format!("blocked rules update until reviewed: {error}"),
+                true,
+            );
+            self.deny_exec(idx);
+            return;
+        }
         if let Some(rules_path) = self.workspace_rules_path(&project) {
             let cwd = self.portable_cwd(&rule_cwd, &project);
             match self.persist_exec_rule(
@@ -113,6 +136,18 @@ impl App {
 
     pub(crate) fn approve_net(&mut self, idx: usize) {
         if idx >= self.pending_net.len() {
+            return;
+        }
+        let workspace_name = self.pending_net[idx].source_workspace.clone();
+        if let Err(error) = self
+            .config
+            .ensure_rules_trusted_for_workspace(workspace_name.as_deref())
+        {
+            self.push_log(
+                format!("blocked network approval until rules are reviewed: {error}"),
+                true,
+            );
+            self.deny_net(idx);
             return;
         }
         let item = self.pending_net.remove(idx);
@@ -142,6 +177,17 @@ impl App {
                 return;
             }
         };
+        if let Err(error) = self
+            .config
+            .ensure_rules_trusted_for_workspace(Some(&project_name))
+        {
+            self.push_log(
+                format!("blocked network approval until rules are reviewed: {error}"),
+                true,
+            );
+            self.deny_net(idx);
+            return;
+        }
         self.persist_network_rule_forever(idx, PersistKind::Allow, &project_name);
         self.approve_net(idx);
     }
@@ -157,6 +203,17 @@ impl App {
                 return;
             }
         };
+        if let Err(error) = self
+            .config
+            .ensure_rules_trusted_for_workspace(Some(&project_name))
+        {
+            self.push_log(
+                format!("blocked rules update until reviewed: {error}"),
+                true,
+            );
+            self.deny_net(idx);
+            return;
+        }
         self.persist_network_rule_forever(idx, PersistKind::Deny, &project_name);
         self.deny_net(idx);
     }
@@ -290,9 +347,17 @@ impl App {
 
         let expected_content = crate::rules::render_rules_file(&rules)
             .with_context(|| format!("rendering rules file '{}'", rules_path.display()))?;
-        self.note_rules_internal_write(rules_path.clone(), expected_content);
+        self.note_rules_internal_write(rules_path.clone(), expected_content.clone());
         crate::rules::write_rules_file(&rules_path, &rules)
             .with_context(|| format!("writing rules file '{}'", rules_path.display()))?;
+        self.config
+            .trust_rules_file_if_contents(&rules_path, &expected_content)
+            .with_context(|| {
+                format!(
+                    "verifying rules file '{}' after writing",
+                    rules_path.display()
+                )
+            })?;
         Ok(Some(rules_path))
     }
 
@@ -343,9 +408,17 @@ impl App {
         }
         let expected_content = crate::rules::render_rules_file(&rules)
             .with_context(|| format!("rendering rules file '{}'", rules_path.display()))?;
-        self.note_rules_internal_write(rules_path.to_path_buf(), expected_content);
+        self.note_rules_internal_write(rules_path.to_path_buf(), expected_content.clone());
         crate::rules::write_rules_file(rules_path, &rules)
             .with_context(|| format!("writing rules file '{}'", rules_path.display()))?;
+        self.config
+            .trust_rules_file_if_contents(rules_path, &expected_content)
+            .with_context(|| {
+                format!(
+                    "verifying rules file '{}' after writing",
+                    rules_path.display()
+                )
+            })?;
         Ok(())
     }
 

@@ -11,6 +11,9 @@ const DEFAULT_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/default.docker
 const TYPESCRIPT_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/typescript.dockerfile");
 const GO_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/go.dockerfile");
 const RUST_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/rust.dockerfile");
+const PYTHON_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/python.dockerfile");
+const KOTLIN_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/kotlin.dockerfile");
+const CSHARP_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/csharp.dockerfile");
 const PHP_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/php.dockerfile");
 
 /// Built-in dockerfile templates compiled into the binary.
@@ -23,6 +26,9 @@ const BUILTIN_DOCKERFILES: &[(&str, &str)] = &[
     ("typescript.dockerfile", TYPESCRIPT_DOCKERFILE_TEMPLATE),
     ("go.dockerfile", GO_DOCKERFILE_TEMPLATE),
     ("rust.dockerfile", RUST_DOCKERFILE_TEMPLATE),
+    ("python.dockerfile", PYTHON_DOCKERFILE_TEMPLATE),
+    ("kotlin.dockerfile", KOTLIN_DOCKERFILE_TEMPLATE),
+    ("csharp.dockerfile", CSHARP_DOCKERFILE_TEMPLATE),
     ("php.dockerfile", PHP_DOCKERFILE_TEMPLATE),
 ];
 
@@ -132,6 +138,9 @@ pub fn ensure_language_dockerfiles(docker_dir: &Path) -> Result<()> {
     )?;
     ensure_template_dockerfile(docker_dir, "go.dockerfile", GO_DOCKERFILE_TEMPLATE)?;
     ensure_template_dockerfile(docker_dir, "rust.dockerfile", RUST_DOCKERFILE_TEMPLATE)?;
+    ensure_template_dockerfile(docker_dir, "python.dockerfile", PYTHON_DOCKERFILE_TEMPLATE)?;
+    ensure_template_dockerfile(docker_dir, "kotlin.dockerfile", KOTLIN_DOCKERFILE_TEMPLATE)?;
+    ensure_template_dockerfile(docker_dir, "csharp.dockerfile", CSHARP_DOCKERFILE_TEMPLATE)?;
     ensure_template_dockerfile(docker_dir, "php.dockerfile", PHP_DOCKERFILE_TEMPLATE)?;
     Ok(())
 }
@@ -292,6 +301,9 @@ mod tests {
         assert!(paths.contains(&"typescript.dockerfile"));
         assert!(paths.contains(&"go.dockerfile"));
         assert!(paths.contains(&"rust.dockerfile"));
+        assert!(paths.contains(&"python.dockerfile"));
+        assert!(paths.contains(&"kotlin.dockerfile"));
+        assert!(paths.contains(&"csharp.dockerfile"));
         assert!(paths.contains(&"php.dockerfile"));
     }
 
@@ -383,6 +395,9 @@ mod tests {
             ("typescript.dockerfile", "TypeScript / Node / Bun"),
             ("go.dockerfile", "Go image"),
             ("rust.dockerfile", "Rust image"),
+            ("python.dockerfile", "harness-hat Python / uv image"),
+            ("kotlin.dockerfile", "harness-hat Kotlin / JVM image"),
+            ("csharp.dockerfile", "harness-hat C# / .NET image"),
             ("php.dockerfile", "PHP image"),
         ] {
             let content = std::fs::read_to_string(root.join(path)).expect("read dockerfile");

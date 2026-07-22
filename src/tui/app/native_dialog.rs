@@ -8,12 +8,14 @@
 //! launches that subprocess for the front pending item, collects its result,
 //! and feeds the decision back through the existing approve/deny paths.
 //!
-//! macOS only — every other platform falls back to the in-TUI overlay because
-//! the subprocess has no native backend there (it would just return
-//! `cancelled`, silently denying every request).
+//! Network and host-command approvals currently use native dialogs only on
+//! macOS. Rules-file tampering always opens a system dialog and remains
+//! fail-closed if that dialog cannot be displayed.
 
 use super::*;
-use crate::native_approval::{ApprovalRequest, HostdoApprovalRequest, Outcome};
+use crate::native_approval::{
+    ApprovalRequest, HostdoApprovalRequest, Outcome, RulesChangedRequest,
+};
 
 /// Message a finished native-dialog subprocess task sends back to the event
 /// loop: the activity id it was prompting for, plus the user's choice.
@@ -23,6 +25,7 @@ pub(crate) type NativeDialogResult = (NativeDialogTarget, Outcome);
 pub(crate) enum NativeDialogTarget {
     Exec(String),
     Network(String),
+    RulesChanged(std::path::PathBuf),
 }
 
 impl App {
@@ -47,7 +50,26 @@ impl App {
     /// is waiting, pop a dialog for the front pending item. Only one modal is
     /// shown at a time, so a burst of requests queues behind it.
     pub(crate) fn maybe_launch_native_dialog(&mut self) {
-        if !Self::native_dialog_enabled() || self.native_dialog_inflight.is_some() {
+        if self.native_dialog_inflight.is_some() {
+            return;
+        }
+        let changed_rules_path = self.base_rules_changed.as_mut().and_then(|state| {
+            (!state.dialog_dismissed).then(|| {
+                state.dialog_dismissed = true;
+                state.path.clone()
+            })
+        });
+        if let Some(path) = changed_rules_path {
+            let target = NativeDialogTarget::RulesChanged(path.clone());
+            self.native_dialog_inflight = Some(target.clone());
+            spawn_native_rules_changed_dialog(
+                target,
+                RulesChangedRequest { path },
+                self.background_channels.native_dialog_tx.clone(),
+            );
+            return;
+        }
+        if !Self::native_dialog_enabled() {
             return;
         }
         if let Some(item) = self.pending_exec.first() {
@@ -146,6 +168,53 @@ impl App {
                     }
                 }
             }
+            NativeDialogTarget::RulesChanged(path) => match outcome {
+                Outcome::Allow { .. } => {
+                    let Some(expected_contents) = self
+                        .base_rules_changed
+                        .as_ref()
+                        .filter(|state| state.path == path)
+                        .map(|state| state.expected_contents.as_deref())
+                    else {
+                        self.config.block_rules_file(&path);
+                        return;
+                    };
+                    match self
+                        .config
+                        .trust_rules_file_if_bytes(&path, expected_contents)
+                    {
+                        Ok(()) => {
+                            self.base_rules_changed = None;
+                            self.push_log(
+                                format!("trusted reviewed rules file: {}", path.display()),
+                                false,
+                            );
+                        }
+                        Err(error) => {
+                            self.config.block_rules_file(&path);
+                            if let Some(state) = self.base_rules_changed.as_mut()
+                                && state.path == path
+                            {
+                                state.dialog_dismissed = false;
+                            }
+                            self.push_log(
+                                format!(
+                                    "rules file changed before it could be trusted '{}': {error}",
+                                    path.display()
+                                ),
+                                true,
+                            );
+                        }
+                    }
+                }
+                Outcome::Deny { .. } | Outcome::Cancelled => {
+                    self.config.block_rules_file(&path);
+                    self.push_log(
+                        format!("rules remain blocked until reviewed: {}", path.display()),
+                        true,
+                    );
+                }
+            },
         }
     }
 }
@@ -168,6 +237,17 @@ fn spawn_native_hostdo_dialog(
 ) {
     tokio::spawn(async move {
         let outcome = run_native_hostdo_dialog_subprocess(&req).await;
+        let _ = result_tx.send((target, outcome)).await;
+    });
+}
+
+fn spawn_native_rules_changed_dialog(
+    target: NativeDialogTarget,
+    req: RulesChangedRequest,
+    result_tx: mpsc::Sender<NativeDialogResult>,
+) {
+    tokio::spawn(async move {
+        let outcome = run_native_rules_changed_dialog_subprocess(&req).await;
         let _ = result_tx.send((target, outcome)).await;
     });
 }
@@ -246,6 +326,31 @@ async fn run_native_hostdo_dialog_subprocess(req: &HostdoApprovalRequest) -> Out
         .lines()
         .rev()
         .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    Outcome::decode(line).unwrap_or(Outcome::Cancelled)
+}
+
+async fn run_native_rules_changed_dialog_subprocess(req: &RulesChangedRequest) -> Outcome {
+    let exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(_) => return Outcome::Cancelled,
+    };
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.arg("__dialog")
+        .arg("rules-changed")
+        .arg("--path")
+        .arg(&req.path)
+        .stdin(std::process::Stdio::null());
+
+    let output = match cmd.output().await {
+        Ok(output) => output,
+        Err(_) => return Outcome::Cancelled,
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
         .unwrap_or("");
     Outcome::decode(line).unwrap_or(Outcome::Cancelled)
 }

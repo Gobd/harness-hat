@@ -23,9 +23,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_log_fullscreen(frame, app, split[0]);
         render_status_bar_log(frame, app, split[1]);
         render_terminal_overlays(frame, app, split[0]);
-        if app.base_rules_changed.is_some() {
-            render_base_rules_changed_overlay(frame, app, area);
-        }
         return;
     }
 
@@ -37,17 +34,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 render_session_detail(frame, app, area, si, app.has_pending_approval_modal());
             }
             render_terminal_overlays(frame, app, area);
-            if app.base_rules_changed.is_some() {
-                render_base_rules_changed_overlay(frame, app, area);
-            } else if app.remove_workspace_confirm.is_some() {
+            if app.remove_workspace_confirm.is_some() {
                 render_remove_workspace_confirm_overlay(frame, app, area);
             }
         } else {
             render_idle(frame, area);
             render_terminal_overlays(frame, app, area);
-            if app.base_rules_changed.is_some() {
-                render_base_rules_changed_overlay(frame, app, area);
-            } else if app.remove_workspace_confirm.is_some() {
+            if app.remove_workspace_confirm.is_some() {
                 render_remove_workspace_confirm_overlay(frame, app, area);
             }
         }
@@ -105,9 +98,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     } else {
         render_status_bar(frame, app, outer[1]);
     }
-    if app.base_rules_changed.is_some() {
-        render_base_rules_changed_overlay(frame, app, area);
-    } else if app.remove_workspace_confirm.is_some() {
+    if app.remove_workspace_confirm.is_some() {
         render_remove_workspace_confirm_overlay(frame, app, area);
     }
 }

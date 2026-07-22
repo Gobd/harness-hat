@@ -167,6 +167,19 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
     state.activity_line(&connect_activity.id, format!("target {host}:{port}"));
 
     let cfg = state.config.get();
+    if let Err(e) = state
+        .config
+        .ensure_rules_trusted_for_workspace(source_workspace.as_deref())
+    {
+        warn!("proxy rules are locked: {e}");
+        state.activity_finished(
+            &connect_activity.id,
+            ActivityState::Denied,
+            Some("rules file change requires review".to_string()),
+        );
+        write_error_any(&mut stream, 403, "Rules file change requires review").await?;
+        return Ok(());
+    }
     let rules = match config::load_composed_rules_for_workspace(&cfg, source_workspace.as_deref()) {
         Ok(rules) => rules,
         Err(e) => {
@@ -180,6 +193,19 @@ pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> 
             return Ok(());
         }
     };
+    if let Err(e) = state
+        .config
+        .ensure_rules_trusted_for_workspace(source_workspace.as_deref())
+    {
+        warn!("proxy rules changed while loading: {e}");
+        state.activity_finished(
+            &connect_activity.id,
+            ActivityState::Denied,
+            Some("rules file change requires review".to_string()),
+        );
+        write_error_any(&mut stream, 403, "Rules file change requires review").await?;
+        return Ok(());
+    }
     // Deny wins over allow: consult the denylist first so an explicit deny rule
     // cannot be overridden by an `allowed_hosts` entry (H2).
     let rule_policy = rules.match_connect(&host, port);
