@@ -6,18 +6,14 @@ use std::path::PathBuf;
 pub const COMMAND_NAME: &str = "hht";
 
 #[derive(Debug, Clone, Parser)]
-#[command(name = COMMAND_NAME, version, about = "Harness Hat — manager UI")]
+#[command(name = COMMAND_NAME, version, about = "Harness Hat — manager UI and daemon client")]
 struct CliOptions {
-    /// Path to config file. Used by the interactive workspace manager (the
-    /// default action when no subcommand is given).
-    #[arg(short, long, value_name = "PATH")]
-    config: Option<PathBuf>,
-
     #[command(subcommand)]
     command: Option<Command>,
 }
 
-/// Subcommands. When none is given, `hht` launches the interactive manager.
+/// Subcommands. When none is given, `hht` launches the interactive manager or
+/// attaches to an installed background daemon.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
     /// Generate a sample config file (defaults to ./harness-hat.toml).
@@ -94,10 +90,6 @@ pub enum Command {
     /// main thread / event loop; not intended for direct end-user use.
     #[command(name = "__dialog", hide = true, subcommand)]
     Dialog(DialogCommand),
-    /// Internal background-agent entry point. Installed service definitions
-    /// invoke this rather than the terminal UI.
-    #[command(name = "__service", hide = true)]
-    Service,
 }
 
 /// Dialog kinds the `__dialog` subcommand can render. Each variant maps to
@@ -140,7 +132,6 @@ pub enum DialogCommand {
 
 #[derive(Debug, Clone)]
 pub struct Cli {
-    pub config: Option<PathBuf>,
     pub command: Option<Command>,
 }
 
@@ -151,7 +142,7 @@ pub fn parse() -> Result<Cli> {
 
 pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
     let usage = format!(
-        "Usage: {COMMAND_NAME} [--config PATH] [init [PATH] | shell [ID] [COMMAND...] | shell --kill ID | workspace [OPTIONS] [COMMAND...] | rebuild [OPTIONS] [TEMPLATE...] | install | uninstall]"
+        "Usage: {COMMAND_NAME} [init [PATH] | shell [ID] [COMMAND...] | shell --kill ID | workspace [OPTIONS] [COMMAND...] | rebuild [OPTIONS] [TEMPLATE...] | install | uninstall]"
     );
     if raw.is_empty() {
         bail!("missing argv[0]. {usage}");
@@ -165,7 +156,6 @@ pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
         Err(err) => err.exit(),
     };
     Ok(Cli {
-        config: options.config,
         command: options.command,
     })
 }
@@ -184,14 +174,6 @@ mod tests {
     fn bare_invocation_has_no_subcommand() {
         let cli = parse_from(argv(&["hht"])).expect("parse");
         assert!(cli.command.is_none());
-        assert!(cli.config.is_none());
-    }
-
-    #[test]
-    fn config_flag_applies_to_default_action() {
-        let cli = parse_from(argv(&["hht", "--config", "/tmp/x.toml"])).expect("parse");
-        assert!(cli.command.is_none());
-        assert_eq!(cli.config, Some(PathBuf::from("/tmp/x.toml")));
     }
 
     #[test]

@@ -62,11 +62,7 @@ async fn main() -> Result<()> {
             let path = path.unwrap_or_else(|| std::path::PathBuf::from("harness-hat.toml"));
             harness_hat::init::write_sample_config(&path)?;
             println!("config written to: {}", path.display());
-            println!(
-                "edit it, then run: {} --config {}",
-                harness_hat::cli::COMMAND_NAME,
-                path.display()
-            );
+            println!("Run `hht install` to create and start the default background service.");
         }
         Some(Command::Shell { id, kill, args }) => {
             // Pure-Docker passthrough; intentionally bypasses manager init.
@@ -87,9 +83,8 @@ async fn main() -> Result<()> {
             // allowed"), so move the whole synchronous flow onto the
             // blocking pool — the inner runtime drop happens off the main
             // runtime thread.
-            let config = cli.config.clone();
             let code = tokio::task::spawn_blocking(move || {
-                harness_hat::workspace::run(args, list, template, name, rebuild, config)
+                harness_hat::workspace::run(args, list, template, name, rebuild, None)
             })
             .await
             .context("workspace task panicked")??;
@@ -99,21 +94,15 @@ async fn main() -> Result<()> {
             no_cache,
             templates,
         }) => {
-            harness_hat::rebuild::run(templates, no_cache, cli.config.clone())?;
+            harness_hat::rebuild::run(templates, no_cache, None)?;
         }
         Some(Command::Install) => {
-            harness_hat::service::install(cli.config.clone())?;
+            harness_hat::service::install(None)?;
         }
         Some(Command::Uninstall) => {
             harness_hat::service::uninstall()?;
         }
-        Some(Command::Service) => {
-            let config_path = cli.config.clone().ok_or_else(|| {
-                anyhow::anyhow!("internal service mode requires an explicit --config PATH")
-            })?;
-            harness_hat::manager::run_service(config_path).await?;
-        }
-        None => harness_hat::manager::run(cli).await?,
+        None => harness_hat::manager::run().await?,
     }
     Ok(())
 }

@@ -3,6 +3,7 @@
 ## 0.8.0 Unreleased
 
 ### Added
+- User Guide page for attaching VS Code, Windsurf, Codex, and compatible VS Code-based IDEs to existing Harness Hat sessions with Development Containers.
 - MVP Windows 11 host support for Docker Desktop Linux containers. Runtime bind mounts now use Docker `--mount` syntax, strip the `\\?\` prefixes produced by Windows canonicalization, strict-network Docker Desktop launches use `--privileged`, Docker image builds no longer depend on `sh -lc`, embedded and mounted Linux scripts are normalized to LF, Windows cancellation paths use `taskkill /T /F`, TUI key-release events no longer trigger duplicate build/launch actions, and ConPTY escapes Docker arguments containing spaces. Failed launches also stop polling promptly and surface the captured Docker error. Codex uses container-local state on Windows while portable auth/config/plugin data is seeded from the host, avoiding unsupported SQLite locking across the Windows-to-Linux bind filesystem.
 - `allowed_hosts` configuration field in `harness-hat.toml` (at defaults and per-container level) for hosts that bypass network approval prompts without needing `harness-rules.toml` entries. Supports wildcard patterns matching.
 - New `hht shell [ID] [COMMAND...]` subcommand: open an interactive shell in a running session, or run a one-off command in it. With no ID it lists running sessions with both their Harness Hat and Docker container IDs; `hht shell --kill <ID>` terminates and removes a session. Any args after the ID are passed verbatim to `docker exec` (e.g. `hht shell 0042 claude --resume`). Works as a thin Docker attach, independent of the manager TUI; falls back to `docker exec -i` (no `-t`) when stdin is not a terminal so piped commands like `echo prompt | hht shell ID cat` work.
@@ -21,6 +22,7 @@
 - `hht rebuild [--no-cache] [TEMPLATE...]` to rebuild the base image and all, or selected, Dockerfile templates from the configured `docker_dir`; and a tag-triggered GitHub Actions workflow that publishes macOS, Windows, and Linux release artifacts.
 - `hht install` / `hht uninstall` for a per-user graphical background agent: launchd on macOS, systemd user services on Linux, and a Task Scheduler logon task on Windows. The agent runs the control plane and workspace launch path without a terminal; approval dialogs remain native and fail closed.
 - The installed background agent now runs as the dedicated `hht-daemon` executable, with release archives packaging both `hht` and `hht-daemon`.
+- A plain `hht` command now detects the installed daemon and attaches to its existing terminal UI instead of failing because the daemon already owns the control port. The daemon remains the owner of the live session, build, approval, and terminal state.
 - Per-template Docker resource controls: `memory`, `cpus`, and `shm_size`.
 - Per-session seeded mounts (`ContainerMount.seed`): files like `~/.claude.json` and `~/.claude/.claude.json` are copied per session instead of bind-mounted, so concurrent sessions don't corrupt a file the agent rewrites in place. The TUI mounts view visually distinguishes seeded mounts.
 - Default container mounts for agent session state (`~/.claude.json`, `~/.claude/.claude.json`, `~/.claude`, `~/.codex`, `~/.config/codex`, `~/.gemini`, `~/.local/share/harness-hat/container-keyrings`, `~/.pi`) under `[defaults.containers.mounts]`; mounts whose host source is absent are skipped. The `~/.gemini` passthrough covers Antigravity CLI's `~/.gemini/antigravity-cli` settings/history state, while the dedicated keyrings mount persists its OS-keyring auth tokens.
@@ -38,6 +40,7 @@
 - `hht workspace --list` prints configured workspace names, paths, and saved templates without requiring Docker or the background agent to be running.
 
 ### Changed
+- **Breaking:** removed the public `hht --config PATH` option. The normal CLI uses its standard config discovery flow, while the installed `hht-daemon` keeps its private fixed config path.
 - Workspace template selections are now stored in the workspace root's `harness-rules.toml`; an optional `[[workspaces]].template` in `harness-hat.toml` overrides the workspace-local choice.
 - Updated Rust dependencies to current compatible releases, including Axum 0.8, Reqwest 0.13, Tokio-compatible OpenTelemetry 0.32, TOML 1.1, and the latest TUI, terminal, utility, and native-dialog crates. The minimum supported Rust version is now 1.89.
 - **Breaking:** `bypass_proxy` configuration has been replaced by `allowed_hosts` for specifying hosts that are automatically allowed without network approval. The field is now supported at the defaults level and per-container profile in `harness-hat.toml`, and no longer requires setting `NO_PROXY` environment variables.

@@ -8,6 +8,7 @@ This guide is for developers using Harness Hat to run projects and coding agents
 4. [Set up Claude Code](04-claude.md)
 5. [Use hostdo with an agent](05-hostdo.md)
 6. [Operate and troubleshoot sessions](06-operations.md)
+7. [Use VS Code-based editors](07-vscode-editors.md)
 
 Start with [Set up Harness Hat](01-setup.md).
 
