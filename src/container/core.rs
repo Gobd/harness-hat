@@ -284,7 +284,7 @@ impl ContainerSession {
     ///
     /// This is the blocking variant — `docker rm -f` can take several seconds
     /// (SIGTERM grace, then SIGKILL, then daemon-side cleanup), so callers on
-    /// a UI/event-loop thread should prefer [`terminate_in_background`].
+    /// a UI/event-loop thread should prefer [`Self::terminate_in_background`].
     pub fn terminate(&self) -> anyhow::Result<()> {
         Self::docker_rm_force(&self.target_for_rm())
     }

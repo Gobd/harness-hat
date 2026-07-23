@@ -34,25 +34,23 @@ pub fn prompt_network_approval(req: &ApprovalRequest) -> Outcome {
         // lifetime.
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-        let alert = unsafe { NSAlert::new(mtm) };
+        let alert = NSAlert::new(mtm);
         let title = NSString::from_str("Harness Hat — network approval");
         let body = NSString::from_str(&format_body(req));
         let allow_label = NSString::from_str("Allow");
         let deny_label = NSString::from_str("Deny");
         let remember_label = NSString::from_str("Remember this decision");
 
-        unsafe {
-            alert.setMessageText(&title);
-            alert.setInformativeText(&body);
-            // First button added becomes the default (return key, right
-            // side). We add Allow first to match the rfd preview shown to
-            // the user; revisit if we decide "safer default = Deny" later.
-            let _ = alert.addButtonWithTitle(&allow_label);
-            let _ = alert.addButtonWithTitle(&deny_label);
-            alert.setShowsSuppressionButton(true);
-            if let Some(supp) = alert.suppressionButton() {
-                supp.setTitle(&remember_label);
-            }
+        alert.setMessageText(&title);
+        alert.setInformativeText(&body);
+        // First button added becomes the default (return key, right
+        // side). We add Allow first to match the rfd preview shown to
+        // the user; revisit if we decide "safer default = Deny" later.
+        let _ = alert.addButtonWithTitle(&allow_label);
+        let _ = alert.addButtonWithTitle(&deny_label);
+        alert.setShowsSuppressionButton(true);
+        if let Some(supp) = alert.suppressionButton() {
+            supp.setTitle(&remember_label);
         }
 
         // Bring the subprocess forward so the alert isn't buried behind the
@@ -61,13 +59,11 @@ pub fn prompt_network_approval(req: &ApprovalRequest) -> Outcome {
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
 
-        let response: isize = unsafe { alert.runModal() };
-        let remember = unsafe {
-            alert
-                .suppressionButton()
-                .map(|b| b.state() == NSControlStateValueOn)
-                .unwrap_or(false)
-        };
+        let response: isize = alert.runModal();
+        let remember = alert
+            .suppressionButton()
+            .map(|b| b.state() == NSControlStateValueOn)
+            .unwrap_or(false);
 
         match response {
             NS_ALERT_FIRST_BUTTON_RETURN => Outcome::Allow { remember },
@@ -110,34 +106,30 @@ pub fn prompt_hostdo_approval(req: &HostdoApprovalRequest) -> Outcome {
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-        let alert = unsafe { NSAlert::new(mtm) };
+        let alert = NSAlert::new(mtm);
         let title = NSString::from_str("Harness Hat — host command approval");
         let body = NSString::from_str(&format_hostdo_body(req));
         let allow_label = NSString::from_str("Allow");
         let deny_label = NSString::from_str("Deny");
         let remember_label = NSString::from_str("Remember this decision");
 
-        unsafe {
-            alert.setMessageText(&title);
-            alert.setInformativeText(&body);
-            let _ = alert.addButtonWithTitle(&allow_label);
-            let _ = alert.addButtonWithTitle(&deny_label);
-            alert.setShowsSuppressionButton(true);
-            if let Some(supp) = alert.suppressionButton() {
-                supp.setTitle(&remember_label);
-            }
+        alert.setMessageText(&title);
+        alert.setInformativeText(&body);
+        let _ = alert.addButtonWithTitle(&allow_label);
+        let _ = alert.addButtonWithTitle(&deny_label);
+        alert.setShowsSuppressionButton(true);
+        if let Some(supp) = alert.suppressionButton() {
+            supp.setTitle(&remember_label);
         }
 
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
 
-        let response: isize = unsafe { alert.runModal() };
-        let remember = unsafe {
-            alert
-                .suppressionButton()
-                .map(|b| b.state() == NSControlStateValueOn)
-                .unwrap_or(false)
-        };
+        let response: isize = alert.runModal();
+        let remember = alert
+            .suppressionButton()
+            .map(|b| b.state() == NSControlStateValueOn)
+            .unwrap_or(false);
 
         match response {
             NS_ALERT_FIRST_BUTTON_RETURN => Outcome::Allow { remember },

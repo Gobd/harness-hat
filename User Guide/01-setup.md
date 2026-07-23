@@ -77,7 +77,7 @@ This guide uses one global configuration file for every developer:
 ~/.config/harness-hat/harness-hat.toml
 ```
 
-Run `hht install`. On its first run, it creates that default global config and its Docker assets, then installs the required per-user graphical background agent:
+Run `hht install` as your normal signed-in desktop user. Do not prefix it with `sudo`: the agent is per-user so it can access your Docker Desktop session and display approval dialogs. On its first run, it creates that default global config and its Docker assets, then installs the required per-user graphical background agent:
 
 ```sh
 hht install

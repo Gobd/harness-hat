@@ -432,7 +432,7 @@ Use `hht rebuild` to rebuild the base image followed by every Dockerfile templat
 
 ### Background agent
 
-`hht install` creates the default global config at `~/.config/harness-hat/harness-hat.toml` when it is missing, then installs a per-user desktop agent using launchd on macOS, a systemd user unit on Linux, or a Task Scheduler logon task on Windows. It starts the control server, scoped proxies, workspace-launch path, and native approval dialogs without requiring a terminal. It is intentionally not a privileged system service: it runs only in the signed-in desktop session so it can use that user's Docker access and show approval dialogs. Use `hht uninstall` to stop and remove the agent.
+`hht install` creates the default global config at `~/.config/harness-hat/harness-hat.toml` when it is missing, then installs a per-user desktop agent using launchd on macOS, a systemd user unit on Linux, or a Task Scheduler logon task on Windows. Run it as the signed-in desktop user, without `sudo`; it needs that user's Docker access and graphical session for approval dialogs. It starts the control server, scoped proxies, workspace-launch path, and native approval dialogs without requiring a terminal. It is intentionally not a privileged system service. Use `hht uninstall` to stop and remove the agent.
 
 When the agent is active, use `hht workspace` and `hht shell` for session work. Approval decisions are native system dialogs; if the desktop dialog backend is unavailable, requests remain denied rather than falling back to an invisible prompt.
 

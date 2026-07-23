@@ -8,6 +8,8 @@
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
 
 #[cfg(any(target_os = "macos", test))]
 const LABEL: &str = "com.harness-hat.manager";
@@ -17,6 +19,7 @@ const SYSTEMD_UNIT: &str = "harness-hat.service";
 const WINDOWS_TASK: &str = "Harness Hat";
 
 pub fn install(explicit_config: Option<PathBuf>) -> Result<()> {
+    ensure_desktop_user()?;
     let (config_path, created_config) = resolve_config_path(explicit_config)?;
     if created_config {
         println!("Created default global config: {}", config_path.display());
@@ -44,6 +47,7 @@ pub fn install(explicit_config: Option<PathBuf>) -> Result<()> {
 }
 
 pub fn uninstall() -> Result<()> {
+    ensure_desktop_user()?;
     #[cfg(target_os = "macos")]
     uninstall_macos()?;
     #[cfg(target_os = "linux")]
@@ -54,6 +58,14 @@ pub fn uninstall() -> Result<()> {
     bail!("hht uninstall supports macOS, Linux with systemd, and Windows only");
 
     println!("Harness Hat background agent removed for this desktop user.");
+    Ok(())
+}
+
+fn ensure_desktop_user() -> Result<()> {
+    #[cfg(unix)]
+    if unsafe { libc::geteuid() } == 0 {
+        bail!("hht install/uninstall must run as the signed-in desktop user; do not use sudo");
+    }
     Ok(())
 }
 
@@ -127,6 +139,8 @@ fn install_macos(executable: &Path, config_path: &Path) -> Result<()> {
     let _ = Command::new("launchctl")
         .args(["bootout", &domain])
         .arg(&path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
     command_status(
         "launchctl",
@@ -154,6 +168,8 @@ fn uninstall_macos() -> Result<()> {
     let _ = Command::new("launchctl")
         .args(["bootout", &domain])
         .arg(&path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
     std::fs::remove_file(&path).with_context(|| format!("removing launch agent {}", path.display()))
 }
