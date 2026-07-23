@@ -2,7 +2,11 @@
 
 ## 0.8.0 Unreleased
 
+### Fixed
+- Network, host-command, and rules-change native approval dialogs launched by the background service now invoke the sibling `hht` executable, rather than the daemon-only binary. Unmatched network requests therefore display their approval prompt instead of being immediately denied.
+
 ### Added
+- Authenticated, sequenced `/tui/events` long-poll feed for attached clients. Workspace launch requests, build output, launch completion/failure, and active-session refreshes now wake an open `hht` client without fixed-rate frame polling; clients reload their snapshot if they fall behind the bounded event window.
 - User Guide page for attaching VS Code, Windsurf, Codex, and compatible VS Code-based IDEs to existing Harness Hat sessions with Development Containers.
 - MVP Windows 11 host support for Docker Desktop Linux containers. Runtime bind mounts now use Docker `--mount` syntax, strip the `\\?\` prefixes produced by Windows canonicalization, strict-network Docker Desktop launches use `--privileged`, Docker image builds no longer depend on `sh -lc`, embedded and mounted Linux scripts are normalized to LF, Windows cancellation paths use `taskkill /T /F`, TUI key-release events no longer trigger duplicate build/launch actions, and ConPTY escapes Docker arguments containing spaces. Failed launches also stop polling promptly and surface the captured Docker error. Codex uses container-local state on Windows while portable auth/config/plugin data is seeded from the host, avoiding unsupported SQLite locking across the Windows-to-Linux bind filesystem.
 - `allowed_hosts` configuration field in `harness-hat.toml` (at defaults and per-container level) for hosts that bypass network approval prompts without needing `harness-rules.toml` entries. Supports wildcard patterns matching.

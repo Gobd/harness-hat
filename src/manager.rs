@@ -81,6 +81,7 @@ async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
         );
     }
     let control_addr = format!("{control_host}:{control_port}");
+    let tui_events = crate::server::TuiEventBroker::default();
     let server_state = crate::server::ServerState {
         config: shared_config.clone(),
         state: state.clone(),
@@ -93,6 +94,7 @@ async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
         exec_jobs: crate::server::ExecJobRegistry::default(),
         activity_tx: activity_tx.clone(),
         tui_tx,
+        tui_events: tui_events.clone(),
     };
     let control_listener = tokio::net::TcpListener::bind(&control_addr)
         .await
@@ -152,7 +154,7 @@ async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
                 service_mode,
             )?;
             if service_mode {
-                crate::tui::run_service(app, tui_rx).await
+                crate::tui::run_service(app, tui_rx, tui_events).await
             } else {
                 drop(tui_rx);
                 crate::tui::run(app).await
@@ -166,6 +168,11 @@ async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
     // `/container/stop` against a now-closed oneshot) while we tear down
     // telemetry. Aborting is sufficient: the process is exiting and both tasks
     // only own their listener + ephemeral per-connection state.
+    if let Err(error) = &tui_result {
+        error!(%error, "Harness Hat TUI thread panicked");
+    } else if let Ok(Err(error)) = &tui_result {
+        error!(%error, "Harness Hat TUI stopped");
+    }
     control_handle.abort();
     telemetry_handle.shutdown()?;
     tui_result.map_err(|e| anyhow::anyhow!("TUI thread panicked: {e}"))??;

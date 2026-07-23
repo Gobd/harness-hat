@@ -57,13 +57,19 @@ hht shell <ID> claude-yolo
 
 > **Expected result:** Harness Hat starts or attaches to the selected session, runs `claude-yolo` in the container, and returns Claude's exit status to the terminal.
 
-`claude-yolo` starts Claude with Claude's own permission prompts disabled. Use it only in a Harness Hat session you trust: the container boundary and Harness Hat's network policy remain in effect, but Claude can act without asking for each tool permission.
+`claude-yolo` starts Claude with Claude's own permission prompts disabled. Since the container is providing the security layer, you can safely run Claude in `--dangerously-skip-permissions` mode.
 
 ## Network approvals
 
 Unknown outbound hosts are policy checked. A project rule can allow or deny a host, method, path, or port. Prefer exact rules over broad wildcards, and review every remembered permission in version control.
 
 If a rules-file change alert appears, inspect the changed global or project `harness-rules.toml`. New network and `hostdo` decisions stay blocked until the version shown by the alert is trusted. Closing the dialog remains blocked.
+
+## Inspect Active Requests
+
+Run `hht` in a **terminal** to open the Harness Hat TUI. The sidebar shows active work for each session, including network requests and `hostdo` commands. Select an activity to inspect its current status, command or destination, output, and any approval or failure details while it is still running.
+
+Network requests and `hostdo` commands remain visible as activity items until they complete. Use this view to confirm what an agent is waiting on before approving a request or investigating a command that is taking longer than expected.
 
 ## Rebuild after upgrades or Dockerfile changes
 

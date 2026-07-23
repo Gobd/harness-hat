@@ -7,16 +7,18 @@ use crossterm::{
         self, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
-    terminal::{
-        Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-        enable_raw_mode,
-    },
+    terminal::{Clear, ClearType, EnterAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::time::Duration;
 
-use crate::server::{TuiFrameRequest, TuiInput};
+use crate::server::{TuiEventsResponse, TuiFrameRequest, TuiInput};
 
 /// Attach the current terminal to the daemon's existing App and renderer.
 pub(crate) fn run_attached(config_path: PathBuf) -> Result<()> {
@@ -46,7 +48,16 @@ pub(crate) fn run_attached(config_path: PathBuf) -> Result<()> {
         return Err(error).context("entering Harness Hat terminal UI");
     }
 
-    let result = relay_loop(&client, &control_url, &token, &mut stdout);
+    let stop_events = Arc::new(AtomicBool::new(false));
+    let (event_tx, event_rx) = mpsc::channel();
+    spawn_event_poller(
+        control_url.clone(),
+        token.clone(),
+        Arc::clone(&stop_events),
+        event_tx,
+    );
+    let result = relay_loop(&client, &control_url, &token, &event_rx, &mut stdout);
+    stop_events.store(true, Ordering::Relaxed);
     let restore = restore_terminal(&mut stdout);
     match (result, restore) {
         (Ok(()), Ok(())) => Ok(()),
@@ -59,15 +70,17 @@ fn relay_loop(
     client: &reqwest::blocking::Client,
     control_url: &str,
     token: &str,
+    event_rx: &mpsc::Receiver<()>,
     stdout: &mut io::Stdout,
 ) -> Result<()> {
+    let mut needs_render = true;
     loop {
-        let input = if event::poll(Duration::from_millis(50))? {
-            match event::read()? {
+        let input = if poll_event(Duration::from_millis(50))? {
+            match read_event()? {
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
-                    if key.code == KeyCode::Char('q')
+                    if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('c'))
                         && key
                             .modifiers
                             .contains(crossterm::event::KeyModifiers::CONTROL)
@@ -83,7 +96,13 @@ fn relay_loop(
         } else {
             None
         };
-        let (width, height) = crossterm::terminal::size().context("reading terminal size")?;
+        while event_rx.try_recv().is_ok() {
+            needs_render = true;
+        }
+        if input.is_none() && !needs_render {
+            continue;
+        }
+        let (width, height) = terminal_size()?;
         let response = client
             .post(format!("{control_url}/tui/frame"))
             .bearer_auth(token)
@@ -102,10 +121,114 @@ fn relay_loop(
             );
         }
         let frame = response.bytes().context("reading daemon TUI frame")?;
-        stdout
-            .write_all(&frame)
-            .context("writing daemon TUI frame")?;
-        stdout.flush().context("flushing daemon TUI frame")?;
+        if frame.starts_with(b"\x1b[2J\x1b[H\x1b[31mHarness Hat could not render") {
+            bail!(
+                "{}",
+                String::from_utf8_lossy(&frame).replace(['\r', '\x1b'], "")
+            );
+        }
+        write_frame(stdout, &frame)?;
+        needs_render = false;
+    }
+}
+
+fn spawn_event_poller(
+    control_url: String,
+    token: String,
+    stop: Arc<AtomicBool>,
+    changed: mpsc::Sender<()>,
+) {
+    std::thread::spawn(move || {
+        let client = match reqwest::blocking::Client::builder()
+            // The server waits up to 25 seconds, but this shorter client
+            // timeout keeps Ctrl+C/quit responsive even if the daemon dies.
+            .timeout(Duration::from_secs(3))
+            .build()
+        {
+            Ok(client) => client,
+            Err(_) => return,
+        };
+        let mut after = 0_u64;
+        while !stop.load(Ordering::Relaxed) {
+            let response = client
+                .get(format!("{control_url}/tui/events?after={after}"))
+                .bearer_auth(&token)
+                .send();
+            let Ok(response) = response else {
+                continue;
+            };
+            if !response.status().is_success() {
+                continue;
+            }
+            let Ok(events) = response.json::<TuiEventsResponse>() else {
+                continue;
+            };
+            after = events.latest;
+            if events.reset_required || !events.events.is_empty() {
+                if changed.send(()).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+}
+
+fn poll_event(timeout: Duration) -> Result<bool> {
+    loop {
+        match event::poll(timeout) {
+            Ok(ready) => return Ok(ready),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error).context("polling terminal input"),
+        }
+    }
+}
+
+fn read_event() -> Result<Event> {
+    loop {
+        match event::read() {
+            Ok(event) => return Ok(event),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error).context("reading terminal input"),
+        }
+    }
+}
+
+fn terminal_size() -> Result<(u16, u16)> {
+    loop {
+        match crossterm::terminal::size() {
+            Ok(size) => return Ok(size),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error).context("reading terminal size"),
+        }
+    }
+}
+
+fn write_frame(stdout: &mut io::Stdout, frame: &[u8]) -> Result<()> {
+    let mut remaining = frame;
+    while !remaining.is_empty() {
+        match stdout.write(remaining) {
+            Ok(0) => anyhow::bail!("writing daemon TUI frame returned zero bytes"),
+            Ok(written) => remaining = &remaining[written..],
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error).context("writing daemon TUI frame"),
+        }
+    }
+    loop {
+        match stdout.flush() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error).context("flushing daemon TUI frame"),
+        }
     }
 }
 
@@ -163,15 +286,21 @@ fn mouse_button_name(button: MouseButton) -> Option<&'static str> {
 }
 
 fn restore_terminal(stdout: &mut io::Stdout) -> Result<()> {
-    disable_raw_mode().context("restoring terminal mode")?;
-    execute!(
+    loop {
+        match disable_raw_mode() {
+            Ok(()) => break,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error).context("restoring terminal mode"),
+        }
+    }
+    // Keep cleanup independent of crossterm's output writer so a temporarily
+    // full macOS PTY cannot strand the user in raw mode or the alt screen.
+    write_frame(
         stdout,
-        LeaveAlternateScreen,
-        cursor::Show,
-        crossterm::event::DisableMouseCapture,
-        crossterm::style::ResetColor
+        b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1049l\x1b[?25h\x1b[0m",
     )
-    .context("restoring terminal screen")
 }
 
 fn read_token(path: &Path) -> Result<String> {

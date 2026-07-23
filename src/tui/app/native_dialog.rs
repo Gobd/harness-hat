@@ -257,9 +257,12 @@ fn spawn_native_rules_changed_dialog(
 /// `Cancelled`, which the caller treats as "deny once" — a request is never
 /// silently allowed because the dialog misbehaved.
 async fn run_native_dialog_subprocess(req: &ApprovalRequest) -> Outcome {
-    let exe = match std::env::current_exe() {
+    let exe = match dialog_executable() {
         Ok(path) => path,
-        Err(_) => return Outcome::Cancelled,
+        Err(error) => {
+            tracing::warn!(%error, "cannot launch native network approval dialog");
+            return Outcome::Cancelled;
+        }
     };
     let mut cmd = tokio::process::Command::new(exe);
     cmd.arg("__dialog").arg("network-approval");
@@ -296,9 +299,12 @@ async fn run_native_dialog_subprocess(req: &ApprovalRequest) -> Outcome {
 }
 
 async fn run_native_hostdo_dialog_subprocess(req: &HostdoApprovalRequest) -> Outcome {
-    let exe = match std::env::current_exe() {
+    let exe = match dialog_executable() {
         Ok(path) => path,
-        Err(_) => return Outcome::Cancelled,
+        Err(error) => {
+            tracing::warn!(%error, "cannot launch native host-command approval dialog");
+            return Outcome::Cancelled;
+        }
     };
     let mut cmd = tokio::process::Command::new(exe);
     cmd.arg("__dialog").arg("hostdo-approval");
@@ -331,9 +337,12 @@ async fn run_native_hostdo_dialog_subprocess(req: &HostdoApprovalRequest) -> Out
 }
 
 async fn run_native_rules_changed_dialog_subprocess(req: &RulesChangedRequest) -> Outcome {
-    let exe = match std::env::current_exe() {
+    let exe = match dialog_executable() {
         Ok(path) => path,
-        Err(_) => return Outcome::Cancelled,
+        Err(error) => {
+            tracing::warn!(%error, "cannot launch native rules-change dialog");
+            return Outcome::Cancelled;
+        }
     };
     let mut cmd = tokio::process::Command::new(exe);
     cmd.arg("__dialog")
@@ -353,4 +362,70 @@ async fn run_native_rules_changed_dialog_subprocess(req: &RulesChangedRequest) -
         .find(|line| !line.trim().is_empty())
         .unwrap_or("");
     Outcome::decode(line).unwrap_or(Outcome::Cancelled)
+}
+
+/// Native dialog subcommands belong to the user-facing `hht` binary, not the
+/// `hht-daemon` service binary. The daemon is deliberately a narrow process
+/// that accepts only its service configuration, so using `current_exe()` here
+/// would turn every prompt into an unknown-argument failure and fail closed.
+fn dialog_executable() -> Result<std::path::PathBuf, String> {
+    let current =
+        std::env::current_exe().map_err(|error| format!("locating current executable: {error}"))?;
+    dialog_executable_next_to(&current)
+}
+
+fn dialog_executable_next_to(current: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let parent = current.parent().ok_or_else(|| {
+        format!(
+            "cannot locate hht next to current executable {}",
+            current.display()
+        )
+    })?;
+    let name = if cfg!(target_os = "windows") {
+        "hht.exe"
+    } else {
+        "hht"
+    };
+    let candidate = parent.join(name);
+    if candidate.is_file() {
+        Ok(candidate)
+    } else {
+        Err(format!(
+            "hht dialog executable was not found next to {}; reinstall Harness Hat so hht and hht-daemon are installed together",
+            current.display()
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dialog_executable_next_to;
+
+    #[test]
+    fn dialog_executable_uses_sibling_hht_binary() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let daemon = temp.path().join(if cfg!(target_os = "windows") {
+            "hht-daemon.exe"
+        } else {
+            "hht-daemon"
+        });
+        let hht = temp.path().join(if cfg!(target_os = "windows") {
+            "hht.exe"
+        } else {
+            "hht"
+        });
+        std::fs::write(&daemon, "daemon").expect("daemon binary placeholder");
+        std::fs::write(&hht, "hht").expect("hht binary placeholder");
+
+        assert_eq!(dialog_executable_next_to(&daemon).unwrap(), hht);
+    }
+
+    #[test]
+    fn dialog_executable_requires_sibling_hht_binary() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let daemon = temp.path().join("hht-daemon");
+        std::fs::write(&daemon, "daemon").expect("daemon binary placeholder");
+
+        assert!(dialog_executable_next_to(&daemon).is_err());
+    }
 }

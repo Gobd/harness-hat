@@ -20,7 +20,11 @@ use crossterm::{
     },
 };
 use futures::StreamExt;
-use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, layout::Rect};
+use ratatui::{
+    Terminal,
+    backend::{CrosstermBackend, TestBackend},
+    style::{Color, Modifier},
+};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -483,20 +487,18 @@ pub async fn run(mut app: App) -> Result<()> {
 pub async fn run_service(
     mut app: App,
     mut tui_rx: mpsc::Receiver<crate::server::TuiFrameItem>,
+    tui_events: crate::server::TuiEventBroker,
 ) -> Result<()> {
-    let output = Arc::new(Mutex::new(Vec::new()));
-    let backend = CrosstermBackend::new(RemoteFrameWriter(Arc::clone(&output)));
-    let mut terminal = Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
-        },
-    )?;
+    let mut next_refresh_event = tokio::time::Instant::now();
     loop {
         app.drain_channels();
         app.tick_base_rules_file_watch();
+        if !app.sessions.is_empty() && tokio::time::Instant::now() >= next_refresh_event {
+            tui_events.publish("tui_refresh", None, "session state changed");
+            next_refresh_event =
+                tokio::time::Instant::now() + tokio::time::Duration::from_millis(250);
+        }
         while let Ok(item) = tui_rx.try_recv() {
-            terminal.resize(Rect::new(0, 0, item.width, item.height))?;
             let (pty_cols, pty_rows) = (
                 item.width.saturating_sub(38).max(20),
                 item.height.saturating_sub(10).max(6),
@@ -507,28 +509,119 @@ pub async fn run_service(
             if let Some(input) = item.input {
                 apply_remote_input(&mut app, input);
             }
-            terminal.draw(|frame| render::render(frame, &mut app))?;
-            let frame = std::mem::take(&mut *output.lock().unwrap_or_else(|e| e.into_inner()));
+            let mut terminal = match Terminal::new(TestBackend::new(item.width, item.height)) {
+                Ok(terminal) => terminal,
+                Err(error) => {
+                    tracing::error!(%error, "attached TUI backend initialization failed");
+                    let _ = item
+                        .response_tx
+                        .send(render_relay_error(&error.to_string()));
+                    continue;
+                }
+            };
+            if let Err(error) = terminal.draw(|frame| render::render(frame, &mut app)) {
+                tracing::error!(%error, "attached TUI render failed");
+                let _ = item
+                    .response_tx
+                    .send(render_relay_error(&error.to_string()));
+                continue;
+            }
+            let frame = render_buffer(terminal.backend().buffer());
             let _ = item.response_tx.send(frame);
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 }
 
-struct RemoteFrameWriter(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for RemoteFrameWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend_from_slice(bytes);
-        Ok(bytes.len())
+fn render_buffer(buffer: &ratatui::buffer::Buffer) -> Vec<u8> {
+    let area = buffer.area;
+    let width = usize::from(area.width);
+    let mut frame = Vec::with_capacity(width * usize::from(area.height) * 2 + 32);
+    frame.extend_from_slice(b"\x1b[?25l\x1b[2J");
+    let mut active_style = None;
+    for (row_index, row) in buffer.content().chunks(width).enumerate() {
+        push_cursor_position(&mut frame, row_index + 1, 1);
+        for cell in row {
+            let style = (cell.fg, cell.bg, cell.modifier);
+            if active_style != Some(style) {
+                push_style(&mut frame, style.0, style.1, style.2);
+                active_style = Some(style);
+            }
+            frame.extend_from_slice(cell.symbol().as_bytes());
+        }
     }
+    frame.extend_from_slice(b"\x1b[0m");
+    frame
+}
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+fn push_cursor_position(frame: &mut Vec<u8>, row: usize, column: usize) {
+    frame.extend_from_slice(format!("\x1b[{row};{column}H").as_bytes());
+}
+
+fn push_style(frame: &mut Vec<u8>, foreground: Color, background: Color, modifier: Modifier) {
+    frame.extend_from_slice(b"\x1b[0m");
+    for (flag, code) in [
+        (Modifier::BOLD, 1),
+        (Modifier::DIM, 2),
+        (Modifier::ITALIC, 3),
+        (Modifier::UNDERLINED, 4),
+        (Modifier::SLOW_BLINK, 5),
+        (Modifier::RAPID_BLINK, 6),
+        (Modifier::REVERSED, 7),
+        (Modifier::HIDDEN, 8),
+        (Modifier::CROSSED_OUT, 9),
+    ] {
+        if modifier.contains(flag) {
+            frame.extend_from_slice(format!("\x1b[{code}m").as_bytes());
+        }
     }
+    push_color(frame, foreground, true);
+    push_color(frame, background, false);
+}
+
+fn push_color(frame: &mut Vec<u8>, color: Color, foreground: bool) {
+    let base = if foreground { 30 } else { 40 };
+    let bright = if foreground { 90 } else { 100 };
+    let basic_code = match color {
+        Color::Black => Some(base),
+        Color::Red => Some(base + 1),
+        Color::Green => Some(base + 2),
+        Color::Yellow => Some(base + 3),
+        Color::Blue => Some(base + 4),
+        Color::Magenta => Some(base + 5),
+        Color::Cyan => Some(base + 6),
+        Color::Gray => Some(base + 7),
+        Color::DarkGray => Some(bright),
+        Color::LightRed => Some(bright + 1),
+        Color::LightGreen => Some(bright + 2),
+        Color::LightYellow => Some(bright + 3),
+        Color::LightBlue => Some(bright + 4),
+        Color::LightMagenta => Some(bright + 5),
+        Color::LightCyan => Some(bright + 6),
+        Color::White => Some(bright + 7),
+        Color::Reset | Color::Indexed(_) | Color::Rgb(_, _, _) => None,
+    };
+    if let Some(code) = basic_code {
+        frame.extend_from_slice(format!("\x1b[{code}m").as_bytes());
+    } else {
+        match color {
+            Color::Indexed(index) => {
+                let code = if foreground { 38 } else { 48 };
+                frame.extend_from_slice(format!("\x1b[{code};5;{index}m").as_bytes());
+            }
+            Color::Rgb(red, green, blue) => {
+                let code = if foreground { 38 } else { 48 };
+                frame.extend_from_slice(format!("\x1b[{code};2;{red};{green};{blue}m").as_bytes());
+            }
+            Color::Reset => {}
+            _ => unreachable!("basic colors were handled above"),
+        }
+    }
+}
+
+fn render_relay_error(error: &str) -> Vec<u8> {
+    format!("\x1b[2J\x1b[H\x1b[31mHarness Hat could not render the attached TUI:\x1b[0m\r\n{error}\r\n\r\nCheck the Harness Hat daemon log and restart the service with `hht install`.\r\n")
+        .into_bytes()
 }
 
 fn apply_remote_input(app: &mut App, input: crate::server::TuiInput) {

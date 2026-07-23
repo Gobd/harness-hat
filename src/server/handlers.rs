@@ -2,19 +2,19 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use futures::stream::unfold;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
-use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tracing::{instrument, warn};
 
 use crate::activity::ActivityEvent;
@@ -30,6 +30,89 @@ const CONTROL_HANDLER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum number of in-flight control requests, enforced via a per-process
 /// semaphore in lieu of a `tower::limit::ConcurrencyLimitLayer` (see below).
 const CONTROL_CONCURRENCY_LIMIT: usize = 64;
+const TUI_EVENT_CAPACITY: usize = 512;
+const TUI_EVENT_LONG_POLL_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Bounded, ordered daemon events for an attached terminal client. A client
+/// starts from a snapshot, then long-polls this log; if it falls behind the
+/// retained window it reloads the snapshot instead of guessing at missed state.
+#[derive(Clone, Default)]
+pub struct TuiEventBroker {
+    inner: Arc<Mutex<TuiEventLog>>,
+    changed: Arc<Notify>,
+}
+
+#[derive(Default)]
+struct TuiEventLog {
+    next_sequence: u64,
+    events: VecDeque<TuiEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuiEvent {
+    pub sequence: u64,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TuiEventsQuery {
+    #[serde(default)]
+    pub after: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TuiEventsResponse {
+    pub latest: u64,
+    pub reset_required: bool,
+    pub events: Vec<TuiEvent>,
+}
+
+impl TuiEventBroker {
+    pub fn publish(
+        &self,
+        kind: impl Into<String>,
+        workspace: Option<String>,
+        message: impl Into<String>,
+    ) {
+        let mut log = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        log.next_sequence = log.next_sequence.saturating_add(1);
+        let sequence = log.next_sequence;
+        log.events.push_back(TuiEvent {
+            sequence,
+            kind: kind.into(),
+            workspace,
+            message: message.into(),
+        });
+        if log.events.len() > TUI_EVENT_CAPACITY {
+            log.events.pop_front();
+        }
+        drop(log);
+        self.changed.notify_waiters();
+    }
+
+    fn since(&self, after: u64) -> TuiEventsResponse {
+        let log = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let oldest = log.events.front().map(|event| event.sequence);
+        let reset_required = oldest.is_some_and(|sequence| after.saturating_add(1) < sequence);
+        let events = if reset_required {
+            Vec::new()
+        } else {
+            log.events
+                .iter()
+                .filter(|event| event.sequence > after)
+                .cloned()
+                .collect()
+        };
+        TuiEventsResponse {
+            latest: log.next_sequence,
+            reset_required,
+            events,
+        }
+    }
+}
 
 /// Error payload returned by manager control endpoints.
 #[derive(Debug, Serialize)]
@@ -387,6 +470,7 @@ pub struct ServerState {
     // Bounded; see H12 comments at the construction site in manager::run.
     pub activity_tx: mpsc::Sender<ActivityEvent>,
     pub tui_tx: mpsc::Sender<TuiFrameItem>,
+    pub tui_events: TuiEventBroker,
 }
 
 /// A frame request from the foreground `hht` terminal. The daemon owns the
@@ -534,6 +618,7 @@ pub async fn run_with_listener(
         .route("/container/stop", post(stop_handler))
         .route("/workspace/launch", post(workspace_launch_handler))
         .route("/tui/frame", post(tui_frame_handler))
+        .route("/tui/events", get(tui_events_handler))
         .route("/exec", post(crate::server::core::exec_handler))
         .route(
             "/exec/jobs",
@@ -569,6 +654,33 @@ pub async fn run_with_listener(
 /// caller to load and parse it just to print "manager not running."
 async fn healthz_handler() -> Response {
     (StatusCode::OK, "ok").into_response()
+}
+
+async fn tui_events_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<TuiEventsQuery>,
+) -> Response {
+    if let Err(response) = require_bearer(&state, &headers) {
+        return response;
+    }
+
+    let deadline = tokio::time::Instant::now() + TUI_EVENT_LONG_POLL_TIMEOUT;
+    loop {
+        // Register before reading so an event published between these steps
+        // cannot leave the client waiting for the full long-poll timeout.
+        let changed = state.tui_events.changed.notified();
+        let response = state.tui_events.since(query.after);
+        if response.reset_required
+            || !response.events.is_empty()
+            || tokio::time::Instant::now() >= deadline
+        {
+            return Json(response).into_response();
+        }
+        if tokio::time::timeout_at(deadline, changed).await.is_err() {
+            return Json(state.tui_events.since(query.after)).into_response();
+        }
+    }
 }
 
 /// Render the daemon-owned TUI for one foreground client tick.
@@ -763,8 +875,8 @@ pub(super) async fn workspace_launch_handler(
 
     let (event_tx, event_rx) = mpsc::channel::<LaunchEvent>(LAUNCH_EVENT_CHANNEL_CAPACITY);
     let item = WorkspaceLaunchItem {
-        workspace_name,
-        template,
+        workspace_name: workspace_name.clone(),
+        template: template.clone(),
         force_rebuild: req.force_rebuild,
         cwd: req.cwd.map(PathBuf::from),
         event_tx,
@@ -779,25 +891,35 @@ pub(super) async fn workspace_launch_handler(
         )
             .into_response();
     }
+    state.tui_events.publish(
+        "workspace_launch_requested",
+        Some(workspace_name),
+        format!("launch requested with template {template}"),
+    );
 
     // Stream events as NDJSON. `event_tx` lives in the TUI's `WorkspaceLaunchItem`
     // until the launch flow completes (success, build failure, or launch failure);
     // dropping it terminates the receiver and closes the body.
-    let stream = unfold((event_rx, permit), |(mut rx, permit)| async move {
-        let event = rx.recv().await?;
-        let mut bytes = match serde_json::to_vec(&event) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(error = %e, "serializing launch event failed; closing stream");
-                return None;
-            }
-        };
-        bytes.push(b'\n');
-        Some((
-            Ok::<Bytes, std::convert::Infallible>(Bytes::from(bytes)),
-            (rx, permit),
-        ))
-    });
+    let events = state.tui_events.clone();
+    let stream = unfold(
+        (event_rx, permit, events),
+        |(mut rx, permit, events)| async move {
+            let event = rx.recv().await?;
+            publish_launch_event(&events, &event);
+            let mut bytes = match serde_json::to_vec(&event) {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(error = %e, "serializing launch event failed; closing stream");
+                    return None;
+                }
+            };
+            bytes.push(b'\n');
+            Some((
+                Ok::<Bytes, std::convert::Infallible>(Bytes::from(bytes)),
+                (rx, permit, events),
+            ))
+        },
+    );
 
     Response::builder()
         .status(StatusCode::OK)
@@ -807,6 +929,35 @@ pub(super) async fn workspace_launch_handler(
         .header("cache-control", "no-cache")
         .body(Body::from_stream(stream))
         .expect("static response builder cannot fail")
+}
+
+fn publish_launch_event(events: &TuiEventBroker, event: &LaunchEvent) {
+    match event {
+        LaunchEvent::Status { message } => {
+            events.publish("workspace_launch_status", None, message.clone());
+        }
+        LaunchEvent::BuildOutput { line, is_error } => {
+            events.publish(
+                if *is_error {
+                    "workspace_build_error"
+                } else {
+                    "workspace_build_output"
+                },
+                None,
+                line.clone(),
+            );
+        }
+        LaunchEvent::Launched(response) => {
+            events.publish(
+                "workspace_launched",
+                Some(response.workspace_name.clone()),
+                format!("session {} is running", response.alias),
+            );
+        }
+        LaunchEvent::Error { reason } => {
+            events.publish("workspace_launch_failed", None, reason.clone());
+        }
+    }
 }
 
 /// Build an `AuditEntry` describing a `/container/stop` outcome. Centralized
@@ -955,6 +1106,7 @@ mod tests {
             exec_jobs,
             activity_tx,
             tui_tx,
+            tui_events: TuiEventBroker::default(),
         }
     }
 
@@ -984,6 +1136,26 @@ mod tests {
 
         registry.remove("session");
         assert!(registry.get("session").is_none());
+    }
+
+    #[test]
+    fn tui_events_are_ordered_and_require_a_snapshot_after_overflow() {
+        let events = TuiEventBroker::default();
+        events.publish("first", Some("workspace".to_string()), "one");
+        events.publish("second", None, "two");
+        let response = events.since(0);
+        assert_eq!(response.latest, 2);
+        assert!(!response.reset_required);
+        assert_eq!(response.events.len(), 2);
+        assert_eq!(response.events[0].sequence, 1);
+        assert_eq!(response.events[1].sequence, 2);
+
+        for sequence in 0..TUI_EVENT_CAPACITY {
+            events.publish("burst", None, sequence.to_string());
+        }
+        let response = events.since(0);
+        assert!(response.reset_required);
+        assert!(response.events.is_empty());
     }
 
     #[test]
