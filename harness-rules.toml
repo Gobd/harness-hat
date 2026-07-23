@@ -68,6 +68,7 @@
 # - raw CONNECT to other ports requires an explicit `port=...` allow rule
 
 version = 1
+template = "rust"
 
 # Workspace path mirroring (opt-in):
 # mirror_cwd = true

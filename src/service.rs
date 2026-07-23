@@ -13,7 +13,7 @@ use std::process::Stdio;
 
 #[cfg(any(target_os = "macos", test))]
 const LABEL: &str = "com.harness-hat.manager";
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 const SYSTEMD_UNIT: &str = "harness-hat.service";
 #[cfg(target_os = "windows")]
 const WINDOWS_TASK: &str = "Harness Hat";
@@ -114,6 +114,7 @@ fn ensure_default_config(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn write_definition(path: &Path, contents: &str) -> Result<()> {
     let parent = path
         .parent()
@@ -279,6 +280,23 @@ fn install_windows(executable: &Path, config_path: &Path) -> Result<()> {
         "creating Harness Hat scheduled task",
     )?;
     command_status(
+        "powershell.exe",
+        &[
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            concat!(
+                "$settings = New-ScheduledTaskSettingsSet ",
+                "-RestartCount 255 ",
+                "-RestartInterval (New-TimeSpan -Minutes 1) ",
+                "-StartWhenAvailable; ",
+                "Set-ScheduledTask -TaskName 'Harness Hat' -Settings $settings | Out-Null"
+            )
+            .into(),
+        ],
+        "configuring Harness Hat scheduled task retries",
+    )?;
+    command_status(
         "schtasks",
         &["/Run".into(), "/TN".into(), WINDOWS_TASK.into()],
         "starting Harness Hat scheduled task",
@@ -397,7 +415,11 @@ mod tests {
     fn daemon_executable_uses_sibling_when_present() {
         let dir = tempfile::tempdir().unwrap();
         let current = dir.path().join("hht");
-        let daemon = dir.path().join("hht-daemon");
+        let daemon = dir.path().join(if cfg!(target_os = "windows") {
+            "hht-daemon.exe"
+        } else {
+            "hht-daemon"
+        });
         std::fs::write(&daemon, b"daemon").unwrap();
         assert_eq!(daemon_executable(&current).unwrap(), daemon);
     }

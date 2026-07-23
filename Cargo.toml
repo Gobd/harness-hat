@@ -86,3 +86,6 @@ rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "c
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSThread"] }
 objc2-app-kit = { version = "0.3", features = ["NSAlert", "NSApplication", "NSButton", "NSResponder", "NSControl", "NSCell", "NSView", "NSWindow", "NSRunningApplication"] }
+
+[build-dependencies]
+embed-resource = "3.0"

@@ -451,11 +451,18 @@ pub async fn run(mut app: App) -> Result<()> {
     });
     let mut terminal = Terminal::new(backend)?;
 
-    let result = event_loop(&mut terminal, &mut app, &frames_dropped).await;
+    let result = event_loop(
+        &mut terminal,
+        &mut app,
+        &frames_dropped,
+        &mut restore_guard.mouse_capture_enabled,
+    )
+    .await;
 
     disable_raw_mode()?;
     shutdown_blocking.store(true, Ordering::Relaxed);
-    restore_terminal_output(terminal.backend_mut())?;
+    restore_terminal_output(terminal.backend_mut(), restore_guard.mouse_capture_enabled)?;
+    restore_guard.mouse_capture_enabled = false;
     terminal.show_cursor()?;
     // Dropping the terminal drops the FrameWriter, which closes the frame
     // channel; the writer thread drains the queued restore sequences above
@@ -478,25 +485,28 @@ pub async fn run_service(mut app: App) -> Result<()> {
     }
 }
 
-fn restore_terminal_output<W: std::io::Write>(writer: &mut W) -> std::io::Result<()> {
-    execute!(
-        writer,
-        LeaveAlternateScreen,
-        cursor::Show,
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        EnableLineWrap,
-        ResetColor
-    )
+fn restore_terminal_output<W: std::io::Write>(
+    writer: &mut W,
+    mouse_capture_enabled: bool,
+) -> std::io::Result<()> {
+    execute!(writer, LeaveAlternateScreen, cursor::Show)?;
+    if mouse_capture_enabled {
+        execute!(writer, DisableMouseCapture)?;
+    }
+    execute!(writer, DisableBracketedPaste, EnableLineWrap, ResetColor)
 }
 
 struct TerminalRestoreGuard {
     armed: bool,
+    mouse_capture_enabled: bool,
 }
 
 impl TerminalRestoreGuard {
     fn new() -> Self {
-        Self { armed: true }
+        Self {
+            armed: true,
+            mouse_capture_enabled: false,
+        }
     }
     fn disarm(&mut self) {
         self.armed = false;
@@ -510,7 +520,7 @@ impl Drop for TerminalRestoreGuard {
         }
         let _ = disable_raw_mode();
         let mut stdout = std::io::stdout();
-        let _ = restore_terminal_output(&mut stdout);
+        let _ = restore_terminal_output(&mut stdout, self.mouse_capture_enabled);
     }
 }
 
@@ -575,16 +585,16 @@ async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<FrameWriter>>,
     app: &mut App,
     frames_dropped: &AtomicBool,
+    mouse_capture_enabled: &mut bool,
 ) -> Result<()> {
     let mut events = EventStream::new();
     let tick = tokio::time::Duration::from_millis(50);
-    let mut mouse_capture_enabled = false;
     let mut approval_bell_rung = false;
     let mut session_bell_counts = Vec::new();
     crate::notifications::init();
 
     loop {
-        sync_mouse_capture(terminal.backend_mut(), app, &mut mouse_capture_enabled)?;
+        sync_mouse_capture(terminal.backend_mut(), app, mouse_capture_enabled)?;
         app.drain_channels();
         app.tick_base_rules_file_watch();
         let modal_visible = app.has_pending_approval_modal();
@@ -646,7 +656,7 @@ async fn event_loop(
                     None => break,
                     _ => {}
                 }
-                sync_mouse_capture(terminal.backend_mut(), app, &mut mouse_capture_enabled)?;
+                sync_mouse_capture(terminal.backend_mut(), app, mouse_capture_enabled)?;
             }
             _ = timeout => {}
         }
@@ -723,5 +733,12 @@ mod bell_tests {
         let mut buf = Vec::new();
         super::ring_terminal_bell(&mut buf).expect("write bell");
         assert_eq!(buf, b"\x07");
+    }
+
+    #[test]
+    fn restoring_terminal_without_mouse_capture_is_safe() {
+        let mut buf = Vec::new();
+        super::restore_terminal_output(&mut buf, false).expect("restore terminal");
+        assert!(!buf.is_empty());
     }
 }
