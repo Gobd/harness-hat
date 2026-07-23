@@ -596,16 +596,15 @@ fn apply_remote_input(app: &mut App, input: crate::server::TuiInput) {
     }
 }
 
-fn restore_terminal_output<W: std::io::Write>(writer: &mut W) -> std::io::Result<()> {
-    execute!(
-        writer,
-        LeaveAlternateScreen,
-        cursor::Show,
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        EnableLineWrap,
-        ResetColor
-    )
+fn restore_terminal_output<W: std::io::Write>(
+    writer: &mut W,
+    mouse_capture_enabled: bool,
+) -> std::io::Result<()> {
+    execute!(writer, LeaveAlternateScreen, cursor::Show)?;
+    if mouse_capture_enabled {
+        execute!(writer, DisableMouseCapture)?;
+    }
+    execute!(writer, DisableBracketedPaste, EnableLineWrap, ResetColor)
 }
 
 struct TerminalRestoreGuard {
