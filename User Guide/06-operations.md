@@ -12,12 +12,30 @@ hht workspace --name my-project  # choose a configured workspace
 hht workspace --list             # list configured workspaces
 hht shell                         # list active sessions
 hht shell <ID>                    # attach to a session
+hht shell --kill <ID>             # stop and remove a session
 hht rebuild rust                  # rebuild the base image and Rust template
 ```
 
-> **Expected result:** `workspace` attaches to a session or starts one, `workspace --list` prints each configured workspace name, path, and saved template, `shell` lists or attaches to existing sessions, and `rebuild` prints Docker build output followed by a successful build result.
+> **Expected result:** `workspace` attaches to a session or starts one, `workspace --list` prints each configured workspace name, path, and saved template, `shell` lists or attaches to existing sessions with both its Harness Hat session ID and Docker container ID, and `rebuild` prints Docker build output followed by a successful build result.
 
-Run `killme` in a **session terminal** to request that Harness Hat stops that session.
+Run `killme` in a **session terminal** to request that Harness Hat stops that session. From a **terminal**, `hht shell --kill <ID>` stops and removes a session listed by `hht shell`.
+
+## Remembered Templates
+
+When `hht workspace` asks you to choose a container template, it saves that choice as `template = "..."` in the workspace root's `harness-rules.toml`. The next launch uses that workspace-local choice without showing the picker. `hht workspace --list` reports the remembered template for every workspace.
+
+An optional `template` field in the matching `[[workspaces]]` entry of the primary `harness-hat.toml` overrides the workspace-local choice. Use that only when a shared primary config needs to enforce a template for a workspace:
+
+```toml
+[[workspaces]]
+name = "my-project"
+canonical_path = "~/src/my-project"
+template = "rust"
+```
+
+Existing `[[workspaces]].template` values continue to work as primary-config overrides. Remove one to return control to the workspace-local remembered choice.
+
+The precedence order is `hht workspace --template`, the primary-config override, then the workspace's `harness-rules.toml` value.
 
 ## Run A Command In A Session
 
@@ -58,6 +76,8 @@ hht rebuild --no-cache python
 > **Expected result:** Docker prints build progress for the base image and the selected templates. A new session launched after a successful build uses the rebuilt image; existing sessions do not change.
 
 Use `hht workspace --rebuild` for a one-off cache-bypassing rebuild before launch.
+
+Workspace `*.dockerfiles` are scanned for launchable images. Any Dockerfile that starts with `FROM harness-hat-base:local` is added to the launch list alongside the preconfigured templates.
 
 ## Common failures
 

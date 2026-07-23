@@ -31,13 +31,14 @@ pub fn install(explicit_config: Option<PathBuf>) -> Result<()> {
         .context("locating the current hht executable")?
         .canonicalize()
         .context("canonicalizing the current hht executable")?;
+    let service_executable = daemon_executable(&executable)?;
 
     #[cfg(target_os = "macos")]
-    install_macos(&executable, &config_path)?;
+    install_macos(&service_executable, &config_path)?;
     #[cfg(target_os = "linux")]
-    install_linux(&executable, &config_path)?;
+    install_linux(&service_executable, &config_path)?;
     #[cfg(target_os = "windows")]
-    install_windows(&executable, &config_path)?;
+    install_windows(&service_executable, &config_path)?;
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     bail!("hht install supports macOS, Linux with systemd, and Windows only");
 
@@ -67,6 +68,26 @@ fn ensure_desktop_user() -> Result<()> {
         bail!("hht install/uninstall must run as the signed-in desktop user; do not use sudo");
     }
     Ok(())
+}
+
+fn daemon_executable(current: &Path) -> Result<PathBuf> {
+    let Some(parent) = current.parent() else {
+        bail!("cannot locate hht-daemon next to {}", current.display());
+    };
+    let daemon_name = if cfg!(target_os = "windows") {
+        "hht-daemon.exe"
+    } else {
+        "hht-daemon"
+    };
+    let candidate = parent.join(daemon_name);
+    if candidate.is_file() {
+        Ok(candidate)
+    } else {
+        bail!(
+            "hht-daemon was not found next to {}; reinstall Harness Hat so the background service binary is available",
+            current.display()
+        )
+    }
 }
 
 fn resolve_config_path(explicit_config: Option<PathBuf>) -> Result<(PathBuf, bool)> {
@@ -236,7 +257,7 @@ fn uninstall_linux() -> Result<()> {
 #[cfg(target_os = "windows")]
 fn install_windows(executable: &Path, config_path: &Path) -> Result<()> {
     let task_command = format!(
-        "\"{}\" --config \"{}\" __service",
+        "\"{}\" --config \"{}\"",
         executable.display(),
         config_path.display()
     );
@@ -275,7 +296,7 @@ fn uninstall_windows() -> Result<()> {
 #[cfg(any(target_os = "linux", test))]
 fn render_systemd_unit(executable: &Path, config_path: &Path) -> String {
     format!(
-        "[Unit]\nDescription=Harness Hat background agent\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart={} --config {} __service\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=Harness Hat background agent\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart={} --config {}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
         systemd_escape(executable),
         systemd_escape(config_path),
     )
@@ -283,11 +304,35 @@ fn render_systemd_unit(executable: &Path, config_path: &Path) -> String {
 
 #[cfg(any(target_os = "macos", test))]
 fn render_launchd_plist(executable: &Path, config_path: &Path) -> String {
+    let path = launchd_path();
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n  <key>Label</key><string>{LABEL}</string>\n  <key>ProgramArguments</key><array><string>{}</string><string>--config</string><string>{}</string><string>__service</string></array>\n  <key>RunAtLoad</key><true/>\n  <key>ProcessType</key><string>Interactive</string>\n</dict></plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n  <key>Label</key><string>{LABEL}</string>\n  <key>ProgramArguments</key><array><string>{}</string><string>--config</string><string>{}</string></array>\n  <key>EnvironmentVariables</key><dict><key>PATH</key><string>{}</string></dict>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ProcessType</key><string>Interactive</string>\n</dict></plist>\n",
         xml_escape(&executable.display().to_string()),
         xml_escape(&config_path.display().to_string()),
+        xml_escape(&path),
     )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn launchd_path() -> String {
+    let mut paths = vec![
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+        "/Applications/Docker.app/Contents/Resources/bin".to_string(),
+        "/usr/bin".to_string(),
+        "/bin".to_string(),
+        "/usr/sbin".to_string(),
+        "/sbin".to_string(),
+    ];
+    if let Some(current) = std::env::var_os("PATH") {
+        for entry in std::env::split_paths(&current) {
+            let entry = entry.to_string_lossy().into_owned();
+            if !entry.is_empty() && !paths.contains(&entry) {
+                paths.push(entry);
+            }
+        }
+    }
+    paths.join(":")
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -322,7 +367,9 @@ mod tests {
             Path::new("/home/me/.cargo/bin/hht"),
             Path::new("/home/me/My Config/harness-hat.toml"),
         );
-        assert!(unit.contains("ExecStart=\"/home/me/.cargo/bin/hht\" --config \"/home/me/My Config/harness-hat.toml\" __service"));
+        assert!(unit.contains(
+            "ExecStart=\"/home/me/.cargo/bin/hht\" --config \"/home/me/My Config/harness-hat.toml\""
+        ));
         assert!(unit.contains("Restart=on-failure"));
     }
 
@@ -340,7 +387,19 @@ mod tests {
         );
         assert!(plist.contains("Harness &amp; Hat"));
         assert!(plist.contains("rules &amp; config.toml"));
-        assert!(plist.contains("<string>__service</string>"));
+        assert!(!plist.contains("__service"));
+        assert!(plist.contains("<key>EnvironmentVariables</key>"));
+        assert!(plist.contains("Docker.app/Contents/Resources/bin"));
+        assert!(plist.contains("<key>KeepAlive</key><true/>"));
+    }
+
+    #[test]
+    fn daemon_executable_uses_sibling_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("hht");
+        let daemon = dir.path().join("hht-daemon");
+        std::fs::write(&daemon, b"daemon").unwrap();
+        assert_eq!(daemon_executable(&current).unwrap(), daemon);
     }
 
     #[test]

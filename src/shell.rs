@@ -23,18 +23,22 @@ use crate::container::{
 };
 
 /// Entry point for the `shell` subcommand. With an id, attaches to that
-/// session, optionally running `args` as a command instead of bash; without
-/// an id, prints the running sessions and their ids (and `args` is ignored).
-pub fn run(id: Option<String>, args: Vec<OsString>) -> Result<i32> {
+/// session, optionally running `args` as a command instead of bash; `--kill`
+/// terminates the named session; without an id, prints running sessions.
+pub fn run(id: Option<String>, kill: Option<String>, args: Vec<OsString>) -> Result<i32> {
     if which::which("docker").is_err() {
         bail!(
             "docker not found in PATH — `{} shell` requires Docker",
             crate::cli::COMMAND_NAME
         );
     }
-    match id {
-        Some(id) => attach(&id, &args),
-        None => {
+    match (id, kill) {
+        (_, Some(id)) => {
+            terminate(&id)?;
+            Ok(0)
+        }
+        (Some(id), None) => attach(&id, &args),
+        (None, None) => {
             list()?;
             Ok(0)
         }
@@ -44,6 +48,7 @@ pub fn run(id: Option<String>, args: Vec<OsString>) -> Result<i32> {
 /// A running harness-hat session, as seen through docker labels.
 pub(crate) struct Session {
     pub(crate) alias: String,
+    pub(crate) container_id: String,
     pub(crate) workspace: String,
     pub(crate) template: String,
     pub(crate) name: String,
@@ -59,7 +64,7 @@ pub(crate) fn running_sessions() -> Result<Vec<Session>> {
             "--filter",
             &format!("label={LABEL_ALIAS}"),
             "--format",
-            "{{.Names}}\t{{.Labels}}",
+            "{{.ID}}\t{{.Names}}\t{{.Labels}}",
         ])
         .output()
         .context("running docker ps")?;
@@ -70,9 +75,18 @@ pub(crate) fn running_sessions() -> Result<Vec<Session>> {
         );
     }
 
+    Ok(parse_running_sessions(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn parse_running_sessions(output: &str) -> Vec<Session> {
     let mut sessions = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let Some((name, labels)) = line.split_once('\t') else {
+    for line in output.lines() {
+        let mut columns = line.splitn(3, '\t');
+        let (Some(container_id), Some(name), Some(labels)) =
+            (columns.next(), columns.next(), columns.next())
+        else {
             continue;
         };
         let Some(alias) = parse_docker_label(labels, LABEL_ALIAS) else {
@@ -80,12 +94,13 @@ pub(crate) fn running_sessions() -> Result<Vec<Session>> {
         };
         sessions.push(Session {
             alias,
+            container_id: container_id.trim().to_string(),
             workspace: parse_docker_label(labels, LABEL_WORKSPACE).unwrap_or_default(),
             template: parse_docker_label(labels, LABEL_TEMPLATE).unwrap_or_default(),
             name: name.trim().to_string(),
         });
     }
-    Ok(sessions)
+    sessions
 }
 
 /// Normalize a user-supplied id to the stored form: numeric ids are
@@ -100,6 +115,28 @@ fn normalize_id(id: &str) -> String {
 }
 
 fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
+    let name = session_name_for_id(id)?;
+    exec_into_container(&name, extra_args)
+}
+
+fn terminate(id: &str) -> Result<()> {
+    let wanted = normalize_id(id);
+    let name = session_name_for_id(id)?;
+    let output = Command::new("docker")
+        .args(["rm", "-f", &name])
+        .output()
+        .context("terminating session container with docker rm -f")?;
+    if !output.status.success() {
+        bail!(
+            "failed to terminate session '{wanted}': {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    println!("Stopped session {wanted} ({name}).");
+    Ok(())
+}
+
+fn session_name_for_id(id: &str) -> Result<String> {
     let wanted = normalize_id(id);
     let sessions = running_sessions()?;
     let matches: Vec<&Session> = sessions.iter().filter(|s| s.alias == wanted).collect();
@@ -115,14 +152,14 @@ fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
             // Aliases are deduped at launch, so this should not happen; pick the
             // first deterministically rather than failing the user outright.
             eprintln!(
-                "warning: {} running sessions share id '{wanted}'; attaching to the first",
+                "warning: {} running sessions share id '{wanted}'; using the first",
                 many.len()
             );
             many[0].name.clone()
         }
     };
 
-    exec_into_container(&name, extra_args)
+    Ok(name)
 }
 
 /// Run `docker exec` against a container with optional trailing argv (or
@@ -300,6 +337,12 @@ fn list() -> Result<()> {
         .chain(std::iter::once("WORKSPACE".len()))
         .max()
         .unwrap_or(0);
+    let container_width = sessions
+        .iter()
+        .map(|s| s.container_id.len())
+        .chain(std::iter::once("CONTAINER".len()))
+        .max()
+        .unwrap_or(0);
     let tpl_width = sessions
         .iter()
         .map(|s| s.template.len())
@@ -308,30 +351,38 @@ fn list() -> Result<()> {
         .unwrap_or(0);
 
     println!(
-        "{:<6}{:<ws$}  {:<tpl$}",
-        "ID",
+        "{:<8}{:<cid$}  {:<ws$}  {:<tpl$}",
+        "SESSION",
+        "CONTAINER",
         "WORKSPACE",
         "TEMPLATE",
+        cid = container_width + 2,
         ws = ws_width + 2,
         tpl = tpl_width
     );
     for session in &sessions {
         println!(
-            "{:<6}{:<ws$}  {:<tpl$}",
+            "{:<8}{:<cid$}  {:<ws$}  {:<tpl$}",
             session.alias,
+            session.container_id,
             session.workspace,
             session.template,
+            cid = container_width + 2,
             ws = ws_width + 2,
             tpl = tpl_width
         );
     }
-    println!("\nAttach with: {} shell <ID>", crate::cli::COMMAND_NAME);
+    println!(
+        "\nAttach with: {} shell <ID>\nStop with: {} shell --kill <ID>",
+        crate::cli::COMMAND_NAME,
+        crate::cli::COMMAND_NAME
+    );
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_id;
+    use super::{normalize_id, parse_running_sessions};
 
     #[test]
     fn numeric_ids_are_zero_padded_to_width_four() {
@@ -345,5 +396,18 @@ mod tests {
         assert_eq!(normalize_id("12345"), "12345");
         assert_eq!(normalize_id("abcd"), "abcd");
         assert_eq!(normalize_id(""), "");
+    }
+
+    #[test]
+    fn running_session_parser_includes_docker_container_id() {
+        let sessions = parse_running_sessions(
+            "a1b2c3d4e5f6\thh-session\tharness-hat.alias=0042,harness-hat.workspace=api,harness-hat.template=rust\n",
+        );
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].alias, "0042");
+        assert_eq!(sessions[0].container_id, "a1b2c3d4e5f6");
+        assert_eq!(sessions[0].workspace, "api");
+        assert_eq!(sessions[0].template, "rust");
     }
 }

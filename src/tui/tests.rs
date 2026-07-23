@@ -1,4 +1,6 @@
-use super::{ContainerPickerState, SidebarItem, move_wrapping_cursor, should_handle_key_event};
+use super::{
+    App, ContainerPickerState, SidebarItem, move_wrapping_cursor, should_handle_key_event,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 #[test]
@@ -44,4 +46,37 @@ fn key_release_events_are_not_handled_as_repeated_input() {
     assert!(should_handle_key_event(&key(KeyEventKind::Press)));
     assert!(should_handle_key_event(&key(KeyEventKind::Repeat)));
     assert!(!should_handle_key_event(&key(KeyEventKind::Release)));
+}
+
+#[test]
+fn rules_watch_ignores_template_changes_but_detects_policy_changes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("harness-rules.toml");
+    std::fs::write(
+        &path,
+        "version = 1\n[network]\nallowlist = [\"domain=example.com\"]\n",
+    )
+    .expect("write rules");
+    let original = App::watched_file_stamp(&path);
+
+    std::fs::write(
+        &path,
+        "version = 1\ntemplate = \"rust\"\n[network]\nallowlist = [\"domain=example.com\"]\n",
+    )
+    .expect("write template");
+    assert_eq!(original, App::watched_file_stamp(&path));
+
+    std::fs::write(
+        &path,
+        "version = 1\ntemplate = \"rust\"\n[network]\nallowlist = [\"domain=changed.example.com\"]\n",
+    )
+    .expect("write policy change");
+    assert_ne!(original, App::watched_file_stamp(&path));
+
+    std::fs::write(
+        &path,
+        "# changed comment\nversion = 1\ntemplate = \"rust\"\n[network]\nallowlist = [\"domain=example.com\"]\n",
+    )
+    .expect("write non-template change");
+    assert_ne!(original, App::watched_file_stamp(&path));
 }

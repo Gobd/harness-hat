@@ -62,7 +62,7 @@ Start a new session after saving the change. When enabled, an absolute POSIX wor
 
 ## Choose A Template Or Rebuild
 
-Templates determine which development tools are available in the session. Choose a Rust template for a Rust project, for example, or override a template temporarily when trying a different environment. Rebuild when Harness Hat or its Dockerfiles change, or when you want the image-installed tools and packages refreshed.
+Templates determine which development tools are available in the session. Choose a Rust template for a Rust project, for example, or select a different template when trying another environment. Harness Hat remembers the selection in the workspace's `harness-rules.toml`. Rebuild when Harness Hat or its Dockerfiles change, or when you want the image-installed tools and packages refreshed.
 
 Run these commands in a **terminal**:
 

@@ -169,7 +169,7 @@ pub struct BaseRulesChangedState {
     pub dialog_dismissed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct WatchedFileStamp {
     pub exists: bool,
     pub size: u64,
@@ -177,6 +177,14 @@ pub struct WatchedFileStamp {
     pub mtime_nanos: u32,
     pub content_hash: u64,
 }
+
+impl PartialEq for WatchedFileStamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.exists == other.exists && self.content_hash == other.content_hash
+    }
+}
+
+impl Eq for WatchedFileStamp {}
 
 #[derive(Debug, Clone)]
 pub struct PendingBaseRulesInternalWrite {

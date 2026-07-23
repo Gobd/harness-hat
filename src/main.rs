@@ -68,9 +68,9 @@ async fn main() -> Result<()> {
                 path.display()
             );
         }
-        Some(Command::Shell { id, args }) => {
+        Some(Command::Shell { id, kill, args }) => {
             // Pure-Docker passthrough; intentionally bypasses manager init.
-            let code = harness_hat::shell::run(id, args)?;
+            let code = harness_hat::shell::run(id, kill, args)?;
             std::process::exit(code);
         }
         Some(Command::Workspace {

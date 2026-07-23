@@ -33,6 +33,10 @@ pub struct ProjectRules {
     /// Optional project instructions. This field is preserved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_instructions: Option<String>,
+    /// Preferred container template for this workspace. A primary-config
+    /// workspace template takes precedence when explicitly configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
     /// Mount the workspace at its absolute POSIX host path instead of the
     /// configured container mount target.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -56,6 +60,7 @@ impl Default for ProjectRules {
         Self {
             version: CURRENT_RULES_VERSION,
             llm_instructions: None,
+            template: None,
             mirror_cwd: false,
             hostdo: HostdoRules::default(),
             network: NetworkRules::default(),
@@ -588,10 +593,22 @@ pub fn load(path: &Path) -> Result<ProjectRules> {
     let parsed: ProjectRules = toml::from_str(&raw)
         .with_context(|| format!("parsing harness-rules.toml: {}", path.display()))?;
     validate_rules_version(parsed.version, path)?;
+    validate_template(parsed.template.as_deref(), path)?;
     validate_network_list("allowlist", &parsed.network.allowlist, path)?;
     validate_network_list("denylist", &parsed.network.denylist, path)?;
     validate_hostdo_rules(&parsed.hostdo.commands, path)?;
     Ok(parsed)
+}
+
+fn validate_template(template: Option<&str>, path: &Path) -> Result<()> {
+    if let Some(template) = template {
+        anyhow::ensure!(
+            !template.trim().is_empty(),
+            "invalid template in {}: template must not be empty",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Validate every entry in a `[network]` list, attributing failures to the
@@ -742,6 +759,11 @@ const RULES_FILE_HEADER: &str = "\
 # Mounts an absolute POSIX workspace path at that same path in the Linux
 # container instead of `/workspace`. Native Windows paths keep the configured
 # container mount target because they cannot be represented exactly.
+#
+# Preferred session template (saved by `hht workspace` after the first choice):
+# template = \"rust\"
+# A `template` value in the matching `[[workspaces]]` entry in
+# harness-hat.toml overrides this value.
 #
 # Hostdo (host-side command execution)
 #

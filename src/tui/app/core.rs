@@ -15,8 +15,20 @@ impl App {
     fn content_hash_for_path(path: &Path) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        match std::fs::read(path) {
-            Ok(bytes) => bytes.hash(&mut hasher),
+        match std::fs::read_to_string(path) {
+            Ok(raw) => {
+                // `template` is workspace launch state, not executable or
+                // network policy. Ignore only that top-level field so a
+                // remembered template does not trigger a fail-closed policy
+                // alert; all other content remains byte-sensitive.
+                match raw.parse::<toml_edit::DocumentMut>() {
+                    Ok(mut doc) => {
+                        doc.remove("template");
+                        doc.to_string().hash(&mut hasher);
+                    }
+                    Err(_) => raw.hash(&mut hasher),
+                }
+            }
             Err(_) => 0u8.hash(&mut hasher),
         }
         hasher.finish()

@@ -61,7 +61,7 @@ hht workspace --rebuild                # rebuild the image (--no-cache) before l
 hht workspace claude --resume          # runs "claude --resume" inside the session
 ```
 
-The first time you launch a workspace, `hht workspace` saves the chosen template to your config. Every subsequent launch skips the picker and goes straight in. Pass `--template` to override it.
+The first time you launch a workspace, `hht workspace` saves the chosen template in that workspace's `harness-rules.toml`. Every subsequent launch skips the picker and goes straight in. Pass `--template` to override it; an optional `template` value in the matching primary-config `[[workspaces]]` entry takes precedence over the workspace-local choice.
 
 To attach to an already-running session from a separate terminal:
 
@@ -328,6 +328,9 @@ starter_network_allowlist = [
 [[workspaces]]
 name = "my-project"
 canonical_path = "~/src/my-project"
+# Optional primary-config override. Otherwise the workspace remembers its
+# selected template in ~/src/my-project/harness-rules.toml.
+# template = "rust"
 # Mount the invoking subdirectory as /workspace when launched through hht workspace.
 # TUI launches continue to mount canonical_path.
 mount_cwd = false
@@ -418,6 +421,7 @@ hht install                 # start the per-user background agent at graphical l
 hht uninstall               # remove the per-user background agent
 hht shell                 # list running sessions
 hht shell <ID> [COMMAND...] # docker exec into a running session
+hht shell --kill <ID>     # terminate and remove a running session
 ```
 
 ## Upgrading
@@ -432,7 +436,7 @@ Use `hht rebuild` to rebuild the base image followed by every Dockerfile templat
 
 ### Background agent
 
-`hht install` creates the default global config at `~/.config/harness-hat/harness-hat.toml` when it is missing, then installs a per-user desktop agent using launchd on macOS, a systemd user unit on Linux, or a Task Scheduler logon task on Windows. Run it as the signed-in desktop user, without `sudo`; it needs that user's Docker access and graphical session for approval dialogs. It starts the control server, scoped proxies, workspace-launch path, and native approval dialogs without requiring a terminal. It is intentionally not a privileged system service. Use `hht uninstall` to stop and remove the agent.
+`hht install` creates the default global config at `~/.config/harness-hat/harness-hat.toml` when it is missing, then installs a per-user desktop agent using the `hht-daemon` process with launchd on macOS, a systemd user unit on Linux, or a Task Scheduler logon task on Windows. Run it as the signed-in desktop user, without `sudo`; it needs that user's Docker access and graphical session for approval dialogs. It starts the control server, scoped proxies, workspace-launch path, and native approval dialogs without requiring a terminal. It is intentionally not a privileged system service. Use `hht uninstall` to stop and remove the agent.
 
 When the agent is active, use `hht workspace` and `hht shell` for session work. Approval decisions are native system dialogs; if the desktop dialog backend is unavailable, requests remain denied rather than falling back to an invisible prompt.
 

@@ -38,7 +38,7 @@ pub fn run(
     let mut config = crate::config::load(&config_path)?;
 
     if list {
-        println!("{}", format_workspace_list(&config));
+        println!("{}", format_workspace_list(&config)?);
         return Ok(0);
     }
 
@@ -90,16 +90,23 @@ pub fn run(
             println!("attaching to running session {}", session.alias);
             return crate::shell::exec_into_container(&session.name, &args);
         }
-        // Use saved template as default if no override provided.
-        let effective_override = template_override.as_deref().or(matched.template.as_deref());
+        let rules_path = workspace_rules_path(&matched.canonical_path);
+        let rules = crate::rules::load(&rules_path)?;
+        // Command-line selection takes precedence, followed by an explicit
+        // primary-config override, then the workspace-local remembered value.
+        let effective_override = template_override
+            .as_deref()
+            .or(matched.template.as_deref())
+            .or(rules.template.as_deref());
         let template = choose_template(
             &config,
             matched.canonical_path.as_path(),
             effective_override,
         )?;
-        // Persist chosen template back to config if it changed.
-        if matched.template.as_deref() != Some(&template) {
-            let _ = save_workspace_template(&config_path, &matched.name, &template);
+        // Primary config values are explicit overrides. All remembered choices
+        // belong to the workspace and are persisted in harness-rules.toml.
+        if matched.template.is_none() && rules.template.as_deref() != Some(&template) {
+            save_workspace_template(&rules_path, &template)?;
         }
         let launch_cwd = matched.mount_cwd.then(|| pwd.to_str()).flatten();
         let resp = post_launch(
@@ -141,7 +148,7 @@ pub fn run(
         mount_cwd: false,
     });
     let template = choose_template(&config, pwd.as_path(), template_override.as_deref())?;
-    let _ = save_workspace_template(&config_path, &workspace_name, &template);
+    save_workspace_template(&workspace_rules_path(&pwd), &template)?;
     let resp = post_launch(
         &control_url,
         &token,
@@ -158,26 +165,31 @@ pub fn run(
     attach_and_report(&resp.docker_name, &args)
 }
 
-fn format_workspace_list(config: &Config) -> String {
+fn format_workspace_list(config: &Config) -> Result<String> {
     if config.workspaces.is_empty() {
-        return "No workspaces configured.".to_string();
+        return Ok("No workspaces configured.".to_string());
     }
 
     let entries = config
         .workspaces
         .iter()
-        .map(|workspace| {
-            let template = workspace.template.as_deref().unwrap_or("<not selected>");
-            format!(
+        .map(|workspace| -> Result<String> {
+            let template = match workspace.template.as_deref() {
+                Some(template) => template.to_string(),
+                None => crate::rules::load(&workspace_rules_path(&workspace.canonical_path))?
+                    .template
+                    .unwrap_or_else(|| "<not selected>".to_string()),
+            };
+            Ok(format!(
                 "- {}\n  path: {}\n  template: {}",
                 workspace.name,
                 workspace.canonical_path.display(),
                 template
-            )
+            ))
         })
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>>>()?
         .join("\n");
-    format!("Configured workspaces:\n{entries}")
+    Ok(format!("Configured workspaces:\n{entries}"))
 }
 
 /// Poll `docker inspect` until the named container reports State.Running=true,
@@ -244,22 +256,21 @@ pub(crate) fn best_matching_workspace<'a>(
         .max_by_key(|w| w.canonical_path.components().count())
 }
 
-fn save_workspace_template(config_path: &Path, workspace_name: &str, template: &str) -> Result<()> {
-    use toml_edit::DocumentMut;
-    let raw = std::fs::read_to_string(config_path)?;
-    let mut doc = raw.parse::<DocumentMut>()?;
-    if let Some(workspaces) = doc
-        .get_mut("workspaces")
-        .and_then(|v| v.as_array_of_tables_mut())
-    {
-        for entry in workspaces.iter_mut() {
-            if entry.get("name").and_then(|v| v.as_str()) == Some(workspace_name) {
-                entry["template"] = toml_edit::value(template);
-                break;
-            }
-        }
+fn workspace_rules_path(workspace_path: &Path) -> PathBuf {
+    workspace_path.join("harness-rules.toml")
+}
+
+fn save_workspace_template(rules_path: &Path, template: &str) -> Result<()> {
+    if !rules_path.exists() {
+        let mut rules = crate::rules::ProjectRules::default();
+        rules.template = Some(template.to_string());
+        return crate::rules::write_rules_file(rules_path, &rules);
     }
-    crate::config::atomic_write_with_lock(config_path, doc.to_string().as_bytes())?;
+
+    let raw = std::fs::read_to_string(rules_path)?;
+    let mut doc = raw.parse::<toml_edit::DocumentMut>()?;
+    doc["template"] = toml_edit::value(template);
+    crate::config::atomic_write_with_lock(rules_path, doc.to_string().as_bytes())?;
     Ok(())
 }
 
@@ -557,7 +568,7 @@ mod tests {
         }];
 
         assert_eq!(
-            format_workspace_list(&config),
+            format_workspace_list(&config).unwrap(),
             "Configured workspaces:\n- api\n  path: /src/api\n  template: rust"
         );
     }
@@ -565,8 +576,41 @@ mod tests {
     #[test]
     fn workspace_list_reports_when_no_workspaces_are_configured() {
         assert_eq!(
-            format_workspace_list(&Config::default()),
+            format_workspace_list(&Config::default()).unwrap(),
             "No workspaces configured."
+        );
+    }
+
+    #[test]
+    fn workspace_template_is_saved_to_workspace_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules_path = workspace_rules_path(dir.path());
+
+        save_workspace_template(&rules_path, "rust").unwrap();
+
+        assert_eq!(
+            crate::rules::load(&rules_path).unwrap().template.as_deref(),
+            Some("rust")
+        );
+    }
+
+    #[test]
+    fn workspace_list_reads_template_from_workspace_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        save_workspace_template(&workspace_rules_path(dir.path()), "python").unwrap();
+        let mut config = Config::default();
+        config.workspaces = vec![WorkspaceConfig {
+            name: "api".to_string(),
+            canonical_path: dir.path().to_path_buf(),
+            sidebar_hotkey: None,
+            template: None,
+            mount_cwd: false,
+        }];
+
+        assert!(
+            format_workspace_list(&config)
+                .unwrap()
+                .contains("template: python")
         );
     }
 

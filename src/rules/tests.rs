@@ -28,6 +28,33 @@ denylist = ["domain=blocked.example.com"]
 }
 
 #[test]
+fn load_parses_workspace_template() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("harness-rules.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+template = "rust"
+"#,
+    )
+    .expect("write rules");
+
+    let rules = load(&path).expect("load rules");
+    assert_eq!(rules.template.as_deref(), Some("rust"));
+}
+
+#[test]
+fn load_rejects_empty_workspace_template() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("harness-rules.toml");
+    std::fs::write(&path, "version = 1\ntemplate = \"   \"\n").expect("write rules");
+
+    let err = load(&path).expect_err("empty template must be rejected");
+    assert!(err.to_string().contains("template must not be empty"));
+}
+
+#[test]
 fn load_ignores_non_network_sections() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("harness-rules.toml");

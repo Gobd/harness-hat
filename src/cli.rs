@@ -26,12 +26,15 @@ pub enum Command {
         path: Option<PathBuf>,
     },
     /// Open an interactive shell in a running session. With no id, lists the
-    /// running sessions and their ids. Any args after the id are passed
-    /// verbatim to `docker exec` as the command to run instead of bash —
-    /// e.g. `hht shell 0042 claude --resume`.
+    /// running sessions and their ids. Pass `--kill ID` to terminate a
+    /// session. Any args after the id are passed verbatim to `docker exec` as
+    /// the command to run instead of bash — e.g. `hht shell 0042 claude --resume`.
     Shell {
         #[arg(value_name = "ID")]
         id: Option<String>,
+        /// Terminate and remove a running session by ID.
+        #[arg(long, value_name = "ID", conflicts_with_all = ["id", "args"])]
+        kill: Option<String>,
         #[arg(
             value_name = "COMMAND",
             trailing_var_arg = true,
@@ -148,7 +151,7 @@ pub fn parse() -> Result<Cli> {
 
 pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
     let usage = format!(
-        "Usage: {COMMAND_NAME} [--config PATH] [init [PATH] | shell [ID] [COMMAND...] | workspace [OPTIONS] [COMMAND...] | rebuild [OPTIONS] [TEMPLATE...] | install | uninstall]"
+        "Usage: {COMMAND_NAME} [--config PATH] [init [PATH] | shell [ID] [COMMAND...] | shell --kill ID | workspace [OPTIONS] [COMMAND...] | rebuild [OPTIONS] [TEMPLATE...] | install | uninstall]"
     );
     if raw.is_empty() {
         bail!("missing argv[0]. {usage}");
@@ -207,13 +210,13 @@ mod tests {
         let cli = parse_from(argv(&["hht", "shell"])).expect("parse");
         assert!(matches!(
             cli.command,
-            Some(Command::Shell { id: None, ref args }) if args.is_empty()
+            Some(Command::Shell { id: None, kill: None, ref args }) if args.is_empty()
         ));
 
         let cli = parse_from(argv(&["hht", "shell", "0042"])).expect("parse");
         assert!(matches!(
             cli.command,
-            Some(Command::Shell { id: Some(id), ref args }) if id == "0042" && args.is_empty()
+            Some(Command::Shell { id: Some(id), kill: None, ref args }) if id == "0042" && args.is_empty()
         ));
     }
 
@@ -274,7 +277,12 @@ mod tests {
     #[test]
     fn shell_subcommand_collects_trailing_args_verbatim() {
         let cli = parse_from(argv(&["hht", "shell", "0042", "claude", "--resume"])).expect("parse");
-        let Some(Command::Shell { id, args }) = cli.command else {
+        let Some(Command::Shell {
+            id,
+            kill: None,
+            args,
+        }) = cli.command
+        else {
             panic!("expected Shell subcommand");
         };
         assert_eq!(id.as_deref(), Some("0042"));
@@ -284,6 +292,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["claude".to_string(), "--resume".to_string()],
         );
+    }
+
+    #[test]
+    fn shell_subcommand_parses_kill_id() {
+        let cli = parse_from(argv(&["hht", "shell", "--kill", "42"])).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Shell { id: None, kill: Some(id), args }) if id == "42" && args.is_empty()
+        ));
     }
 
     #[test]

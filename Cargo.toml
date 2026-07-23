@@ -17,6 +17,10 @@ default-run = "hht"
 name = "hht"
 path = "src/main.rs"
 
+[[bin]]
+name = "hht-daemon"
+path = "src/daemon.rs"
+
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive"] }

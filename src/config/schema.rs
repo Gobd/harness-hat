@@ -11,6 +11,9 @@ pub struct WorkspaceConfig {
     pub canonical_path: PathBuf,
     #[serde(default)]
     pub sidebar_hotkey: Option<String>,
+    /// Optional primary-config override for the workspace container template.
+    /// Without this, `hht workspace` remembers its selection in the
+    /// workspace's harness-rules.toml.
     #[serde(default)]
     pub template: Option<String>,
     /// When true, mount the cwd at launch time instead of `canonical_path`.

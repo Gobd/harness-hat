@@ -48,14 +48,15 @@ jobs:
         run: |
           tar -czf ${{ matrix.archive }} \
             -C target/${{ matrix.target }}/release \
-            ${{ matrix.artifact }}
+            ${{ matrix.artifact }} \
+            hht-daemon
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Compress-Archive `
-            -Path "target\${{ matrix.target }}\release\${{ matrix.artifact }}" `
+            -Path "target\${{ matrix.target }}\release\${{ matrix.artifact }}", "target\${{ matrix.target }}\release\hht-daemon.exe" `
             -DestinationPath ${{ matrix.archive }}
 
       - name: Upload artifact
