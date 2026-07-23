@@ -9,29 +9,36 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 /// Run the interactive workspace manager (the default `hht` action).
-pub async fn run(cli: crate::cli::Cli) -> Result<()> {
-    run_inner(cli, false).await
+pub async fn run() -> Result<()> {
+    // A per-user daemon owns the control port after `hht install`. In that
+    // case the foreground command is an authenticated client of that daemon,
+    // not a second manager competing to bind the same listener. `install`
+    // always uses the global config, so favor it for an unqualified command
+    // even when the current directory also has a project-local config.
+    let daemon_config_path = default_home_config_path().ok().filter(|path| path.exists());
+    if let Some(config_path) = daemon_config_path {
+        let config = crate::config::load(&config_path)?;
+        if daemon_is_reachable(&config).await {
+            return run_attached_client(config_path).await;
+        }
+    }
+
+    // No daemon responded. Preserve the normal cwd-first discovery behavior
+    // for a standalone manager.
+    let config_path = match resolve_or_prompt_config_path(None)? {
+        Some(path) => path,
+        None => return Ok(()),
+    };
+    run_inner(config_path, false).await
 }
 
 /// Run the terminal-free background agent installed by `hht install`.
 pub async fn run_service(config_path: PathBuf) -> Result<()> {
-    run_inner(
-        crate::cli::Cli {
-            config: Some(config_path),
-            command: None,
-        },
-        true,
-    )
-    .await
+    run_inner(config_path, true).await
 }
 
-async fn run_inner(cli: crate::cli::Cli, service_mode: bool) -> Result<()> {
+async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
     crate::container::ensure_docker_installed_and_running()?;
-
-    let config_path = match resolve_or_prompt_config_path(cli.config)? {
-        Some(path) => path,
-        None => return Ok(()),
-    };
 
     let config = crate::config::load(&config_path)?;
     // ensure_docker_assets covers the base and default dockerfiles too.
@@ -55,6 +62,7 @@ async fn run_inner(cli: crate::cli::Cli, service_mode: bool) -> Result<()> {
     // by `try_send` on the producer side rather than backing into memory.
     let (activity_tx, activity_rx) = mpsc::channel::<crate::activity::ActivityEvent>(4096);
     let (audit_tx, audit_rx) = mpsc::channel(256);
+    let (tui_tx, tui_rx) = mpsc::channel::<crate::server::TuiFrameItem>(8);
 
     let session_registry = crate::server::SessionRegistry::default();
 
@@ -84,6 +92,7 @@ async fn run_inner(cli: crate::cli::Cli, service_mode: bool) -> Result<()> {
         sessions: session_registry.clone(),
         exec_jobs: crate::server::ExecJobRegistry::default(),
         activity_tx: activity_tx.clone(),
+        tui_tx,
     };
     let control_listener = tokio::net::TcpListener::bind(&control_addr)
         .await
@@ -143,8 +152,9 @@ async fn run_inner(cli: crate::cli::Cli, service_mode: bool) -> Result<()> {
                 service_mode,
             )?;
             if service_mode {
-                crate::tui::run_service(app).await
+                crate::tui::run_service(app, tui_rx).await
             } else {
+                drop(tui_rx);
                 crate::tui::run(app).await
             }
         })
@@ -160,6 +170,28 @@ async fn run_inner(cli: crate::cli::Cli, service_mode: bool) -> Result<()> {
     telemetry_handle.shutdown()?;
     tui_result.map_err(|e| anyhow::anyhow!("TUI thread panicked: {e}"))??;
     Ok(())
+}
+
+async fn daemon_is_reachable(config: &crate::config::Config) -> bool {
+    let control_url = format!(
+        "http://{}:{}/healthz",
+        config.defaults.control.server_host, config.defaults.control.server_port
+    );
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(1))
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+    matches!(client.get(control_url).send().await, Ok(response) if response.status().is_success())
+}
+
+async fn run_attached_client(config_path: PathBuf) -> Result<()> {
+    tokio::task::spawn_blocking(move || crate::tui::run_attached(config_path))
+        .await
+        .map_err(|error| anyhow::anyhow!("attached TUI thread panicked: {error}"))?
 }
 
 pub fn resolve_or_prompt_config_path(explicit: Option<PathBuf>) -> Result<Option<PathBuf>> {

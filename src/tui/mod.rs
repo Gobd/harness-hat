@@ -1,5 +1,8 @@
 mod app;
+mod remote;
 pub mod render;
+
+pub(crate) use remote::run_attached;
 
 use alacritty_terminal::grid::Dimensions;
 use anyhow::{Context, Result};
@@ -17,7 +20,7 @@ use crossterm::{
     },
 };
 use futures::StreamExt;
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, layout::Rect};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -470,11 +473,119 @@ pub async fn run(mut app: App) -> Result<()> {
 
 /// Run the manager state machine without a terminal renderer. The installed
 /// per-user agent uses this path and native dialogs for every approval.
-pub async fn run_service(mut app: App) -> Result<()> {
+pub async fn run_service(
+    mut app: App,
+    mut tui_rx: mpsc::Receiver<crate::server::TuiFrameItem>,
+) -> Result<()> {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let backend = CrosstermBackend::new(RemoteFrameWriter(Arc::clone(&output)));
+    let mut terminal = Terminal::with_options(
+        backend,
+        TerminalOptions {
+            viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+        },
+    )?;
     loop {
         app.drain_channels();
         app.tick_base_rules_file_watch();
+        while let Ok(item) = tui_rx.try_recv() {
+            terminal.resize(Rect::new(0, 0, item.width, item.height))?;
+            let (pty_cols, pty_rows) = (
+                item.width.saturating_sub(38).max(20),
+                item.height.saturating_sub(10).max(6),
+            );
+            for session in &mut app.sessions {
+                let _ = session.resize(pty_rows, pty_cols);
+            }
+            if let Some(input) = item.input {
+                apply_remote_input(&mut app, input);
+            }
+            terminal.draw(|frame| render::render(frame, &mut app))?;
+            let frame = std::mem::take(&mut *output.lock().unwrap_or_else(|e| e.into_inner()));
+            let _ = item.response_tx.send(frame);
+        }
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+}
+
+struct RemoteFrameWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for RemoteFrameWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn apply_remote_input(app: &mut App, input: crate::server::TuiInput) {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    match input {
+        crate::server::TuiInput::Key { code, modifiers } => {
+            let code = match code.as_str() {
+                "backspace" => KeyCode::Backspace,
+                "enter" => KeyCode::Enter,
+                "left" => KeyCode::Left,
+                "right" => KeyCode::Right,
+                "up" => KeyCode::Up,
+                "down" => KeyCode::Down,
+                "home" => KeyCode::Home,
+                "end" => KeyCode::End,
+                "page_up" => KeyCode::PageUp,
+                "page_down" => KeyCode::PageDown,
+                "tab" => KeyCode::Tab,
+                "back_tab" => KeyCode::BackTab,
+                "delete" => KeyCode::Delete,
+                "insert" => KeyCode::Insert,
+                "esc" => KeyCode::Esc,
+                value if value.len() == 1 => {
+                    KeyCode::Char(value.chars().next().unwrap_or_default())
+                }
+                _ => return,
+            };
+            app.handle_key(KeyEvent::new(
+                code,
+                KeyModifiers::from_bits_truncate(modifiers),
+            ));
+        }
+        crate::server::TuiInput::Paste { text } => app.append_remote_paste(&text),
+        crate::server::TuiInput::Mouse {
+            kind,
+            column,
+            row,
+            modifiers,
+        } => {
+            use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+            let kind = match kind.as_str() {
+                "down_left" => MouseEventKind::Down(MouseButton::Left),
+                "down_right" => MouseEventKind::Down(MouseButton::Right),
+                "down_middle" => MouseEventKind::Down(MouseButton::Middle),
+                "up_left" => MouseEventKind::Up(MouseButton::Left),
+                "up_right" => MouseEventKind::Up(MouseButton::Right),
+                "up_middle" => MouseEventKind::Up(MouseButton::Middle),
+                "drag_left" => MouseEventKind::Drag(MouseButton::Left),
+                "drag_right" => MouseEventKind::Drag(MouseButton::Right),
+                "drag_middle" => MouseEventKind::Drag(MouseButton::Middle),
+                "moved" => MouseEventKind::Moved,
+                "scroll_down" => MouseEventKind::ScrollDown,
+                "scroll_up" => MouseEventKind::ScrollUp,
+                "scroll_left" => MouseEventKind::ScrollLeft,
+                "scroll_right" => MouseEventKind::ScrollRight,
+                _ => return,
+            };
+            app.handle_mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::from_bits_truncate(modifiers),
+            });
+        }
     }
 }
 

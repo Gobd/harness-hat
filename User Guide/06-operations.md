@@ -7,6 +7,7 @@
 Run these commands in a **terminal**:
 
 ```sh
+hht                              # attach to the installed hht-daemon TUI
 hht workspace                    # attach or launch a session for the current directory
 hht workspace --name my-project  # choose a configured workspace
 hht workspace --list             # list configured workspaces
@@ -16,7 +17,9 @@ hht shell --kill <ID>             # stop and remove a session
 hht rebuild rust                  # rebuild the base image and Rust template
 ```
 
-> **Expected result:** `workspace` attaches to a session or starts one, `workspace --list` prints each configured workspace name, path, and saved template, `shell` lists or attaches to existing sessions with both its Harness Hat session ID and Docker container ID, and `rebuild` prints Docker build output followed by a successful build result.
+> **Expected result:** `hht` opens the Harness Hat TUI attached to the installed `hht-daemon`; `workspace` attaches to a session or starts one, `workspace --list` prints each configured workspace name, path, and saved template, `shell` lists or attaches to existing sessions with both its Harness Hat session ID and Docker container ID, and `rebuild` prints Docker build output followed by a successful build result.
+
+The attached TUI is rendered by `hht-daemon`, so its workspace, session, terminal, build, settings, and approval behavior is the same as the standalone manager. When the service is not installed or running, `hht` starts the standalone manager instead.
 
 Run `killme` in a **session terminal** to request that Harness Hat stops that session. From a **terminal**, `hht shell --kill <ID>` stops and removes a session listed by `hht shell`.
 
@@ -87,4 +90,4 @@ Workspace `*.dockerfiles` are scanned for launchable images. Any Dockerfile that
 - **A request remains blocked:** check global and project rules, then inspect any rules-file-change dialog. Fail-closed behavior is intentional.
 - **Claude is not authenticated:** verify the relevant environment variable is listed in `env_passthrough`, then launch a new session. See [Set Up Claude Code](04-claude.md).
 
-For configuration details, return to [Configuration And Policy](03-configuration.md).
+For configuration details, return to [Configuration And Policy](03-configuration.md). To attach VS Code, Codex, Windsurf, or another VS Code-based IDE, continue to [Use VS Code-Based Editors](07-vscode-editors.md).

@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 
 use crate::config::{Config, ContainerDef, WorkspaceConfig};
 
-/// Entry point for the `workspace` subcommand. `explicit_config` mirrors the
-/// global `--config PATH` flag.
+/// Entry point for the `workspace` subcommand. `explicit_config` is reserved
+/// for the daemon-attached client so it uses the service's exact config.
 pub fn run(
     args: Vec<OsString>,
     list: bool,

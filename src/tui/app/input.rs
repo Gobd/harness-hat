@@ -498,6 +498,16 @@ impl App {
         }
     }
 
+    pub(crate) fn append_remote_paste(&mut self, text: &str) {
+        if self.focus == Focus::NewWorkspace {
+            self.append_new_workspace_text(text);
+        } else if let Some(session_idx) = self.active_session
+            && let Some(session) = self.sessions.get(session_idx)
+        {
+            session.send_input(text.as_bytes().to_vec());
+        }
+    }
+
     pub(crate) fn submit_new_workspace(&mut self) {
         let Some((name, workspace_raw, project_type)) = self.new_workspace.as_mut().map(|state| {
             state.error = None;

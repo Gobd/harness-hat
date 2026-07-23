@@ -386,6 +386,42 @@ pub struct ServerState {
     pub exec_jobs: ExecJobRegistry,
     // Bounded; see H12 comments at the construction site in manager::run.
     pub activity_tx: mpsc::Sender<ActivityEvent>,
+    pub tui_tx: mpsc::Sender<TuiFrameItem>,
+}
+
+/// A frame request from the foreground `hht` terminal. The daemon owns the
+/// real App; the client only supplies terminal input and displays its frames.
+pub struct TuiFrameItem {
+    pub width: u16,
+    pub height: u16,
+    pub input: Option<TuiInput>,
+    pub response_tx: oneshot::Sender<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuiFrameRequest {
+    pub width: u16,
+    pub height: u16,
+    #[serde(default)]
+    pub input: Option<TuiInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TuiInput {
+    Key {
+        code: String,
+        modifiers: u8,
+    },
+    Paste {
+        text: String,
+    },
+    Mouse {
+        kind: String,
+        column: u16,
+        row: u16,
+        modifiers: u8,
+    },
 }
 
 /// A container stop request waiting to be handled by the TUI.
@@ -497,6 +533,7 @@ pub async fn run_with_listener(
     let router = Router::new()
         .route("/container/stop", post(stop_handler))
         .route("/workspace/launch", post(workspace_launch_handler))
+        .route("/tui/frame", post(tui_frame_handler))
         .route("/exec", post(crate::server::core::exec_handler))
         .route(
             "/exec/jobs",
@@ -532,6 +569,61 @@ pub async fn run_with_listener(
 /// caller to load and parse it just to print "manager not running."
 async fn healthz_handler() -> Response {
     (StatusCode::OK, "ok").into_response()
+}
+
+/// Render the daemon-owned TUI for one foreground client tick.
+async fn tui_frame_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<TuiFrameRequest>,
+) -> Response {
+    if let Err(response) = require_bearer(&state, &headers) {
+        return response;
+    }
+
+    if request.width == 0 || request.height == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "terminal dimensions must be non-zero",
+        )
+            .into_response();
+    }
+    let (response_tx, response_rx) = oneshot::channel();
+    let item = TuiFrameItem {
+        width: request.width,
+        height: request.height,
+        input: request.input,
+        response_tx,
+    };
+    if state.tui_tx.send(item).await.is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "tui_unavailable".into(),
+                reason: "the daemon TUI is shutting down".into(),
+            }),
+        )
+            .into_response();
+    }
+    match tokio::time::timeout(CONTROL_HANDLER_TIMEOUT, response_rx).await {
+        Ok(Ok(frame)) => frame.into_response(),
+        Ok(Err(_)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "tui_unavailable".into(),
+                reason: "the daemon TUI stopped responding".into(),
+            }),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "tui_busy".into(),
+                reason: "the daemon TUI did not render a frame in time".into(),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 pub(super) async fn stop_handler(
@@ -847,6 +939,7 @@ mod tests {
         let (launch_tx, _launch_rx) = mpsc::channel(1);
         let (audit_tx, _audit_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
+        let (tui_tx, _tui_rx) = mpsc::channel(1);
         let state_dir =
             std::env::temp_dir().join(format!("harness-hat-state-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&state_dir).expect("create state dir");
@@ -861,6 +954,7 @@ mod tests {
             sessions: registry,
             exec_jobs,
             activity_tx,
+            tui_tx,
         }
     }
 
@@ -915,6 +1009,25 @@ mod tests {
             require_session_context(&state, &headers).expect("session context");
         assert_eq!(session_token, "session");
         assert_eq!(identity.workspace_name, "workspace");
+    }
+
+    #[tokio::test]
+    async fn tui_frame_requires_a_daemon_token() {
+        let state = Arc::new(test_server_state(
+            SessionRegistry::default(),
+            ExecJobRegistry::default(),
+        ));
+        let response = tui_frame_handler(
+            State(state),
+            HeaderMap::new(),
+            Json(TuiFrameRequest {
+                width: 80,
+                height: 24,
+                input: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

@@ -46,10 +46,13 @@ The [setup guide](<User Guide/01-setup.md>) includes platform-specific Docker li
 
 ```sh
 cargo install harness-hat              # binary is `hht`
-hht  # will prompt you to create config, or launch the manager if config exists
+hht install                            # create the global config and start hht-daemon at login
+hht                                    # attach to the background Harness Hat TUI
 ```
 
-Inside the TUI: pick a workspace, pick a template, get a shell. From inside the container, run `killme` to ask Harness Hat to stop the session.
+`hht` attaches to the installed `hht-daemon` when it is running. It displays the same Harness Hat TUI, backed by the daemon's live session, build, approval, and terminal state. When no daemon is running, `hht` retains its standalone manager behavior.
+
+From inside the container, run `killme` to ask Harness Hat to stop the session.
 
 With the manager running in another terminal, you can also attach to or start the session for your current directory:
 
@@ -73,13 +76,7 @@ hht shell <ID> CMD  # runs CMD via docker exec
 
 ### VSCode-like editors (VS Code, Cursor, Windsurf, etc.)
 
-You can attach these editors directly to a running Harness Hat container using the Dev Containers extension:
-
-1. Install the **Dev Containers** extension (`ms-vscode-remote.remote-containers`).
-2. Start your Harness Hat session so the target container is running.
-3. In the editor command palette, run `Dev Containers: Attach to Running Container...`.
-4. Select the active `harness-hat` container.
-5. Open `/workspace` in the remote window.
+You can attach VS Code, Windsurf, and other VS Code-based IDEs directly to a running Harness Hat container. The [VS Code-based editors guide](<User Guide/07-vscode-editors.md>) covers installation, attachment, Codex, and the correct workspace path.
 
 ## Model
 
@@ -410,8 +407,7 @@ Hostdo children never see harness-hat's own control-plane variables (`HARNESS_HA
 ## CLI
 
 ```
-hht                       # launch interactive workspace manager (default)
-hht --config PATH         # use a specific config
+hht                       # attach to hht-daemon, or launch a local manager
 hht init [PATH]           # write a starter config (default: ./harness-hat.toml)
 hht workspace             # attach to or start a session for the current directory
 hht workspace --list      # list configured workspaces
@@ -436,7 +432,7 @@ Use `hht rebuild` to rebuild the base image followed by every Dockerfile templat
 
 ### Background agent
 
-`hht install` creates the default global config at `~/.config/harness-hat/harness-hat.toml` when it is missing, then installs a per-user desktop agent using the `hht-daemon` process with launchd on macOS, a systemd user unit on Linux, or a Task Scheduler logon task on Windows. Run it as the signed-in desktop user, without `sudo`; it needs that user's Docker access and graphical session for approval dialogs. It starts the control server, scoped proxies, workspace-launch path, and native approval dialogs without requiring a terminal. It is intentionally not a privileged system service. Use `hht uninstall` to stop and remove the agent.
+`hht install` creates the default global config at `~/.config/harness-hat/harness-hat.toml` when it is missing, then installs a per-user desktop agent using the `hht-daemon` process with launchd on macOS, a systemd user unit on Linux, or a Task Scheduler logon task on Windows. Run it as the signed-in desktop user, without `sudo`; it needs that user's Docker access and graphical session for approval dialogs. It starts the control server, scoped proxies, workspace-launch path, and native approval dialogs without requiring a terminal. A plain `hht` command attaches to the daemon's existing TUI instead of starting a competing manager. It is intentionally not a privileged system service. Use `hht uninstall` to stop and remove the agent.
 
 When the agent is active, use `hht workspace` and `hht shell` for session work. Approval decisions are native system dialogs; if the desktop dialog backend is unavailable, requests remain denied rather than falling back to an invisible prompt.
 
