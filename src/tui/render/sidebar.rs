@@ -113,11 +113,11 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 pub(crate) fn render_terminal_overlays(frame: &mut Frame, app: &mut App, area: Rect) {
-    // On macOS approvals are shown in a native OS dialog, so the in-TUI overlay
+    // Service-mode and macOS approvals are native dialogs, so the TUI overlay
     // is suppressed to avoid a confusing double prompt.
-    if app.active_exec_modal_idx().is_some() && !App::native_dialog_enabled() {
+    if app.active_exec_modal_idx().is_some() && !app.native_dialog_enabled() {
         render_exec_approval_overlay(frame, app, area, 0);
-    } else if !app.pending_net.is_empty() && !App::native_dialog_enabled() {
+    } else if !app.pending_net.is_empty() && !app.native_dialog_enabled() {
         render_net_approval_overlay(frame, app, area);
     }
 }

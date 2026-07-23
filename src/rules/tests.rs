@@ -12,6 +12,7 @@ fn load_parses_network_rules_only() {
         &path,
         r#"
 version = 1
+mirror_cwd = true
 
 [network]
 allowlist = ["domain=example.com", "method=CONNECT domain=*.example.com port=8443"]
@@ -21,6 +22,7 @@ denylist = ["domain=blocked.example.com"]
     .expect("write rules");
 
     let rules = load(&path).expect("load rules");
+    assert!(rules.mirror_cwd);
     assert_eq!(rules.network.allowlist.len(), 2);
     assert_eq!(rules.network.denylist.len(), 1);
 }
@@ -82,6 +84,22 @@ fn compose_merges_network_rules_and_denies_win() {
         composed.match_network("GET", "blocked.example.com", "/"),
         NetworkPolicy::Deny
     );
+}
+
+#[test]
+fn compose_enables_mirror_cwd_when_global_or_workspace_rules_opt_in() {
+    let global = ProjectRules {
+        mirror_cwd: true,
+        ..ProjectRules::default()
+    };
+    assert!(ComposedRules::compose(&global, &[]).mirror_cwd);
+
+    let workspace = ProjectRules {
+        mirror_cwd: true,
+        ..ProjectRules::default()
+    };
+    assert!(ComposedRules::compose(&ProjectRules::default(), &[workspace]).mirror_cwd);
+    assert!(!ComposedRules::compose(&ProjectRules::default(), &[]).mirror_cwd);
 }
 
 #[test]

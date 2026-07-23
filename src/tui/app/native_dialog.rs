@@ -31,8 +31,8 @@ pub(crate) enum NativeDialogTarget {
 impl App {
     /// Whether network-approval prompts are delegated to a native OS dialog
     /// rather than the in-TUI overlay.
-    pub(crate) fn native_dialog_enabled() -> bool {
-        cfg!(target_os = "macos")
+    pub(crate) fn native_dialog_enabled(&self) -> bool {
+        cfg!(target_os = "macos") || self.service_mode
     }
 
     /// Drain results from finished native-dialog subprocesses and apply each to
@@ -69,7 +69,7 @@ impl App {
             );
             return;
         }
-        if !Self::native_dialog_enabled() {
+        if !self.native_dialog_enabled() {
             return;
         }
         if let Some(item) = self.pending_exec.first() {

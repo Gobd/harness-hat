@@ -33,6 +33,10 @@ pub struct ProjectRules {
     /// Optional project instructions. This field is preserved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_instructions: Option<String>,
+    /// Mount the workspace at its absolute POSIX host path instead of the
+    /// configured container mount target.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mirror_cwd: bool,
     #[serde(default)]
     pub hostdo: HostdoRules,
     #[serde(default)]
@@ -43,11 +47,16 @@ fn current_rules_version() -> u32 {
     CURRENT_RULES_VERSION
 }
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 impl Default for ProjectRules {
     fn default() -> Self {
         Self {
             version: CURRENT_RULES_VERSION,
             llm_instructions: None,
+            mirror_cwd: false,
             hostdo: HostdoRules::default(),
             network: NetworkRules::default(),
         }
@@ -138,6 +147,9 @@ pub struct NetworkRule {
 /// Global rules and all workspace-local rules are unioned together.
 #[derive(Debug, Clone, Default)]
 pub struct ComposedRules {
+    /// True when either the global or workspace rules opt into mirroring the
+    /// workspace path in the container.
+    pub mirror_cwd: bool,
     pub hostdo: HostdoRules,
     pub network_rules: Vec<NetworkRule>,
     pub network_deny_rules: Vec<NetworkRule>,
@@ -152,8 +164,10 @@ impl ComposedRules {
         let mut network_allowlist = global.network.allowlist.clone();
         let mut network_denylist = global.network.denylist.clone();
         let mut hostdo_default = global.hostdo.default_policy;
+        let mut mirror_cwd = global.mirror_cwd;
 
         for proj in projects {
+            mirror_cwd |= proj.mirror_cwd;
             hostdo_default = compose_hostdo_policies(hostdo_default, proj.hostdo.default_policy);
             for cmd in &proj.hostdo.commands {
                 if !hostdo
@@ -171,6 +185,7 @@ impl ComposedRules {
         }
 
         Self {
+            mirror_cwd,
             hostdo: HostdoRules {
                 default_policy: hostdo_default,
                 commands: parse_dedup_hostdo_commands(hostdo),
@@ -721,6 +736,12 @@ const RULES_FILE_HEADER: &str = "\
 # - Do not assume host tools, credentials, or services are directly available in the container.
 # - Use `killme` only when the user explicitly asks you to end this container.
 # \"\"\"
+#
+# Workspace path mirroring (opt-in):
+# mirror_cwd = true
+# Mounts an absolute POSIX workspace path at that same path in the Linux
+# container instead of `/workspace`. Native Windows paths keep the configured
+# container mount target because they cannot be represented exactly.
 #
 # Hostdo (host-side command execution)
 #

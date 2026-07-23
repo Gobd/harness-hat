@@ -43,14 +43,15 @@ impl ProjectType {
 
 /// Create `harness-rules.toml` in a workspace directory if it does not exist.
 pub fn write_rules_if_missing(workspace_dir: &Path, project_type: ProjectType) -> Result<bool> {
-    if matches!(project_type, ProjectType::None) {
-        return Ok(false);
-    }
     let rules_path = workspace_dir.join("harness-rules.toml");
     if rules_path.exists() {
         return Ok(false);
     }
-    let rules = default_rules(project_type);
+    let rules = if matches!(project_type, ProjectType::None) {
+        ProjectRules::default()
+    } else {
+        default_rules(project_type)
+    };
     crate::rules::write_rules_file(&rules_path, &rules)
         .with_context(|| format!("writing {}", rules_path.display()))?;
     Ok(true)
@@ -58,12 +59,15 @@ pub fn write_rules_if_missing(workspace_dir: &Path, project_type: ProjectType) -
 
 /// Return the starter rule set for a new project type.
 pub fn default_rules(project_type: ProjectType) -> ProjectRules {
-    let mut allowlist = vec![
-        "domain=github.com".to_string(),
-        "domain=api.github.com".to_string(),
-        "domain=raw.githubusercontent.com".to_string(),
-        "domain=objects.githubusercontent.com".to_string(),
-    ];
+    let mut allowlist = Vec::new();
+    if !matches!(project_type, ProjectType::None) {
+        allowlist.extend([
+            "domain=github.com".to_string(),
+            "domain=api.github.com".to_string(),
+            "domain=raw.githubusercontent.com".to_string(),
+            "domain=objects.githubusercontent.com".to_string(),
+        ]);
+    }
     match project_type {
         ProjectType::None => {}
         ProjectType::Rust => allowlist.extend([
@@ -293,14 +297,9 @@ mod tests {
     }
 
     #[test]
-    fn none_project_type_has_no_starter_rules() {
+    fn none_project_type_has_no_starter_network_rules() {
         let rules = default_rules(ProjectType::None);
-        assert!(
-            rules
-                .network
-                .allowlist
-                .contains(&"domain=github.com".to_string())
-        );
+        assert!(rules.network.allowlist.is_empty());
     }
 
     #[test]
@@ -316,12 +315,14 @@ mod tests {
     }
 
     #[test]
-    fn none_project_type_skips_rules_creation() {
+    fn none_project_type_creates_empty_rules_file() {
         let root = unique_temp_dir("rules-none");
         fs::create_dir_all(root.join("canon")).expect("create canon");
         let wrote = write_rules_if_missing(&root.join("canon"), ProjectType::None).expect("write");
-        assert!(!wrote);
-        assert!(!root.join("canon").join("harness-rules.toml").exists());
+        assert!(wrote);
+        let rules =
+            crate::rules::load(&root.join("canon").join("harness-rules.toml")).expect("load rules");
+        assert!(rules.network.allowlist.is_empty());
     }
 
     #[test]

@@ -261,6 +261,7 @@ pub struct App {
     // dialog currently on screen so we never pop two at once.
     background_channels: BackgroundUiChannels,
     native_dialog_inflight: Option<app::native_dialog::NativeDialogTarget>,
+    service_mode: bool,
     // Bounded (H12): a malicious in-container client streaming events at full
     // speed otherwise grows the backing Vec without limit. On full the
     // producers (proxy/server) `try_send` and drop the event with a debug log
@@ -457,6 +458,16 @@ pub async fn run(mut app: App) -> Result<()> {
     restore_guard.disarm();
 
     result
+}
+
+/// Run the manager state machine without a terminal renderer. The installed
+/// per-user agent uses this path and native dialogs for every approval.
+pub async fn run_service(mut app: App) -> Result<()> {
+    loop {
+        app.drain_channels();
+        app.tick_base_rules_file_watch();
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
 }
 
 fn restore_terminal_output<W: std::io::Write>(writer: &mut W) -> std::io::Result<()> {

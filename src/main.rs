@@ -74,6 +74,7 @@ async fn main() -> Result<()> {
             std::process::exit(code);
         }
         Some(Command::Workspace {
+            list,
             template,
             name,
             rebuild,
@@ -88,7 +89,7 @@ async fn main() -> Result<()> {
             // runtime thread.
             let config = cli.config.clone();
             let code = tokio::task::spawn_blocking(move || {
-                harness_hat::workspace::run(args, template, name, rebuild, config)
+                harness_hat::workspace::run(args, list, template, name, rebuild, config)
             })
             .await
             .context("workspace task panicked")??;
@@ -99,6 +100,18 @@ async fn main() -> Result<()> {
             templates,
         }) => {
             harness_hat::rebuild::run(templates, no_cache, cli.config.clone())?;
+        }
+        Some(Command::Install) => {
+            harness_hat::service::install(cli.config.clone())?;
+        }
+        Some(Command::Uninstall) => {
+            harness_hat::service::uninstall()?;
+        }
+        Some(Command::Service) => {
+            let config_path = cli.config.clone().ok_or_else(|| {
+                anyhow::anyhow!("internal service mode requires an explicit --config PATH")
+            })?;
+            harness_hat::manager::run_service(config_path).await?;
         }
         None => harness_hat::manager::run(cli).await?,
     }

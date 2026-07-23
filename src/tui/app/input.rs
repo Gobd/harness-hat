@@ -56,7 +56,7 @@ impl App {
             }
         }
 
-        if self.active_exec_modal_idx().is_some() && !Self::native_dialog_enabled() {
+        if self.active_exec_modal_idx().is_some() && !self.native_dialog_enabled() {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.approve_exec(0, false),
                 KeyCode::Char('r') | KeyCode::Char('R') => self.approve_exec(0, true),
@@ -67,7 +67,7 @@ impl App {
             return;
         }
 
-        if !self.pending_net.is_empty() && !Self::native_dialog_enabled() {
+        if !self.pending_net.is_empty() && !self.native_dialog_enabled() {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.approve_net(0),
                 KeyCode::Char('r') | KeyCode::Char('R') => self.approve_net_forever(0),

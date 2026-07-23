@@ -104,6 +104,7 @@ impl App {
         audit_rx: mpsc::Receiver<AuditEntry>,
         state: StateManager,
         proxy_state: ProxyState,
+        service_mode: bool,
     ) -> Result<Self> {
         let cfg = config.get();
         let watched_rules_stamps = Self::watched_rules_paths(&cfg)
@@ -211,6 +212,7 @@ impl App {
                 rules_scan_tx,
             },
             native_dialog_inflight: None,
+            service_mode,
             activity_rx,
             audit_rx,
             build_event_rx,

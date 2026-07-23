@@ -50,6 +50,9 @@ pub enum Command {
     /// Any args after the subcommand are passed verbatim to `docker exec`
     /// (same passthrough behavior as `hht shell ID …`).
     Workspace {
+        /// List configured workspaces without starting or attaching to a session.
+        #[arg(long, conflicts_with_all = ["template", "name", "rebuild", "args"])]
+        list: bool,
         /// Use a specific container template instead of prompting.
         #[arg(long, value_name = "NAME")]
         template: Option<String>,
@@ -78,11 +81,20 @@ pub enum Command {
         #[arg(value_name = "TEMPLATE")]
         templates: Vec<String>,
     },
+    /// Install Harness Hat as a per-user background agent that starts when
+    /// the graphical desktop session starts.
+    Install,
+    /// Remove the per-user Harness Hat background agent.
+    Uninstall,
     /// Internal: pop a native system dialog and print the result to stdout.
     /// Invoked by the manager as a subprocess so the dialog has its own
     /// main thread / event loop; not intended for direct end-user use.
     #[command(name = "__dialog", hide = true, subcommand)]
     Dialog(DialogCommand),
+    /// Internal background-agent entry point. Installed service definitions
+    /// invoke this rather than the terminal UI.
+    #[command(name = "__service", hide = true)]
+    Service,
 }
 
 /// Dialog kinds the `__dialog` subcommand can render. Each variant maps to
@@ -136,7 +148,7 @@ pub fn parse() -> Result<Cli> {
 
 pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
     let usage = format!(
-        "Usage: {COMMAND_NAME} [--config PATH] [init [PATH] | shell [ID] [COMMAND...] | workspace [OPTIONS] [COMMAND...] | rebuild [OPTIONS] [TEMPLATE...]]"
+        "Usage: {COMMAND_NAME} [--config PATH] [init [PATH] | shell [ID] [COMMAND...] | workspace [OPTIONS] [COMMAND...] | rebuild [OPTIONS] [TEMPLATE...] | install | uninstall]"
     );
     if raw.is_empty() {
         bail!("missing argv[0]. {usage}");
@@ -236,6 +248,15 @@ mod tests {
     }
 
     #[test]
+    fn workspace_subcommand_parses_list() {
+        let cli = parse_from(argv(&["hht", "workspace", "--list"])).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Workspace { list: true, .. })
+        ));
+    }
+
+    #[test]
     fn rebuild_subcommand_parses_cache_and_template_options() {
         let cli =
             parse_from(argv(&["hht", "rebuild", "--no-cache", "go", "python"])).expect("parse");
@@ -279,6 +300,18 @@ mod tests {
             cli.command,
             Some(Command::Dialog(DialogCommand::RulesChanged { path }))
                 if path == PathBuf::from("/tmp/harness-rules.toml")
+        ));
+    }
+
+    #[test]
+    fn install_and_uninstall_parse_as_top_level_commands() {
+        assert!(matches!(
+            parse_from(argv(&["hht", "install"])).unwrap().command,
+            Some(Command::Install)
+        ));
+        assert!(matches!(
+            parse_from(argv(&["hht", "uninstall"])).unwrap().command,
+            Some(Command::Uninstall)
         ));
     }
 }

@@ -10,6 +10,22 @@ use tracing::{error, info};
 
 /// Run the interactive workspace manager (the default `hht` action).
 pub async fn run(cli: crate::cli::Cli) -> Result<()> {
+    run_inner(cli, false).await
+}
+
+/// Run the terminal-free background agent installed by `hht install`.
+pub async fn run_service(config_path: PathBuf) -> Result<()> {
+    run_inner(
+        crate::cli::Cli {
+            config: Some(config_path),
+            command: None,
+        },
+        true,
+    )
+    .await
+}
+
+async fn run_inner(cli: crate::cli::Cli, service_mode: bool) -> Result<()> {
     crate::container::ensure_docker_installed_and_running()?;
 
     let config_path = match resolve_or_prompt_config_path(cli.config)? {
@@ -124,8 +140,13 @@ pub async fn run(cli: crate::cli::Cli) -> Result<()> {
                 audit_rx,
                 state,
                 proxy_state,
+                service_mode,
             )?;
-            crate::tui::run(app).await
+            if service_mode {
+                crate::tui::run_service(app).await
+            } else {
+                crate::tui::run(app).await
+            }
         })
     })
     .await;

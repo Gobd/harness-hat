@@ -38,6 +38,16 @@ const CODEX_HOME_CONTAINER_PATH: &str = "/home/coder/.codex";
 const CODEX_SEED_CONTAINER_PATH: &str = "/run/harness-hat/codex-seed";
 const CODEX_SEED_ENV: &str = "HARNESS_HAT_CODEX_SEED";
 
+/// Return a Linux-container mount target that matches an absolute POSIX host
+/// workspace path. Native Windows paths cannot be represented exactly inside
+/// a Linux container, so callers retain their configured target in that case.
+pub(crate) fn mirrored_workspace_mount_target(workspace_path: &Path) -> Option<std::path::PathBuf> {
+    let target = container_path_string(workspace_path);
+    target
+        .starts_with('/')
+        .then(|| std::path::PathBuf::from(target))
+}
+
 /// Launch `docker run` for a container definition and wire it to a PTY-backed
 /// terminal session.
 #[instrument(skip(
@@ -1091,7 +1101,7 @@ mod tests {
     use super::docker_pty_options;
     use super::{
         ensure_claude_interactive_onboarding, format_localhost_forwards, has_nonempty_env_source,
-        normalize_script_line_endings, proxy_addr_without_auth,
+        mirrored_workspace_mount_target, normalize_script_line_endings, proxy_addr_without_auth,
         seed_claude_oauth_onboarding_config, seed_private_mount, should_inject_coder_home,
     };
     use crate::config::{ContainerMount, LocalhostForward, MountMode};
@@ -1113,6 +1123,18 @@ mod tests {
         assert_eq!(
             normalize_script_line_endings("#!/usr/bin/env python3\r\nprint('ok')\r\n"),
             "#!/usr/bin/env python3\nprint('ok')\n"
+        );
+    }
+
+    #[test]
+    fn mirrored_workspace_target_uses_absolute_posix_path_only() {
+        assert_eq!(
+            mirrored_workspace_mount_target(std::path::Path::new("/home/user/my-project")),
+            Some(PathBuf::from("/home/user/my-project"))
+        );
+        assert_eq!(
+            mirrored_workspace_mount_target(std::path::Path::new(r"C:\Users\user\my-project")),
+            None
         );
     }
 

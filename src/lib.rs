@@ -27,6 +27,7 @@ pub mod proxy;
 pub mod rebuild;
 pub mod rules;
 pub mod server;
+pub mod service;
 pub mod shared_config;
 pub mod shell;
 pub mod state;

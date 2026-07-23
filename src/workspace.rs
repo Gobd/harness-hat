@@ -4,9 +4,9 @@
 //! anything useful: it discovers the manager via the same config file the
 //! manager itself loaded, then either docker-execs into an existing session
 //! for the matched workspace or asks the manager (via `POST /workspace/launch`)
-//! to spin one up. New workspaces are appended to `harness-hat.toml`; the
-//! manager reloads config on each launch request so they show up in the TUI
-//! sidebar on the same tick.
+//! to spin one up. New workspaces receive a `harness-rules.toml` and are
+//! appended to `harness-hat.toml`; the manager reloads config on each launch
+//! request so they show up in the TUI sidebar on the same tick.
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -22,18 +22,12 @@ use crate::config::{Config, ContainerDef, WorkspaceConfig};
 /// global `--config PATH` flag.
 pub fn run(
     args: Vec<OsString>,
+    list: bool,
     template_override: Option<String>,
     name_override: Option<String>,
     force_rebuild: bool,
     explicit_config: Option<PathBuf>,
 ) -> Result<i32> {
-    if which::which("docker").is_err() {
-        bail!(
-            "docker not found in PATH — `{} workspace` requires Docker",
-            crate::cli::COMMAND_NAME
-        );
-    }
-
     let config_path = crate::manager::resolve_or_prompt_config_path(explicit_config)?
         .with_context(|| {
             format!(
@@ -42,6 +36,18 @@ pub fn run(
             )
         })?;
     let mut config = crate::config::load(&config_path)?;
+
+    if list {
+        println!("{}", format_workspace_list(&config));
+        return Ok(0);
+    }
+
+    if which::which("docker").is_err() {
+        bail!(
+            "docker not found in PATH — `{} workspace` requires Docker",
+            crate::cli::COMMAND_NAME
+        );
+    }
 
     let token_path = config.logging.log_dir.join("token");
     let token = read_manager_token(&token_path).with_context(|| {
@@ -123,6 +129,9 @@ pub fn run(
         workspace_name,
         config_path.display()
     );
+    if crate::new_project::write_rules_if_missing(&pwd, crate::new_project::ProjectType::None)? {
+        println!("created {}", pwd.join("harness-rules.toml").display());
+    }
     crate::new_project::append_project_block(&config_path, &workspace_name, &pwd, None)?;
     config.workspaces.push(WorkspaceConfig {
         name: workspace_name.clone(),
@@ -147,6 +156,28 @@ pub fn run(
     );
     wait_for_container_running(&resp.docker_name, Duration::from_secs(15))?;
     attach_and_report(&resp.docker_name, &args)
+}
+
+fn format_workspace_list(config: &Config) -> String {
+    if config.workspaces.is_empty() {
+        return "No workspaces configured.".to_string();
+    }
+
+    let entries = config
+        .workspaces
+        .iter()
+        .map(|workspace| {
+            let template = workspace.template.as_deref().unwrap_or("<not selected>");
+            format!(
+                "- {}\n  path: {}\n  template: {}",
+                workspace.name,
+                workspace.canonical_path.display(),
+                template
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("Configured workspaces:\n{entries}")
 }
 
 /// Poll `docker inspect` until the named container reports State.Running=true,
@@ -512,6 +543,31 @@ mod tests {
         let pwd = PathBuf::from("/repos/proj/web/src/components");
         let matched = best_matching_workspace(&config, &pwd).expect("matched");
         assert_eq!(matched.name, "inner");
+    }
+
+    #[test]
+    fn workspace_list_includes_name_path_and_template() {
+        let mut config = Config::default();
+        config.workspaces = vec![WorkspaceConfig {
+            name: "api".to_string(),
+            canonical_path: PathBuf::from("/src/api"),
+            sidebar_hotkey: None,
+            template: Some("rust".to_string()),
+            mount_cwd: false,
+        }];
+
+        assert_eq!(
+            format_workspace_list(&config),
+            "Configured workspaces:\n- api\n  path: /src/api\n  template: rust"
+        );
+    }
+
+    #[test]
+    fn workspace_list_reports_when_no_workspaces_are_configured() {
+        assert_eq!(
+            format_workspace_list(&Config::default()),
+            "No workspaces configured."
+        );
     }
 
     #[test]

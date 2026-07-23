@@ -2,6 +2,32 @@ use super::*;
 use crate::server::{LaunchEvent, WorkspaceLaunchItem, WorkspaceLaunchResponse};
 use tokio::sync::mpsc as tokio_mpsc;
 
+fn workspace_mount_source(
+    workspace: &crate::config::WorkspaceConfig,
+    launch_cwd: Option<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, String> {
+    if !workspace.mount_cwd {
+        return Ok(workspace.canonical_path.clone());
+    }
+
+    let source = launch_cwd.unwrap_or_else(|| workspace.canonical_path.clone());
+    let source = source.canonicalize().map_err(|error| {
+        format!(
+            "launch directory is not accessible: {}: {error}",
+            source.display()
+        )
+    })?;
+    if source.starts_with(&workspace.canonical_path) {
+        Ok(source)
+    } else {
+        Err(format!(
+            "launch directory {} is outside workspace {}",
+            source.display(),
+            workspace.canonical_path.display()
+        ))
+    }
+}
+
 impl App {
     fn container_command_for_profile(ctr: &crate::config::ContainerDef) -> Option<Vec<String>> {
         ctr.command.clone()
@@ -312,6 +338,37 @@ impl App {
             None => return,
         };
 
+        if let Err(error) = self
+            .config
+            .ensure_rules_trusted_for_workspace(Some(proj.name.as_str()))
+        {
+            self.push_log(
+                format!(
+                    "cannot launch '{}' on '{}': rules must be reviewed before launch: {error}",
+                    ctr.name, proj.name
+                ),
+                true,
+            );
+            return;
+        }
+
+        let mirror_cwd = match crate::config::load_composed_rules_for_workspace(
+            &cfg,
+            Some(proj.name.as_str()),
+        ) {
+            Ok(rules) => rules.mirror_cwd,
+            Err(error) => {
+                self.push_log(
+                    format!(
+                        "cannot launch '{}' on '{}': failed to load rules: {error}",
+                        ctr.name, proj.name
+                    ),
+                    true,
+                );
+                return;
+            }
+        };
+
         if !self.preflight_image_or_prompt_build(
             pi,
             ctr_idx,
@@ -322,11 +379,35 @@ impl App {
             return;
         }
 
-        let mount_source_path = if proj.mount_cwd {
-            launch_cwd.unwrap_or_else(|| proj.canonical_path.clone())
-        } else {
-            proj.canonical_path.clone()
+        let mount_source_path = match workspace_mount_source(&proj, launch_cwd) {
+            Ok(path) => path,
+            Err(error) => {
+                self.push_log(
+                    format!("cannot launch '{}' on '{}': {error}", ctr.name, proj.name),
+                    true,
+                );
+                return;
+            }
         };
+
+        let mut ctr = ctr;
+        if mirror_cwd {
+            if let Some(mount_target) =
+                crate::container::mirrored_workspace_mount_target(&mount_source_path)
+            {
+                ctr.mount_target = mount_target;
+            } else {
+                self.push_log(
+                    format!(
+                        "mirror_cwd is enabled for '{}', but {} cannot be mirrored in a Linux container; using {}",
+                        proj.name,
+                        mount_source_path.display(),
+                        crate::config::container_path_string(&ctr.mount_target),
+                    ),
+                    false,
+                );
+            }
+        }
         self.log_workspace_rules_status(&proj);
 
         let control_port = cfg.defaults.control.server_port;
@@ -463,8 +544,32 @@ pub(crate) fn finish_launch_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::App;
-    use crate::config::{ContainerDef, default_mount_target};
+    use super::{App, workspace_mount_source};
+    use crate::config::{ContainerDef, WorkspaceConfig, default_mount_target};
+
+    #[test]
+    fn mount_cwd_source_is_confined_to_configured_workspace() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let nested = root.path().join("nested");
+        let outside = tempfile::tempdir().expect("outside directory");
+        std::fs::create_dir(&nested).expect("nested workspace directory");
+        let workspace = WorkspaceConfig {
+            name: "workspace".to_string(),
+            canonical_path: root.path().canonicalize().expect("canonical root"),
+            sidebar_hotkey: None,
+            template: None,
+            mount_cwd: true,
+        };
+
+        assert_eq!(
+            workspace_mount_source(&workspace, Some(nested)).expect("nested source"),
+            root.path()
+                .join("nested")
+                .canonicalize()
+                .expect("canonical nested")
+        );
+        assert!(workspace_mount_source(&workspace, Some(outside.path().to_path_buf())).is_err());
+    }
 
     #[test]
     fn container_command_for_template_uses_configured_override() {
