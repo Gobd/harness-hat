@@ -2,7 +2,7 @@
 name = "harness-hat"
 version = "0.8.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Docker-backed development sessions with proxy-mediated network policy."
 license = "MIT"
 readme = "README.md"
@@ -23,62 +23,62 @@ clap = { version = "4", features = ["derive"] }
 
 # Config
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-toml_edit = "0.22"
+toml = "1.1"
+toml_edit = "0.25"
 serde_json = "1"
 
 # TUI
-ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_28", "underline-color"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29", "underline-color"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 
 # HTTP control server
-axum = "0.7"
+axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client (proxy forwarding)
-reqwest = { version = "0.12", features = ["blocking", "json", "stream"] }
+reqwest = { version = "0.13", features = ["blocking", "json", "stream"] }
 
 # Tracing + OpenTelemetry
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-opentelemetry = "0.31"
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto"] }
-tracing-opentelemetry = "0.32"
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "http-proto"] }
+tracing-opentelemetry = "0.33"
 
 # Container terminal
-vt100 = "0.15"
+vt100 = "0.16"
 alacritty_terminal = "0.26"
 
 # Utilities
 anyhow = "1"
-dirs = "5"
+dirs = "6"
 globset = "0.4"
 ignore = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
 url = "2"
-base64 = "0.22"
+base64 = "0.23"
 shell-words = "1.1"
-which = "7"
+which = "8"
 libc = "0.2"
 tempfile = "3"
 subtle = "2"
 fs2 = "0.4"
-lru = "0.12"
-idna = "0.5"
+lru = "0.18"
+idna = "1"
 tokio-util = { version = "0.7", features = ["rt"] }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
-notify-rust = "4"
+notify-rust = "4.18"
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "common-controls-v6"] }
 
 # Native system dialogs (spawned in a subprocess via `hht __dialog ...` to
 # avoid taking over the parent's main thread). macOS uses NSAlert with a
 # suppression checkbox; Windows and Linux use the existing TUI modal.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.5"
-objc2-foundation = { version = "0.2", features = ["NSString", "NSThread"] }
-objc2-app-kit = { version = "0.2", features = ["NSAlert", "NSApplication", "NSButton", "NSResponder", "NSControl", "NSCell", "NSView", "NSWindow", "NSRunningApplication"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSThread"] }
+objc2-app-kit = { version = "0.3", features = ["NSAlert", "NSApplication", "NSButton", "NSResponder", "NSControl", "NSCell", "NSView", "NSWindow", "NSRunningApplication"] }

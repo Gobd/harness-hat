@@ -11,6 +11,7 @@ use std::process::Command;
 
 #[cfg(any(target_os = "macos", test))]
 const LABEL: &str = "com.harness-hat.manager";
+#[cfg(any(target_os = "linux", test))]
 const SYSTEMD_UNIT: &str = "harness-hat.service";
 #[cfg(target_os = "windows")]
 const WINDOWS_TASK: &str = "Harness Hat";
@@ -255,6 +256,7 @@ fn uninstall_windows() -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn render_systemd_unit(executable: &Path, config_path: &Path) -> String {
     format!(
         "[Unit]\nDescription=Harness Hat background agent\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart={} --config {} __service\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
@@ -272,6 +274,7 @@ fn render_launchd_plist(executable: &Path, config_path: &Path) -> String {
     )
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn systemd_escape(path: &Path) -> String {
     // systemd's ExecStart parser accepts C-style double-quoted arguments.
     let escaped = path

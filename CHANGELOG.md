@@ -37,6 +37,7 @@
 - `hht workspace --list` prints configured workspace names, paths, and saved templates without requiring Docker or the background agent to be running.
 
 ### Changed
+- Updated Rust dependencies to current compatible releases, including Axum 0.8, Reqwest 0.13, Tokio-compatible OpenTelemetry 0.32, TOML 1.1, and the latest TUI, terminal, utility, and native-dialog crates. The minimum supported Rust version is now 1.89.
 - **Breaking:** `bypass_proxy` configuration has been replaced by `allowed_hosts` for specifying hosts that are automatically allowed without network approval. The field is now supported at the defaults level and per-container profile in `harness-hat.toml`, and no longer requires setting `NO_PROXY` environment variables.
 - **Breaking:** the manager binary is renamed `harness-hat-manager` → `hht` (a single binary). Running `hht` with no subcommand launches the interactive workspace manager. The `hh` name is avoided because it resolves to the built-in Microsoft HTML Help executable on Windows.
 - **Breaking:** Harness Hat now uses a workspace + Docker-template session model; sessions are shell-first Docker containers. The previous command-passthrough / host-command-control model is gone.
@@ -112,8 +113,8 @@
 - `loopback_to_host_docker` no longer appends a trailing slash when rewriting `HARNESS_HAT_URL` to `host.docker.internal`. The `url::Url` round-trip introduced during the hardening normalized `http://host:7878` to `http://host:7878/`; the container's strict-network init parses the port with naive shell, so the stray slash produced port `7878/`, failed `iptables`, and killed the container at startup (exit 2).
 - `hht shell` no longer leaves the host terminal in a broken state when the container exits out from under it. The CLI now stays as the parent of `docker exec` (instead of `exec()`-ing into it), ignores `SIGINT`/`SIGQUIT`/`SIGTSTP` so they forward to the container, and on exit emits resets for focus reporting, bracketed paste, all mouse-reporting modes (X10, button-event, any-event, SGR, urxvt), cursor visibility, alternate screen, line wrap, and SGR attributes that an inner program (bash readline, vim, fzf, custom prompt) may have enabled but never gotten to disable. Restoration is skipped when stdout is not a TTY so the resets don't pollute piped output.
 - Hostdo strict-network startup path discovery now avoids virtual DNS relay IPs (`198.18.x.x`) and prefers direct route/gateway targets from `/proc/net/route` first, preventing connection failures before the first request is made.
-- Hostdo exec-job URLs are now wired to Axum 0.7 route syntax, resolving `/exec/jobs/{id}` correctly again.
-- Added regression tests that lock in both behaviors: Axum 0.7 route compatibility for `/exec/jobs/<uuid>` responses and hostdo candidate base URL ordering/filtering in strict-network mode.
+- Hostdo exec-job URLs use Axum 0.8 route syntax, resolving `/exec/jobs/{id}` correctly again.
+- Added regression tests that lock in both behaviors: Axum 0.8 route compatibility for `/exec/jobs/<uuid>` responses and hostdo candidate base URL ordering/filtering in strict-network mode.
 - Removed a duplicate container-keyrings mount point from the default mounts that broke container launch on macOS.
 - Workspace and template scanning no longer freezes the TUI.
 - The container-template picker now caches its template list while open and wraps Up/Down navigation at the top and bottom, eliminating the laggy boundary key-repeat behavior.

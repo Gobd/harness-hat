@@ -502,17 +502,20 @@ pub async fn run_with_listener(
             "/exec/jobs",
             get(crate::server::core::exec_jobs_list_handler),
         )
-        .route("/exec/jobs/:id", get(crate::server::core::exec_job_handler))
         .route(
-            "/exec/jobs/:id/output",
+            "/exec/jobs/{id}",
+            get(crate::server::core::exec_job_handler),
+        )
+        .route(
+            "/exec/jobs/{id}/output",
             get(crate::server::core::exec_job_output_handler),
         )
         .route(
-            "/exec/jobs/:id/kill",
+            "/exec/jobs/{id}/kill",
             post(crate::server::core::exec_job_kill_handler),
         )
         .route(
-            "/exec/jobs/:id/input",
+            "/exec/jobs/{id}/input",
             post(crate::server::core::exec_job_send_handler),
         )
         .route("/healthz", get(healthz_handler))
@@ -915,7 +918,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_job_uuid_routes_resolve_under_axum_0_7() {
+    async fn exec_job_uuid_routes_resolve_under_axum_0_8() {
         let registry = SessionRegistry::default();
         registry.insert(
             "session".to_string(),
