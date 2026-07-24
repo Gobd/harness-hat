@@ -68,18 +68,38 @@
 # - raw CONNECT to other ports requires an explicit `port=...` allow rule
 
 version = 1
-template = "rust"
-
-# Workspace path mirroring (opt-in):
-# mirror_cwd = true
-# When enabled, the workspace bind mount uses the same absolute POSIX path in
-# the Linux container instead of /workspace. The current workspace source is
-# mirrored, including a mount_cwd launch. Native Windows paths remain mounted
-# at the configured target because they cannot be represented exactly.
 
 [hostdo]
 default_policy = "prompt"
-commands = []
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "test",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = ["env"]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+approval_mode = "auto"
+
+[[hostdo.commands]]
+argv = [
+    "cargo",
+    "test",
+    "rejects_sensitive_claude_settings_source",
+    "--lib",
+    "--",
+    "--exact",
+    "--nocapture",
+]
+cwd = "$WORKSPACE"
+timeout_secs = 60
+approval_mode = "auto"
 
 [network]
 allowlist = [

@@ -1104,6 +1104,37 @@ mod security_tests {
     use super::*;
     use crate::config::ContainerDef;
 
+    fn with_test_home<R>(home: &Path, f: impl FnOnce() -> R) -> R {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("test env lock");
+        let original_home = std::env::var_os("HOME");
+        let original_xdg_data_home = std::env::var_os("XDG_DATA_HOME");
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::set_var("XDG_DATA_HOME", home.join(".local/share"));
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        match original_home {
+            Some(value) => unsafe {
+                std::env::set_var("HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("HOME");
+            },
+        }
+        match original_xdg_data_home {
+            Some(value) => unsafe {
+                std::env::set_var("XDG_DATA_HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("XDG_DATA_HOME");
+            },
+        }
+        match result {
+            Ok(result) => result,
+            Err(err) => std::panic::resume_unwind(err),
+        }
+    }
+
     #[test]
     fn rejects_broad_and_credential_bearing_mount_roots() {
         // Production passes canonical workspace paths into this helper. Use the
@@ -1135,14 +1166,16 @@ mod security_tests {
         let Some(home) = dirs::home_dir() else {
             return;
         };
-        let mut config = Config::default();
-        let mut container: ContainerDef =
-            serde_json::from_value(serde_json::json!({"name": "test"}))
-                .expect("minimal container definition");
-        container.claude_settings = Some(home.join(".ssh/settings.json"));
-        config.containers.push(container);
+        let error = with_test_home(&home, || {
+            let mut config = Config::default();
+            let mut container: ContainerDef =
+                serde_json::from_value(serde_json::json!({"name": "test"}))
+                    .expect("minimal container definition");
+            container.claude_settings = Some(home.join(".ssh/settings.json"));
+            config.containers.push(container);
 
-        let error = validate(&config).expect_err("sensitive Claude settings must be rejected");
+            validate(&config).expect_err("sensitive Claude settings must be rejected")
+        });
         assert!(error.to_string().contains("claude_settings"));
     }
 

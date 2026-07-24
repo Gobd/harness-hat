@@ -238,15 +238,25 @@ mod tests {
     };
     use crate::config::Config;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_temp_root() -> PathBuf {
+        if cfg!(unix) {
+            let unix_tmp = Path::new("/tmp");
+            if unix_tmp.exists() {
+                return unix_tmp.to_path_buf();
+            }
+        }
+        std::env::temp_dir()
+    }
 
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock before epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("harness-hat-new-project-{prefix}-{nanos}"));
+        let dir = test_temp_root().join(format!("harness-hat-new-project-{prefix}-{nanos}"));
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
     }

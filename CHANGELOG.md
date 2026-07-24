@@ -1,9 +1,10 @@
 # Changelog
 
-## 0.8.0 Unreleased
+## 0.8.0 July 24, 2026
 
 ### Fixed
 - Network, host-command, and rules-change native approval dialogs launched by the background service now invoke the sibling `hht` executable, rather than the daemon-only binary. Unmatched network requests therefore display their approval prompt instead of being immediately denied.
+- Test helpers that create temporary workspaces and proxy configs now use stable non-sensitive temp roots in host-managed environments (for example `hostdo` sessions on macOS) so test fixtures no longer fail due to the sensitive-path refusal checks.
 
 ### Added
 - Authenticated, sequenced `/tui/events` long-poll feed for attached clients. Workspace launch requests, build output, launch completion/failure, and active-session refreshes now wake an open `hht` client without fixed-rate frame polling; clients reload their snapshot if they fall behind the bounded event window.

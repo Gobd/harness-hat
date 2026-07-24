@@ -6,7 +6,17 @@ use super::{
 use std::path::Path;
 
 fn temp_workspace() -> tempfile::TempDir {
-    tempfile::tempdir().expect("tempdir")
+    let root = if cfg!(unix) {
+        let unix_tmp = Path::new("/tmp");
+        if unix_tmp.exists() {
+            unix_tmp.to_path_buf()
+        } else {
+            std::env::temp_dir()
+        }
+    } else {
+        std::env::temp_dir()
+    };
+    tempfile::tempdir_in(root).expect("tempdir")
 }
 
 fn container_def_for_test(name: &str, image: &str, image_stem: &str) -> ContainerDef {

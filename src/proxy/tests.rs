@@ -11,8 +11,19 @@ mod tests {
     use crate::shared_config::SharedConfig;
     use base64::Engine as _;
     use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    use std::path::Path;
     use std::sync::Arc;
     use tokio::sync::mpsc;
+
+    fn test_temp_root() -> std::path::PathBuf {
+        if cfg!(unix) {
+            let unix_tmp = Path::new("/tmp");
+            if unix_tmp.exists() {
+                return unix_tmp.to_path_buf();
+            }
+        }
+        std::env::temp_dir()
+    }
 
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,7 +32,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock is before unix epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("harness-hat-{prefix}-{nanos}"));
+        let dir = test_temp_root().join(format!("harness-hat-{prefix}-{nanos}"));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
     }
