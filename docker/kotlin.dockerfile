@@ -27,8 +27,8 @@ RUN apt-get update -o APT::Update::Error-Mode=any \
 # Pinned Adoptium Temurin 21 LTS (H5). Bump by updating ARGs and sha256s.
 ARG JDK_VERSION=21.0.7+6
 ARG JDK_VERSION_FILENAME=21.0.7_6
-ARG JDK_SHA256_X64=9b5b4346c1fa5fd46d23bdbb8e3abd00f7dfdf5d5c50bdd61bd0e4f791a9f39c
-ARG JDK_SHA256_AARCH64=cafc27a5289e24a20dab0a6cec4b90ed6040a7ef04daed6e7c3c1d6cd9ee0a5e
+ARG JDK_SHA256_X64=974d3acef0b7193f541acb61b76e81670890551366625d4f6ca01b91ac152ce0
+ARG JDK_SHA256_AARCH64=31dba70ba928c78c20d62049ac000f79f7a7ab11f9d9c11e703f52d60aa64f93
 ARG TARGETARCH
 
 RUN set -eu; \
@@ -37,10 +37,15 @@ RUN set -eu; \
         arm64|aarch64) jdk_arch="aarch64"; jdk_sha="${JDK_SHA256_AARCH64}" ;; \
         *) echo "unsupported JDK architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
     esac; \
+    case "${#jdk_sha}" in \
+        64) jdk_sha_cmd="sha256sum" ;; \
+        128) jdk_sha_cmd="sha512sum" ;; \
+        *) echo "unsupported JDK checksum length: ${#jdk_sha}" >&2; exit 1 ;; \
+    esac; \
     curl -fsSL \
         -o /tmp/jdk.tar.gz \
         "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${JDK_VERSION}/OpenJDK21U-jdk_${jdk_arch}_linux_hotspot_${JDK_VERSION_FILENAME}.tar.gz"; \
-    echo "${jdk_sha}  /tmp/jdk.tar.gz" | sha256sum -c -; \
+    printf '%s  /tmp/jdk.tar.gz\n' "${jdk_sha}" | "${jdk_sha_cmd}" -c -; \
     mkdir -p /usr/local/lib/jvm; \
     tar -xzf /tmp/jdk.tar.gz -C /usr/local/lib/jvm; \
     ln -sf "/usr/local/lib/jvm/jdk-${JDK_VERSION}/bin/java" /usr/local/bin/java; \
@@ -70,7 +75,7 @@ RUN set -eu; \
 # ── Gradle ────────────────────────────────────────────────────────────────────
 # Pinned Gradle (H5). Bump by editing ARG and sha256.
 ARG GRADLE_VERSION=8.14.2
-ARG GRADLE_SHA256=2b585f4b5da9c778a78d8cc04a0eefd38d1e5e7e748a52f7b38ee3a0d7d17b5f
+ARG GRADLE_SHA256=7197a12f450794931532469d4ff21a59ea2c1cd59a3ec3f89c035c3c420a6999
 
 RUN set -eu; \
     curl -fsSL \

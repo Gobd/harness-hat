@@ -29,9 +29,17 @@ cd ~/src/my-awesome-project
 hht workspace
 ```
 
+`hht workspace` uses the host directory you run it from as the workspace mount source. That means the workspace is mounted from the exact directory where you invoke the command.
+
 If the directory is not already registered, Harness Hat adds it as a workspace, asks you to choose a template, then opens the session.
 
 > **Expected result:** Harness Hat identifies or creates the workspace, launches or attaches to a session, and opens a session shell. Run this command from the directory you want the agent to access.
+
+## Clarify `hht shell` vs `hht workspace` behavior
+
+You can run `hht shell` from any directory to list sessions or attach to one by ID; it never remounts a workspace.
+
+Use `hht workspace` for the directory you want mounted in the container. Whatever directory you run it in is the directory mounted at `/workspace` (unless workspace path mirroring is enabled).
 
 Use this path when you are already in the project and want to start work immediately.
 

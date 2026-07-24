@@ -19,6 +19,10 @@ hht rebuild rust                  # rebuild the base image and Rust template
 
 > **Expected result:** `hht` opens the Harness Hat TUI attached to the installed `hht-daemon`; `workspace` attaches to a session or starts one, `workspace --list` prints each configured workspace name, path, and saved template, `shell` lists or attaches to existing sessions with both its Harness Hat session ID and Docker container ID, and `rebuild` prints Docker build output followed by a successful build result.
 
+`hht shell` is directory-agnostic. Run it from any folder to list or attach to running sessions; it does not affect which workspace is mounted in a container.
+
+`hht workspace` uses the directory you run it in to select/create the workspace and mount it in the container.
+
 The attached TUI is rendered by `hht-daemon`, so its workspace, session, terminal, build, settings, and approval behavior is the same as the standalone manager. When the service is not installed or running, `hht` starts the standalone manager instead.
 
 Run `killme` in a **session terminal** to request that Harness Hat stops that session. From a **terminal**, `hht shell --kill <ID>` stops and removes a session listed by `hht shell`.

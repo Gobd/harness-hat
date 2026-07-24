@@ -44,37 +44,25 @@ pub fn run(
     }
 
     println!(
-        "==> Building templates in parallel: {}",
+        "==> Building templates in sequence: {}",
         selected.join(", ")
     );
     let docker_dir = config.docker_dir.clone();
-    let results = std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(selected.len());
-        for stem in &selected {
-            let dockerfile = templates
-                .get(stem)
-                .expect("selected templates originate from discovered templates")
-                .clone();
-            let stem = stem.clone();
-            let docker_dir = docker_dir.clone();
-            handles.push(scope.spawn(move || {
-                let image = crate::config::image_tag_for_stem(&stem);
-                println!("==> Building {image}");
-                run_docker_build(&dockerfile, &docker_dir, &image, no_cache)
-                    .with_context(|| format!("building template '{stem}'"))
-            }));
+    let mut failures = Vec::new();
+    for stem in &selected {
+        let dockerfile = templates
+            .get(stem)
+            .expect("selected templates originate from discovered templates")
+            .clone();
+        let image = crate::config::image_tag_for_stem(stem);
+        println!("==> Building {image}");
+        if let Err(error) = run_docker_build(&dockerfile, &docker_dir, &image, no_cache)
+            .with_context(|| format!("building template '{stem}'"))
+        {
+            failures.push(error.to_string());
         }
-        handles
-            .into_iter()
-            .map(|handle| handle.join().expect("template build thread panicked"))
-            .collect::<Vec<_>>()
-    });
+    }
 
-    let failures = results
-        .into_iter()
-        .filter_map(Result::err)
-        .map(|error| error.to_string())
-        .collect::<Vec<_>>();
     if !failures.is_empty() {
         bail!(
             "one or more template builds failed:\n{}",
@@ -134,6 +122,8 @@ fn select_templates(
 fn run_docker_build(dockerfile: &Path, context: &Path, image: &str, no_cache: bool) -> Result<()> {
     let mut command = Command::new("docker");
     command.arg("build");
+    command.arg("--progress").arg("plain");
+    command.arg("--network").arg("host");
     if no_cache {
         command.arg("--no-cache");
     }

@@ -1,5 +1,12 @@
 # Changelog
 
+### 0.8.1 July 24, 2026
+
+### Changed
+- Clarified workspace-mount behavior in user guide documentation: `hht workspace` mounts the directory where it is invoked, while `hht shell` can be run from any directory and does not affect workspace mount location.
+- Updated Docker image/template updates in the `docker/` assets to reflect current release image packaging changes.
+
+
 ## 0.8.0 July 24, 2026
 
 ### Fixed
