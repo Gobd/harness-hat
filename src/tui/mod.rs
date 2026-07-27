@@ -211,6 +211,7 @@ pub(crate) struct WorkspaceLaunchPending {
     pub(crate) workspace_idx: usize,
     pub(crate) template_idx: usize,
     pub(crate) cwd: Option<std::path::PathBuf>,
+    pub(crate) terminal_env: Vec<(String, String)>,
 }
 
 /// Bounded channels used by background workers that feed best-effort UI data.
@@ -372,6 +373,8 @@ struct FrameWriter {
     buf: Vec<u8>,
     tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     dropped: Arc<AtomicBool>,
+    last_frame: Option<Vec<u8>>,
+    force_send_full_frame: bool,
     /// Set once the event loop has exited. The writes after that point are
     /// the terminal restore sequences (leave alternate screen, show cursor),
     /// which must never be dropped — a blocking send here can only stall if
@@ -392,18 +395,35 @@ impl std::io::Write for FrameWriter {
             return Ok(());
         }
         let frame = std::mem::take(&mut self.buf);
+        let has_repaint_stale = self.force_send_full_frame || self.dropped.load(Ordering::Relaxed);
+        if !self.shutdown_blocking.load(Ordering::Relaxed)
+            && !has_repaint_stale
+            && self.last_frame.as_ref() == Some(&frame)
+        {
+            return Ok(());
+        }
         if self.shutdown_blocking.load(Ordering::Relaxed) {
-            return self.tx.send(frame).map_err(|_| {
+            let result = self.tx.send(frame.clone());
+            if result.is_ok() {
+                self.last_frame = Some(frame);
+                self.force_send_full_frame = false;
+            }
+            return result.map_err(|_| {
                 std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
                     "stdout writer thread exited",
                 )
             });
         }
-        match self.tx.try_send(frame) {
-            Ok(()) => Ok(()),
+        match self.tx.try_send(frame.clone()) {
+            Ok(()) => {
+                self.last_frame = Some(frame);
+                self.force_send_full_frame = false;
+                Ok(())
+            }
             Err(std::sync::mpsc::TrySendError::Full(_)) => {
                 self.dropped.store(true, Ordering::Relaxed);
+                self.force_send_full_frame = true;
                 Ok(())
             }
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Err(std::io::Error::new(
@@ -454,6 +474,8 @@ pub async fn run(mut app: App) -> Result<()> {
         buf: Vec::new(),
         tx: frame_tx,
         dropped: Arc::clone(&frames_dropped),
+        last_frame: None,
+        force_send_full_frame: false,
         shutdown_blocking: Arc::clone(&shutdown_blocking),
     });
     let mut terminal = Terminal::new(backend)?;
@@ -489,14 +511,12 @@ pub async fn run_service(
     mut tui_rx: mpsc::Receiver<crate::server::TuiFrameItem>,
     tui_events: crate::server::TuiEventBroker,
 ) -> Result<()> {
-    let mut next_refresh_event = tokio::time::Instant::now();
+    let mut last_remote_buffer: Option<ratatui::buffer::Buffer> = None;
     loop {
-        app.drain_channels();
+        let channels_changed = app.drain_channels();
         app.tick_base_rules_file_watch();
-        if !app.sessions.is_empty() && tokio::time::Instant::now() >= next_refresh_event {
+        if channels_changed {
             tui_events.publish("tui_refresh", None, "session state changed");
-            next_refresh_event =
-                tokio::time::Instant::now() + tokio::time::Duration::from_millis(250);
         }
         while let Ok(item) = tui_rx.try_recv() {
             let (pty_cols, pty_rows) = (
@@ -526,18 +546,54 @@ pub async fn run_service(
                     .send(render_relay_error(&error.to_string()));
                 continue;
             }
-            let frame = render_buffer(terminal.backend().buffer());
+            let buffer = terminal.backend().buffer().clone();
+            let frame = render_buffer_delta(last_remote_buffer.as_ref(), &buffer);
+            last_remote_buffer = Some(buffer);
             let _ = item.response_tx.send(frame);
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 }
 
+fn render_buffer_delta(
+    previous: Option<&ratatui::buffer::Buffer>,
+    buffer: &ratatui::buffer::Buffer,
+) -> Vec<u8> {
+    let Some(previous) = previous else {
+        return render_buffer(buffer);
+    };
+    if previous.area != buffer.area {
+        return render_buffer(buffer);
+    }
+
+    let mut frame = Vec::new();
+    let mut active_style = None;
+    let mut changed_cells = 0usize;
+    for (x, y, cell) in previous.diff_iter(buffer) {
+        push_cursor_position(&mut frame, usize::from(y) + 1, usize::from(x) + 1);
+        let style = (cell.fg, cell.bg, cell.modifier);
+        if active_style != Some(style) {
+            push_style(&mut frame, style.0, style.1, style.2);
+            active_style = Some(style);
+        }
+        frame.extend_from_slice(cell.symbol().as_bytes());
+        changed_cells += 1;
+    }
+    if changed_cells > 0 {
+        frame.extend_from_slice(b"\x1b[0m");
+    }
+    frame
+}
+
 fn render_buffer(buffer: &ratatui::buffer::Buffer) -> Vec<u8> {
     let area = buffer.area;
     let width = usize::from(area.width);
     let mut frame = Vec::with_capacity(width * usize::from(area.height) * 2 + 32);
-    frame.extend_from_slice(b"\x1b[?25l\x1b[2J");
+    // A full-screen clear (`ESC[2J`) is intentionally omitted here.
+    // The frame renderer rewrites every cell in the active terminal viewport
+    // every draw, so clearing the entire screen every frame can cause
+    // scroll/back-buffer artifacts on terminals with weaker ANSI compatibility.
+    frame.extend_from_slice(b"\x1b[H");
     let mut active_style = None;
     for (row_index, row) in buffer.content().chunks(width).enumerate() {
         push_cursor_position(&mut frame, row_index + 1, 1);
@@ -795,12 +851,14 @@ async fn event_loop(
     let tick = tokio::time::Duration::from_millis(50);
     let mut approval_bell_rung = false;
     let mut session_bell_counts = Vec::new();
+    let mut needs_render = true;
     crate::notifications::init();
 
     loop {
         sync_mouse_capture(terminal.backend_mut(), app, mouse_capture_enabled)?;
-        app.drain_channels();
+        let channels_changed = app.drain_channels();
         app.tick_base_rules_file_watch();
+        needs_render |= channels_changed;
         let modal_visible = app.has_pending_approval_modal();
         if modal_visible && !approval_bell_rung {
             ring_terminal_bell(terminal.backend_mut())?;
@@ -823,8 +881,12 @@ async fn event_loop(
         // wedge the loop and converges once the terminal drains again.
         if frames_dropped.swap(false, Ordering::Relaxed) {
             terminal.clear()?;
+            needs_render = true;
         }
-        terminal.draw(|frame| render::render(frame, app))?;
+        if needs_render {
+            terminal.draw(|frame| render::render(frame, app))?;
+            needs_render = false;
+        }
 
         if app.should_quit {
             app.cancel_docker_build_for_shutdown().await;
@@ -838,9 +900,13 @@ async fn event_loop(
             maybe_event = events.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if should_handle_key_event(&key) => {
-                        app.handle_key(key)
+                        app.handle_key(key);
+                        needs_render = true;
                     }
-                    Some(Ok(Event::Mouse(mouse))) => app.handle_mouse(mouse),
+                    Some(Ok(Event::Mouse(mouse))) => {
+                        app.handle_mouse(mouse);
+                        needs_render = true;
+                    }
                     Some(Ok(Event::Paste(text))) => {
                         if app.focus == Focus::NewWorkspace {
                             app.append_new_workspace_text(&text);
@@ -849,6 +915,7 @@ async fn event_loop(
                         {
                             session.send_input(text.into_bytes());
                         }
+                        needs_render = true;
                     }
                     Some(Ok(Event::Resize(cols, rows))) => {
                         let (pty_cols, pty_rows) =
@@ -856,8 +923,9 @@ async fn event_loop(
                         for session in &mut app.sessions {
                             let _ = session.resize(pty_rows, pty_cols);
                         }
-                    }
-                    None => break,
+                        needs_render = true;
+                }
+                None => break,
                     _ => {}
                 }
                 sync_mouse_capture(terminal.backend_mut(), app, mouse_capture_enabled)?;

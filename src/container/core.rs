@@ -231,13 +231,16 @@ impl ContainerSession {
         self.terminal_changed_at.elapsed()
     }
 
-    pub fn refresh_terminal_snapshot(&mut self) {
+    pub fn refresh_terminal_snapshot(&mut self) -> bool {
         let hash = self.terminal_visible_hash();
         if hash != self.terminal_snapshot_hash {
             self.terminal_snapshot_hash = hash;
             if !self.recent_input_may_have_echoed() {
                 self.terminal_changed_at = Instant::now();
             }
+            true
+        } else {
+            false
         }
     }
 

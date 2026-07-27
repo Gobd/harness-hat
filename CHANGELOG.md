@@ -1,6 +1,18 @@
 # Changelog
 
-### 0.8.1 July 24, 2026
+## 0.8.2 July 27, 2024
+
+### Changed
+- Forwarded terminal environment variables (`TERM`, `COLORTERM`, `COLORFGBG`) into `hht shell` container exec sessions, with a fallback `TERM=xterm-256color` when `TERM` is unset.
+- Also forwarded terminal environment passthrough (`TERM`, `COLORTERM`, `COLORFGBG`) through `hht workspace` launch requests so CLI-attached sessions inherit caller terminal env on attach.
+- Reduced TUI refresh polling jitter by making background channel draining and terminal snapshot refreshes report state changes, so the event loop only redraws when something actually changed.
+- Increased container usage staleness threshold from 2 seconds to 5 seconds before re-fetching usage metrics.
+
+### Fixed
+- Improved TUI rendering performance and stability by caching the last rendered frame, skipping duplicate frames, and forcing a full repaint only when stale/dropped-frame recovery requires it.
+- Replaced per-frame full-screen clear behavior in the terminal renderer with incremental cursor-cell output, and avoid unnecessary redraw passes when no frame content changed in manager and remote relay paths.
+
+## 0.8.1 July 24, 2026
 
 ### Changed
 - Clarified workspace-mount behavior in user guide documentation: `hht workspace` mounts the directory where it is invoked, while `hht shell` can be run from any directory and does not affect workspace mount location.

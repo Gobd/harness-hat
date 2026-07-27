@@ -850,10 +850,12 @@ impl App {
         self.clamp_active_network_cursor();
     }
 
-    pub(crate) fn refresh_session_terminal_states(&mut self) {
+    pub(crate) fn refresh_session_terminal_states(&mut self) -> bool {
+        let mut changed = false;
         for session in &mut self.sessions {
-            session.refresh_terminal_snapshot();
+            changed |= session.refresh_terminal_snapshot();
         }
+        changed
     }
 
     pub(crate) fn has_pending_approval_modal(&self) -> bool {
@@ -1217,7 +1219,7 @@ impl App {
         session_idx: usize,
     ) -> Option<crate::container::ContainerUsageStats> {
         let docker_name = self.sessions.get(session_idx)?.docker_name.clone();
-        let stale_after = std::time::Duration::from_secs(2);
+        let stale_after = std::time::Duration::from_secs(5);
 
         // `docker stats --no-stream` blocks for 1-2s while the daemon samples
         // CPU, so it must never run on the UI thread (doing so froze the TUI

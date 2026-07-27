@@ -132,6 +132,7 @@ impl App {
             template,
             force_rebuild,
             cwd,
+            terminal_env,
             event_tx,
         } = item;
 
@@ -233,6 +234,7 @@ impl App {
                     workspace_idx,
                     template_idx,
                     cwd,
+                    terminal_env,
                 });
             }
             other => {
@@ -255,6 +257,7 @@ impl App {
                     &workspace_name,
                     &template,
                     cwd,
+                    &terminal_env,
                 );
                 finish_launch_stream(&event_tx, outcome);
             }
@@ -272,13 +275,14 @@ impl App {
         workspace_name: &str,
         template: &str,
         cwd: Option<PathBuf>,
+        terminal_env: &[(String, String)],
     ) -> Result<WorkspaceLaunchResponse, String> {
         let before_len = self.sessions.len();
         self.do_launch_container_on_workspace_with_priority_and_env(
             workspace_idx,
             template_idx,
             crate::proxy::SourcePriority::Primary,
-            &[],
+            terminal_env,
             None,
             cwd,
         );

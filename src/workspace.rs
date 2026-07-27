@@ -74,6 +74,7 @@ pub fn run(
         .context("canonicalizing current working directory")?;
 
     // Match workspace by --name flag first, then by cwd.
+    let terminal_env = crate::shell::shell_exec_env_pairs();
     let matched = if let Some(ref n) = name_override {
         config.workspaces.iter().find(|w| w.name == *n).cloned()
     } else {
@@ -116,6 +117,7 @@ pub fn run(
             &template,
             force_rebuild,
             launch_cwd,
+            terminal_env.clone(),
         )?;
         println!(
             "launched session {} ({}); attaching",
@@ -156,6 +158,7 @@ pub fn run(
         &template,
         force_rebuild,
         None,
+        terminal_env,
     )?;
     println!(
         "launched session {} ({}); attaching",
@@ -440,6 +443,7 @@ fn post_launch(
     template: &str,
     force_rebuild: bool,
     cwd: Option<&str>,
+    terminal_env: Vec<(String, String)>,
 ) -> Result<LaunchResponse> {
     // No total-request timeout: a long build (cold image pull + multi-stage)
     // can legitimately take many minutes, and a `timeout` here would abort
@@ -455,6 +459,9 @@ fn post_launch(
         "template": template,
         "force_rebuild": force_rebuild,
     });
+    if !terminal_env.is_empty() {
+        body["terminal_env"] = serde_json::json!(terminal_env);
+    }
     if let Some(cwd) = cwd {
         body["cwd"] = serde_json::Value::String(cwd.to_string());
     }

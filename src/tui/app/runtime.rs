@@ -10,20 +10,33 @@ impl App {
     /// concurrent fetches.
     const MAX_PENDING_NETWORK_APPROVALS_PER_SOURCE: usize = 8;
 
-    pub(crate) fn drain_channels(&mut self) {
+    pub(crate) fn drain_channels(&mut self) -> bool {
+        let mut changed = false;
         let activity_selected_before = {
             let items = self.sidebar_items();
             self.selected_sidebar_item_from(&items)
         };
+        let sidebar_idx_before = self.sidebar_idx;
+        let log_len_before = self.log.len();
+        let activity_len_before = self.activities.len();
+        let session_len_before = self.sessions.len();
+        let has_dialog_before = self.native_dialog_inflight.is_some();
+
         for _ in 0..32 {
             match self.exec_pending_rx.try_recv() {
-                Ok(item) => self.pending_exec.push(item),
+                Ok(item) => {
+                    self.pending_exec.push(item);
+                    changed = true;
+                }
                 Err(_) => break,
             }
         }
         for _ in 0..32 {
             match self.stop_pending_rx.try_recv() {
-                Ok(item) => self.pending_stop.push(item),
+                Ok(item) => {
+                    self.pending_stop.push(item);
+                    changed = true;
+                }
                 Err(_) => break,
             }
         }
@@ -31,7 +44,10 @@ impl App {
         // count so a flood from the control server can't starve the TUI loop.
         for _ in 0..4 {
             match self.launch_pending_rx.try_recv() {
-                Ok(item) => self.handle_workspace_launch_request(item),
+                Ok(item) => {
+                    self.handle_workspace_launch_request(item);
+                    changed = true;
+                }
                 Err(_) => break,
             }
         }
@@ -41,17 +57,27 @@ impl App {
         self.drain_native_dialog_results();
         for _ in 0..32 {
             match self.net_pending_rx.try_recv() {
-                Ok(item) => self.enqueue_pending_network(item),
+                Ok(item) => {
+                    self.enqueue_pending_network(item);
+                    changed = true;
+                }
                 Err(_) => break,
             }
         }
         // Rules-file changes always use a system dialog. Network and hostdo
         // approvals use one on macOS and retain the TUI fallback elsewhere.
         self.maybe_launch_native_dialog();
-        self.refresh_session_terminal_states();
+
+        changed |= self.refresh_session_terminal_states();
+
         for _ in 0..64 {
             match self.background_channels.container_usage_rx.try_recv() {
                 Ok(update) => {
+                    let needs_redraw = self
+                        .container_usage
+                        .get(&update.docker_name)
+                        .map(|cached| cached.stats != update.stats)
+                        .unwrap_or(true);
                     self.container_usage.insert(
                         update.docker_name,
                         CachedContainerUsage {
@@ -60,24 +86,36 @@ impl App {
                             in_flight: false,
                         },
                     );
+                    if needs_redraw {
+                        changed = true;
+                    }
                 }
                 Err(_) => break,
             }
         }
         for _ in 0..8 {
             match self.background_channels.rules_scan_rx.try_recv() {
-                Ok(stamps) => self.apply_rules_scan(stamps),
+                Ok(stamps) => {
+                    self.apply_rules_scan(stamps);
+                    changed = true;
+                }
                 Err(_) => break,
             }
         }
         for _ in 0..128 {
             match self.activity_rx.try_recv() {
-                Ok(event) => self.apply_activity_event(event),
+                Ok(event) => {
+                    self.apply_activity_event(event);
+                    changed = true;
+                }
                 Err(_) => break,
             }
         }
+
         let items = self.sidebar_items();
         self.restore_sidebar_selection(activity_selected_before.as_ref(), &items);
+        changed |= self.sidebar_idx != sidebar_idx_before;
+
         for _ in 0..32 {
             match self.audit_rx.try_recv() {
                 Ok(entry) => {
@@ -85,10 +123,12 @@ impl App {
                     if self.log.len() > 500 {
                         self.log.pop_back();
                     }
+                    changed = true;
                 }
                 Err(_) => break,
             }
         }
+
         for _ in 0..BUILD_OUTPUT_EVENTS_PER_TICK {
             match self.build_event_rx.try_recv() {
                 Ok(BuildEvent::Output { line, is_error }) => {
@@ -103,6 +143,7 @@ impl App {
                         });
                     }
                     self.push_build_output(line, is_error);
+                    changed = true;
                 }
                 Ok(BuildEvent::Finished {
                     label,
@@ -115,6 +156,7 @@ impl App {
                     error,
                     diagnostic,
                 }) => {
+                    changed = true;
                     let command = self
                         .build_task
                         .take()
@@ -186,6 +228,7 @@ impl App {
                                 &pending.workspace_name,
                                 &pending.template,
                                 pending.cwd.clone(),
+                                &pending.terminal_env,
                             );
                             crate::tui::app::launch::finish_launch_stream(
                                 &pending.event_tx,
@@ -200,12 +243,12 @@ impl App {
                             );
                         }
                     } else {
-                        self.build_workspace_idx = None;
-                        self.build_session_group = None;
-                        self.pending_force_rebuild = false;
                         let suffix = exit_code
                             .map(|code| format!(" (exit code {code})"))
                             .unwrap_or_default();
+                        self.build_workspace_idx = None;
+                        self.build_session_group = None;
+                        self.pending_force_rebuild = false;
                         self.push_log(format!("{label} failed{suffix}"), true);
                         if let Some(diagnostic) = &diagnostic {
                             self.push_log(format!("  build detail: {diagnostic}"), true);
@@ -246,6 +289,7 @@ impl App {
             }
             let exited_for = self.sessions[i].launched_at.elapsed();
             if !self.sessions[i].exit_reported {
+                changed = true;
                 self.sessions[i].exit_reported = true;
                 let label = self.sessions[i].tab_label();
                 match crate::container::inspect_container_exit(&self.sessions[i].docker_name) {
@@ -279,6 +323,7 @@ impl App {
             if exited_for < std::time::Duration::from_secs(15) {
                 continue;
             }
+            changed = true;
             let label = self.sessions[i].tab_label();
             self.push_log(format!("container '{}' exited", label), false);
             self.close_session(i);
@@ -300,6 +345,7 @@ impl App {
                 let _ = tx.send(decision);
             }
             self.pending_stop.remove(idx);
+            changed = true;
         }
 
         if self.focus == Focus::Terminal {
@@ -317,6 +363,12 @@ impl App {
         self.prune_terminal_activities();
         let items = self.sidebar_items();
         self.restore_sidebar_selection(selected_before_prune.as_ref(), &items);
+
+        changed |= self.log.len() != log_len_before;
+        changed |= self.activities.len() != activity_len_before;
+        changed |= self.sessions.len() != session_len_before;
+        changed |= has_dialog_before != self.native_dialog_inflight.is_some();
+        changed
     }
 
     pub(crate) fn enqueue_pending_network(&mut self, item: crate::proxy::PendingNetworkItem) {

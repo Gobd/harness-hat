@@ -74,6 +74,7 @@ fn relay_loop(
     stdout: &mut io::Stdout,
 ) -> Result<()> {
     let mut needs_render = true;
+    let mut last_frame: Vec<u8> = Vec::new();
     loop {
         let input = if poll_event(Duration::from_millis(50))? {
             match read_event()? {
@@ -127,7 +128,10 @@ fn relay_loop(
                 String::from_utf8_lossy(&frame).replace(['\r', '\x1b'], "")
             );
         }
-        write_frame(stdout, &frame)?;
+        if last_frame != frame {
+            write_frame(stdout, &frame)?;
+            last_frame = frame.to_vec();
+        }
         needs_render = false;
     }
 }

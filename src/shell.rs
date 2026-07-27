@@ -16,6 +16,7 @@ use anyhow::{Context, Result, bail};
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
 use std::process::Command;
+use std::env;
 
 use crate::container::{
     LABEL_ALIAS, LABEL_SHELL, LABEL_TEMPLATE, LABEL_WORKSPACE, SHELL_HOME, SHELL_USER,
@@ -119,6 +120,32 @@ fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
     exec_into_container(&name, extra_args)
 }
 
+fn shell_exec_env_vars() -> Vec<String> {
+    shell_exec_env_pairs()
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect()
+}
+
+pub(crate) fn shell_exec_env_pairs() -> Vec<(String, String)> {
+    const PASSTHROUGH: [&str; 3] = ["TERM", "COLORTERM", "COLORFGBG"];
+    let mut env_vars: Vec<(String, String)> = PASSTHROUGH
+        .into_iter()
+        .filter_map(|name| {
+            env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| (name.to_string(), value))
+        })
+        .collect();
+
+    if !env_vars.iter().any(|(name, _)| name == "TERM") {
+        env_vars.push(("TERM".to_string(), "xterm-256color".to_string()));
+    }
+
+    env_vars
+}
+
 fn terminate(id: &str) -> Result<()> {
     let wanted = normalize_id(id);
     let name = session_name_for_id(id)?;
@@ -211,10 +238,14 @@ pub(crate) fn exec_into_container(container_name: &str, extra_args: &[OsString])
         if stdin_is_tty { "-it" } else { "-i" },
         "-u",
         SHELL_USER,
-        "-e",
-        &format!("HOME={SHELL_HOME}"),
-        container_name,
     ]);
+    command.arg("-e");
+    command.arg(&format!("HOME={SHELL_HOME}"));
+    for env_var in shell_exec_env_vars() {
+        command.arg("-e");
+        command.arg(&env_var);
+    }
+    command.arg(container_name);
     if extra_args.is_empty() {
         command.arg(&attach_shell);
     } else {

@@ -530,6 +530,8 @@ pub struct WorkspaceLaunchRequest {
     pub force_rebuild: bool,
     #[serde(default)]
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub terminal_env: Vec<(String, String)>,
 }
 
 /// Final-success payload included in a `LaunchEvent::Launched`.
@@ -568,6 +570,7 @@ pub struct WorkspaceLaunchItem {
     pub template: String,
     pub force_rebuild: bool,
     pub cwd: Option<PathBuf>,
+    pub terminal_env: Vec<(String, String)>,
     pub event_tx: mpsc::Sender<LaunchEvent>,
 }
 
@@ -879,6 +882,7 @@ pub(super) async fn workspace_launch_handler(
         template: template.clone(),
         force_rebuild: req.force_rebuild,
         cwd: req.cwd.map(PathBuf::from),
+        terminal_env: req.terminal_env,
         event_tx,
     };
     if state.launch_tx.send(item).await.is_err() {
