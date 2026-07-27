@@ -1,5 +1,5 @@
 use crate::config::Config;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -204,7 +204,23 @@ fn rules_paths_for_workspace(config: &Config, workspace_name: Option<&str>) -> V
 
 fn rules_file_fingerprint(path: &Path) -> Result<RulesFileFingerprint> {
     match read_rules_file_bytes(path)? {
-        Some(bytes) => Ok(RulesFileFingerprint::Contents(Sha256::digest(bytes).into())),
+        Some(bytes) => {
+            // The workspace template is launch metadata, not a policy decision.
+            // The workspace command persists the first selected template itself,
+            // so treating that write as a policy-file change would immediately
+            // block the launch that made it. Keep every other byte (including
+            // comments) in the fingerprint so policy edits still require
+            // explicit review.
+            let raw = std::str::from_utf8(&bytes)
+                .with_context(|| format!("rules file '{}' is not valid UTF-8", path.display()))?;
+            let mut document = raw
+                .parse::<toml_edit::DocumentMut>()
+                .with_context(|| format!("parsing rules file '{}'", path.display()))?;
+            document.remove("template");
+            Ok(RulesFileFingerprint::Contents(
+                Sha256::digest(document.to_string().as_bytes()).into(),
+            ))
+        }
         None => Ok(RulesFileFingerprint::Missing),
     }
 }
@@ -277,6 +293,32 @@ mod tests {
         assert!(shared.ensure_rules_trusted_for_workspace(None).is_err());
 
         shared.trust_rules_file(&rules_path).unwrap();
+        shared.ensure_rules_trusted_for_workspace(None).unwrap();
+    }
+
+    #[test]
+    fn workspace_template_change_does_not_block_rules_trust() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules_path = dir.path().join("harness-rules.toml");
+        fs::write(
+            &rules_path,
+            "version = 1\n[network]\nallowlist = ['domain=example.com']\n",
+        )
+        .unwrap();
+        let config = Arc::new(Config {
+            manager: crate::config::ManagerConfig {
+                global_rules_file: rules_path.clone(),
+            },
+            ..Config::default()
+        });
+        let shared = SharedConfig::new(config);
+
+        fs::write(
+            &rules_path,
+            "version = 1\ntemplate = 'typescript'\n[network]\nallowlist = ['domain=example.com']\n",
+        )
+        .unwrap();
+
         shared.ensure_rules_trusted_for_workspace(None).unwrap();
     }
 

@@ -1260,6 +1260,12 @@ impl App {
 
     pub(crate) fn push_log(&mut self, text: impl Into<String>, is_error: bool) {
         let text = text.into();
+        if is_error {
+            // The TUI log is bounded and often hidden. Persist failures too so
+            // command-line launch errors that point users at the manager log
+            // are actionable after the fact.
+            tracing::error!(message = %text, "manager TUI error");
+        }
         // Drop consecutive duplicates: the same line repeated in a tight loop
         // (e.g. proxy fail-closed retries) otherwise floods useful entries off
         // the visible log within milliseconds (L9). Audit entries are kept
