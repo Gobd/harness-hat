@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.3 July 27, 2024
+
+- Resolved CI/CD Failures.
+
 ## 0.8.2 July 27, 2024
 
 ### Changed

@@ -13,10 +13,10 @@
 //! alongside the live manager.
 
 use anyhow::{Context, Result, bail};
+use std::env;
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
 use std::process::Command;
-use std::env;
 
 use crate::container::{
     LABEL_ALIAS, LABEL_SHELL, LABEL_TEMPLATE, LABEL_WORKSPACE, SHELL_HOME, SHELL_USER,
@@ -240,7 +240,7 @@ pub(crate) fn exec_into_container(container_name: &str, extra_args: &[OsString])
         SHELL_USER,
     ]);
     command.arg("-e");
-    command.arg(&format!("HOME={SHELL_HOME}"));
+    command.arg(format!("HOME={SHELL_HOME}"));
     for env_var in shell_exec_env_vars() {
         command.arg("-e");
         command.arg(&env_var);
