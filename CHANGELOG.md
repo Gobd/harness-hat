@@ -7,6 +7,9 @@
 - Added the `hht wp` shortcut for the `hht workspace` command.
 - Added `[[localhost_forwards]]` support to `harness-rules.toml`, including workspace-specific overrides for configured container forwards.
 
+## Fixed
+- Remembering a network or host-command decision no longer marks a rules file with a selected workspace template as externally modified. The daemon keeps the canonical policy fingerprint trusted, so proxy traffic continues for existing containers after a remembered choice.
+
 
 ## 0.8.3 July 27, 2024
 
