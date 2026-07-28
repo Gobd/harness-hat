@@ -117,10 +117,12 @@ impl SharedConfig {
         if current != expected {
             bail!("rules file contents differ from the manager-owned write");
         }
-        self.set_trusted_rules_file(
-            path,
-            RulesFileFingerprint::Contents(Sha256::digest(current).into()),
-        );
+        // Use the same canonical fingerprint as the enforcement path. In
+        // particular, `template` is intentionally excluded because it is
+        // launch metadata rather than policy. Storing a raw hash here made a
+        // manager-owned remembered-rule write look like an external change on
+        // the next proxy request whenever the file had a template selected.
+        self.set_trusted_rules_file(path, rules_file_fingerprint(path)?);
         Ok(())
     }
 
@@ -132,11 +134,7 @@ impl SharedConfig {
         if current.as_deref() != expected {
             bail!("rules file changed while its review dialog was open");
         }
-        let fingerprint = match current {
-            Some(bytes) => RulesFileFingerprint::Contents(Sha256::digest(bytes).into()),
-            None => RulesFileFingerprint::Missing,
-        };
-        self.set_trusted_rules_file(path, fingerprint);
+        self.set_trusted_rules_file(path, rules_file_fingerprint(path)?);
         Ok(())
     }
 
@@ -318,6 +316,33 @@ mod tests {
             "version = 1\ntemplate = 'typescript'\n[network]\nallowlist = ['domain=example.com']\n",
         )
         .unwrap();
+
+        shared.ensure_rules_trusted_for_workspace(None).unwrap();
+    }
+
+    #[test]
+    fn manager_owned_rules_write_with_template_remains_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules_path = dir.path().join("harness-rules.toml");
+        fs::write(
+            &rules_path,
+            "version = 1\ntemplate = 'rust'\n[network]\nallowlist = ['domain=before.example']\n",
+        )
+        .unwrap();
+        let config = Arc::new(Config {
+            manager: crate::config::ManagerConfig {
+                global_rules_file: rules_path.clone(),
+            },
+            ..Config::default()
+        });
+        let shared = SharedConfig::new(config);
+
+        let remembered_contents =
+            "version = 1\ntemplate = 'rust'\n[network]\nallowlist = ['domain=after.example']\n";
+        fs::write(&rules_path, remembered_contents).unwrap();
+        shared
+            .trust_rules_file_if_contents(&rules_path, remembered_contents)
+            .unwrap();
 
         shared.ensure_rules_trusted_for_workspace(None).unwrap();
     }
