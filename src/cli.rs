@@ -48,6 +48,7 @@ pub enum Command {
     ///
     /// Any args after the subcommand are passed verbatim to `docker exec`
     /// (same passthrough behavior as `hht shell ID …`).
+    #[command(alias = "wp")]
     Workspace {
         /// List configured workspaces without starting or attaching to a session.
         #[arg(long, conflicts_with_all = ["template", "name", "rebuild", "args"])]
@@ -142,7 +143,7 @@ pub fn parse() -> Result<Cli> {
 
 pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
     let usage = format!(
-        "Usage: {COMMAND_NAME} [init [PATH] | shell [ID] [COMMAND...] | shell --kill ID | workspace [OPTIONS] [COMMAND...] | rebuild [OPTIONS] [TEMPLATE...] | install | uninstall]"
+        "Usage: {COMMAND_NAME} [init [PATH] | shell [ID] [COMMAND...] | workspace (wp) [OPTIONS] [COMMAND...] | shell --kill ID | rebuild [OPTIONS] [TEMPLATE...] | install | uninstall]"
     );
     if raw.is_empty() {
         bail!("missing argv[0]. {usage}");
@@ -230,6 +231,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["claude".to_string(), "--resume".to_string()],
         );
+    }
+
+    #[test]
+    fn wp_alias_parses_as_workspace_and_preserves_trailing_args() {
+        let cli = parse_from(argv(&["hht", "wp", ".."])).expect("parse");
+        let Some(Command::Workspace { args, .. }) = cli.command else {
+            panic!("expected Workspace subcommand");
+        };
+        assert_eq!(args, vec![OsString::from("..")]);
     }
 
     #[test]

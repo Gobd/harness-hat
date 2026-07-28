@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.4 Future
+
+### Added
+
+- Added the `hht wp` shortcut for the `hht workspace` command.
+- Added `[[localhost_forwards]]` support to `harness-rules.toml`, including workspace-specific overrides for configured container forwards.
+
+
 ## 0.8.3 July 27, 2024
 
 - Resolved CI/CD Failures.

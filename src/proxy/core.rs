@@ -18,6 +18,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, warn};
 
 use crate::activity::{Activity, ActivityEvent, ActivityKind, ActivityState, payload_preview};
+use crate::config::LocalhostForward;
 use crate::proxy::connect::handle_connect;
 use crate::proxy::helpers::{
     connect_public_tcp_with_priority, is_expected_disconnect, resolve_public_addrs_with_priority,
@@ -67,6 +68,7 @@ pub(crate) struct FixedSourceIdentity {
     pub(crate) auth_token: String,
     pub(crate) limiter_key: String,
     pub(crate) priority: SourcePriority,
+    pub(crate) localhost_forwards: Vec<LocalhostForward>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +194,23 @@ impl ProxyState {
         auth_token: &str,
         priority: SourcePriority,
     ) -> Self {
+        self.with_fixed_source_and_forwards(
+            workspace_name,
+            container,
+            auth_token,
+            priority,
+            Vec::new(),
+        )
+    }
+
+    pub(crate) fn with_fixed_source_and_forwards(
+        &self,
+        workspace_name: &str,
+        container: &str,
+        auth_token: &str,
+        priority: SourcePriority,
+        localhost_forwards: Vec<LocalhostForward>,
+    ) -> Self {
         let mut cloned = self.clone();
         cloned.fixed_source = Some(FixedSourceIdentity {
             workspace_name: workspace_name.to_string(),
@@ -199,6 +218,7 @@ impl ProxyState {
             auth_token: auth_token.to_string(),
             limiter_key: auth_token.to_string(),
             priority,
+            localhost_forwards,
         });
         cloned.connection_limiter = Arc::new(Semaphore::new(SCOPED_PROXY_CONNECTION_LIMIT));
         cloned.connection_limit = SCOPED_PROXY_CONNECTION_LIMIT;
@@ -313,6 +333,13 @@ impl ProxyState {
             return None;
         }
         let fixed = self.fixed_source.as_ref()?;
+        if let Some(forward) = fixed
+            .localhost_forwards
+            .iter()
+            .find(|forward| forward.container_port == port)
+        {
+            return Some(forward.effective_host_port());
+        }
         let cfg = self.config.get();
         let ctr = cfg
             .containers
@@ -537,6 +564,29 @@ pub fn spawn_scoped_listener(
     auth_token: &str,
     priority: SourcePriority,
 ) -> Result<ScopedProxyListener> {
+    spawn_scoped_listener_with_forwards(
+        state,
+        bind_host,
+        workspace_name,
+        container,
+        auth_token,
+        priority,
+        Vec::new(),
+    )
+}
+
+/// Start a per-container proxy listener with session-local localhost-forward
+/// overrides from `harness-rules.toml`.
+#[instrument(skip(state, localhost_forwards))]
+pub fn spawn_scoped_listener_with_forwards(
+    state: &ProxyState,
+    bind_host: &str,
+    workspace_name: &str,
+    container: &str,
+    auth_token: &str,
+    priority: SourcePriority,
+    localhost_forwards: Vec<LocalhostForward>,
+) -> Result<ScopedProxyListener> {
     let bind_addr = format!("{bind_host}:0");
     let std_listener = std::net::TcpListener::bind(&bind_addr)
         .map_err(|e| anyhow::anyhow!("proxy bind {bind_addr}: {e}"))?;
@@ -546,7 +596,17 @@ pub fn spawn_scoped_listener(
     let local_addr = std_listener.local_addr()?;
     let listener = TcpListener::from_std(std_listener)?;
     let addr = format!("{}:{}", bind_host, local_addr.port());
-    let fixed_state = state.with_fixed_source(workspace_name, container, auth_token, priority);
+    let fixed_state = if localhost_forwards.is_empty() {
+        state.with_fixed_source(workspace_name, container, auth_token, priority)
+    } else {
+        state.with_fixed_source_and_forwards(
+            workspace_name,
+            container,
+            auth_token,
+            priority,
+            localhost_forwards,
+        )
+    };
     let task = tokio::spawn(async move {
         if let Err(e) = run_scoped_listener(fixed_state, listener).await {
             error!("scoped proxy server error: {e}");

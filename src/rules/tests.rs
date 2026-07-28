@@ -28,6 +28,80 @@ denylist = ["domain=blocked.example.com"]
 }
 
 #[test]
+fn load_parses_localhost_forwards() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("harness-rules.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+
+[[localhost_forwards]]
+container_port = 8081
+host_port = 11434
+
+[[localhost_forwards]]
+container_port = 3000
+"#,
+    )
+    .expect("write rules");
+
+    let rules = load(&path).expect("load rules");
+    assert_eq!(rules.localhost_forwards.len(), 2);
+    assert_eq!(rules.localhost_forwards[0].container_port, 8081);
+    assert_eq!(rules.localhost_forwards[0].effective_host_port(), 11434);
+    assert_eq!(rules.localhost_forwards[1].effective_host_port(), 3000);
+}
+
+#[test]
+fn compose_localhost_forwards_uses_workspace_override_by_container_port() {
+    let global = ProjectRules {
+        localhost_forwards: vec![crate::config::LocalhostForward {
+            container_port: 8081,
+            host_port: Some(8081),
+        }],
+        ..ProjectRules::default()
+    };
+    let workspace = ProjectRules {
+        localhost_forwards: vec![
+            crate::config::LocalhostForward {
+                container_port: 8081,
+                host_port: Some(11434),
+            },
+            crate::config::LocalhostForward {
+                container_port: 3000,
+                host_port: None,
+            },
+        ],
+        ..ProjectRules::default()
+    };
+
+    let composed = ComposedRules::compose(&global, &[workspace]);
+    assert_eq!(
+        composed
+            .localhost_forwards
+            .iter()
+            .map(|forward| (forward.container_port, forward.effective_host_port()))
+            .collect::<Vec<_>>(),
+        vec![(8081, 11434), (3000, 3000)]
+    );
+}
+
+#[test]
+fn load_rejects_invalid_localhost_forward_ports() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("harness-rules.toml");
+    std::fs::write(
+        &path,
+        "version = 1\n\n[[localhost_forwards]]\ncontainer_port = 0\n",
+    )
+    .expect("write rules");
+
+    let err = load(&path).expect_err("zero container port must be rejected");
+    assert!(err.to_string().contains("container_port"));
+}
+
+#[test]
 fn load_parses_workspace_template() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("harness-rules.toml");

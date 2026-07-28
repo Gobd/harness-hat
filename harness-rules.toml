@@ -11,6 +11,13 @@
 # - Use `killme` only when the user explicitly asks you to end this container.
 # """
 #
+# Localhost port forwards (workspace/session overrides):
+# [[localhost_forwards]]
+# container_port = 8081
+# host_port = 11434
+# A missing host_port uses the same port. Entries with the same
+# container_port replace the configured default/profile forward.
+#
 # Hostdo (host-side command execution)
 #
 # default_policy: what happens when a command doesn't match any rule below.

@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::config::LocalhostForward;
+
 pub const CURRENT_RULES_VERSION: u32 = 1;
 
 // ── Enums (re-used across config and rules) ──────────────────────────────────
@@ -41,6 +43,11 @@ pub struct ProjectRules {
     /// configured container mount target.
     #[serde(default, skip_serializing_if = "is_false")]
     pub mirror_cwd: bool,
+    /// Additional host-local TCP services exposed as localhost inside the
+    /// workspace container. Entries with the same container port override
+    /// the configured container/profile forward.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub localhost_forwards: Vec<LocalhostForward>,
     #[serde(default)]
     pub hostdo: HostdoRules,
     #[serde(default)]
@@ -62,6 +69,7 @@ impl Default for ProjectRules {
             llm_instructions: None,
             template: None,
             mirror_cwd: false,
+            localhost_forwards: Vec::new(),
             hostdo: HostdoRules::default(),
             network: NetworkRules::default(),
         }
@@ -159,6 +167,9 @@ pub struct ComposedRules {
     pub network_rules: Vec<NetworkRule>,
     pub network_deny_rules: Vec<NetworkRule>,
     pub network_default: NetworkPolicy,
+    /// Effective global + workspace-local localhost forwards. Later layers
+    /// replace earlier entries with the same container port.
+    pub localhost_forwards: Vec<LocalhostForward>,
 }
 
 impl ComposedRules {
@@ -170,9 +181,12 @@ impl ComposedRules {
         let mut network_denylist = global.network.denylist.clone();
         let mut hostdo_default = global.hostdo.default_policy;
         let mut mirror_cwd = global.mirror_cwd;
+        let mut localhost_forwards = global.localhost_forwards.clone();
 
         for proj in projects {
             mirror_cwd |= proj.mirror_cwd;
+            localhost_forwards =
+                merge_localhost_forwards(&localhost_forwards, &proj.localhost_forwards);
             hostdo_default = compose_hostdo_policies(hostdo_default, proj.hostdo.default_policy);
             for cmd in &proj.hostdo.commands {
                 if !hostdo
@@ -199,6 +213,7 @@ impl ComposedRules {
             network_deny_rules: parse_dedup_network_rules(network_denylist),
             // Coder-style rules engine is explicit allowlist with prompt-by-default.
             network_default: NetworkPolicy::Prompt,
+            localhost_forwards,
         }
     }
 
@@ -572,6 +587,23 @@ fn parse_dedup_hostdo_commands(raws: Vec<HostdoCommand>) -> Vec<HostdoCommand> {
         .collect()
 }
 
+fn merge_localhost_forwards(
+    base: &[LocalhostForward],
+    overrides: &[LocalhostForward],
+) -> Vec<LocalhostForward> {
+    let override_ports = overrides
+        .iter()
+        .map(|forward| forward.container_port)
+        .collect::<HashSet<_>>();
+    let mut out = base
+        .iter()
+        .filter(|forward| !override_ports.contains(&forward.container_port))
+        .cloned()
+        .collect::<Vec<_>>();
+    out.extend(overrides.iter().cloned());
+    out
+}
+
 fn compose_hostdo_policies(lhs: NetworkPolicy, rhs: NetworkPolicy) -> NetworkPolicy {
     match (lhs, rhs) {
         (NetworkPolicy::Deny, _) | (_, NetworkPolicy::Deny) => NetworkPolicy::Deny,
@@ -596,8 +628,25 @@ pub fn load(path: &Path) -> Result<ProjectRules> {
     validate_template(parsed.template.as_deref(), path)?;
     validate_network_list("allowlist", &parsed.network.allowlist, path)?;
     validate_network_list("denylist", &parsed.network.denylist, path)?;
+    validate_localhost_forwards(&parsed.localhost_forwards, path)?;
     validate_hostdo_rules(&parsed.hostdo.commands, path)?;
     Ok(parsed)
+}
+
+fn validate_localhost_forwards(forwards: &[LocalhostForward], path: &Path) -> Result<()> {
+    for forward in forwards {
+        anyhow::ensure!(
+            forward.container_port > 0,
+            "invalid [localhost_forwards] entry in {}: container_port must be greater than zero",
+            path.display()
+        );
+        anyhow::ensure!(
+            forward.effective_host_port() > 0,
+            "invalid [localhost_forwards] entry in {}: host_port must be greater than zero",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn validate_template(template: Option<&str>, path: &Path) -> Result<()> {
@@ -764,6 +813,13 @@ const RULES_FILE_HEADER: &str = "\
 # template = \"rust\"
 # A `template` value in the matching `[[workspaces]]` entry in
 # harness-hat.toml overrides this value.
+#
+# Localhost port forwards (workspace/session overrides):
+# [[localhost_forwards]]
+# container_port = 8081
+# host_port = 11434
+# A missing host_port uses the same port. Entries with the same
+# container_port replace the configured default/profile forward.
 #
 # Hostdo (host-side command execution)
 #

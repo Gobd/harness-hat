@@ -14,6 +14,16 @@ The default also passes `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` from t
 
 Each workspace can have project policy for network access and `hostdo`. When you create a typed workspace in the TUI, Harness Hat creates an appropriate starter policy. When a network or host-command prompt is approved with a remembered decision, Harness Hat records the narrow rule for that project.
 
+Project policy can also define host-local TCP forwards in the workspace's `harness-rules.toml`:
+
+```toml
+[[localhost_forwards]]
+container_port = 8081
+host_port = 11434
+```
+
+Inside a new session, `localhost:8081` reaches host port `11434`. Omitting `host_port` uses the same port. A rule with the same `container_port` overrides the selected template's forward; changes apply to newly launched sessions.
+
 Review remembered project-policy changes through normal version control. A changed global or project policy file blocks new network and host-command decisions until its current version is reviewed and trusted in the system dialog. Closing that dialog keeps requests blocked.
 
 ## Team-Managed Settings

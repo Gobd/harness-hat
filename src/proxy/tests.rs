@@ -321,6 +321,27 @@ host_port = 18081
             "expected host loopback address on forwarded host port, got {addrs:?}"
         );
 
+        let overridden = state.with_fixed_source_and_forwards(
+            "workspace",
+            "pi",
+            "session",
+            SourcePriority::Primary,
+            vec![crate::config::LocalhostForward {
+                container_port: 8081,
+                host_port: Some(28081),
+            }],
+        );
+        let overridden_addrs = overridden
+            .resolve_request_addrs("localhost", 8081)
+            .await
+            .expect("rules-file forward override should resolve");
+        assert!(
+            overridden_addrs
+                .iter()
+                .any(|addr| addr.ip().is_loopback() && addr.port() == 28081),
+            "expected rules-file override on forwarded host port, got {overridden_addrs:?}"
+        );
+
         let err = state
             .resolve_request_addrs("localhost", 8082)
             .await

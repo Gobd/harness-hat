@@ -58,6 +58,7 @@ With the manager running in another terminal, you can also attach to or start th
 
 ```sh
 hht workspace                          # match $PWD to a workspace, launch if needed, attach
+hht wp ..                              # `workspace` shortcut; pass a command after it
 hht workspace --template go         # skip the template picker, use a specific profile
 hht workspace --name trust-service     # jump to a named workspace without cd-ing in
 hht workspace --rebuild                # rebuild the image (--no-cache) before launching
@@ -236,7 +237,15 @@ container_port = 3000
 
 With the first rule, a process in the container that connects to `http://localhost:8081` reaches port `11434` on the host. With the second, `host_port` is omitted, so `localhost:3000` in that template reaches host port `3000`.
 
-Forwards can be set under `[defaults.containers]` for every template or under `[container_profiles.<name>]` for one template. A profile forward with the same `container_port` replaces the default forward for that port. Start the host service before the container process tries to connect; Harness Hat forwards TCP traffic, but it does not start the host service for you.
+Forwards can be set under `[defaults.containers]` for every template or under `[container_profiles.<name>]` for one template. A profile forward with the same `container_port` replaces the default forward for that port. Workspace-specific forwards can also be added to that workspace's `harness-rules.toml`:
+
+```toml
+[[localhost_forwards]]
+container_port = 8081
+host_port = 11434
+```
+
+Rules-file forwards are applied on top of the selected template, and a matching `container_port` replaces the configured forward. The same syntax in the global `harness-rules.toml` applies as a base to all workspaces. Start the host service before the container process tries to connect; Harness Hat forwards TCP traffic, but it does not start the host service for you.
 
 In strict-network mode, configured forwards are added to the egress allowlist during container bootstrap. Other direct host or network destinations still go through the proxy policy or are blocked. This is not Docker `-p` publishing: it lets the container reach selected host services; it does not expose container ports back to the host or LAN.
 

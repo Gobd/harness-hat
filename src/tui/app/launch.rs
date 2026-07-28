@@ -356,11 +356,11 @@ impl App {
             return;
         }
 
-        let mirror_cwd = match crate::config::load_composed_rules_for_workspace(
+        let rules = match crate::config::load_composed_rules_for_workspace(
             &cfg,
             Some(proj.name.as_str()),
         ) {
-            Ok(rules) => rules.mirror_cwd,
+            Ok(rules) => rules,
             Err(error) => {
                 self.push_log(
                     format!(
@@ -372,6 +372,7 @@ impl App {
                 return;
             }
         };
+        let mirror_cwd = rules.mirror_cwd;
 
         if !self.preflight_image_or_prompt_build(
             pi,
@@ -395,6 +396,10 @@ impl App {
         };
 
         let mut ctr = ctr;
+        ctr.localhost_forwards = crate::config::merge_localhost_forwards(
+            &ctr.localhost_forwards,
+            &rules.localhost_forwards,
+        );
         if mirror_cwd {
             if let Some(mount_target) =
                 crate::container::mirrored_workspace_mount_target(&mount_source_path)
@@ -420,13 +425,14 @@ impl App {
         let hostdo_script_host_path = cfg.docker_dir.join("scripts/hostdo.py");
         let proxy_host = &cfg.defaults.proxy.proxy_host;
         let session_token = uuid::Uuid::new_v4().simple().to_string();
-        let scoped_proxy = match crate::proxy::spawn_scoped_listener(
+        let scoped_proxy = match crate::proxy::spawn_scoped_listener_with_forwards(
             &self.proxy_state,
             proxy_host,
             &proj.name,
             &ctr.name,
             &session_token,
             proxy_priority,
+            ctr.localhost_forwards.clone(),
         ) {
             Ok(listener) => listener,
             Err(e) => {
