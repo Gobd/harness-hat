@@ -10,6 +10,14 @@ pub struct ContainerUsageStats {
     pub memory_usage: String,
 }
 
+/// Docker's current lifecycle state for a named container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerState {
+    pub running: bool,
+    pub exit_code: Option<i32>,
+    pub error: String,
+}
+
 pub(crate) fn read_container_id(
     cidfile: &Path,
     docker_name: &str,
@@ -71,12 +79,15 @@ fn inspect_container_id(docker_name: &str) -> Result<Option<String>> {
     }
 }
 
-pub fn inspect_container_exit(docker_name: &str) -> Result<Option<(Option<i32>, String)>> {
+/// Inspect whether a container is still running. A missing container returns
+/// `Ok(None)`; callers should not infer an exit merely from a disconnected
+/// Docker attach/PTY client.
+pub fn inspect_container_state(docker_name: &str) -> Result<Option<ContainerState>> {
     let output = std::process::Command::new("docker")
         .args([
             "inspect",
             "--format",
-            "{{.State.ExitCode}}|{{.State.Error}}",
+            "{{.State.Running}}\t{{.State.ExitCode}}\t{{.State.Error}}",
             docker_name,
         ])
         .stdout(std::process::Stdio::piped())
@@ -88,11 +99,21 @@ pub fn inspect_container_exit(docker_name: &str) -> Result<Option<(Option<i32>, 
         return Ok(None);
     }
 
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let mut parts = raw.trim().splitn(2, '|');
+    Ok(parse_container_state(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn parse_container_state(output: &str) -> Option<ContainerState> {
+    let mut parts = output.trim().splitn(3, '\t');
+    let running = parts.next()?.trim().parse::<bool>().ok()?;
     let exit_code = parts.next().and_then(|s| s.trim().parse::<i32>().ok());
     let error = parts.next().unwrap_or("").trim().to_string();
-    Ok(Some((exit_code, error)))
+    Some(ContainerState {
+        running,
+        exit_code,
+        error,
+    })
 }
 
 pub fn inspect_container_usage(docker_name: &str) -> Result<Option<ContainerUsageStats>> {
@@ -191,4 +212,33 @@ pub(crate) fn blend_toward_bg(fg: (u8, u8, u8), bg: (u8, u8, u8), fg_weight: f32
 pub(crate) fn luma_u8((r, g, b): (u8, u8, u8)) -> u8 {
     let y = 0.2126 * (r as f32) + 0.7152 * (g as f32) + 0.0722 * (b as f32);
     y.round().clamp(0.0, 255.0) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ContainerState, parse_container_state};
+
+    #[test]
+    fn parse_container_state_preserves_running_containers_with_zero_exit_code() {
+        assert_eq!(
+            parse_container_state("true\t0\t\n"),
+            Some(ContainerState {
+                running: true,
+                exit_code: Some(0),
+                error: String::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_container_state_reads_stopped_container_diagnostics() {
+        assert_eq!(
+            parse_container_state("false\t137\tOOMKilled\n"),
+            Some(ContainerState {
+                running: false,
+                exit_code: Some(137),
+                error: "OOMKilled".to_string(),
+            })
+        );
+    }
 }

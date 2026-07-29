@@ -547,7 +547,11 @@ pub async fn run_service(
                 continue;
             }
             let buffer = terminal.backend().buffer().clone();
-            let frame = render_buffer_delta(last_remote_buffer.as_ref(), &buffer);
+            let frame = if item.full_frame {
+                render_buffer(&buffer)
+            } else {
+                render_buffer_delta(last_remote_buffer.as_ref(), &buffer)
+            };
             last_remote_buffer = Some(buffer);
             let _ = item.response_tx.send(frame);
         }
@@ -921,7 +925,9 @@ async fn event_loop(
                         let (pty_cols, pty_rows) =
                             (cols.saturating_sub(38).max(20), rows.saturating_sub(10).max(6));
                         for session in &mut app.sessions {
-                            let _ = session.resize(pty_rows, pty_cols);
+                            if !session.is_terminal_detached() {
+                                let _ = session.resize(pty_rows, pty_cols);
+                            }
                         }
                         needs_render = true;
                 }

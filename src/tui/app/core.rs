@@ -1,5 +1,11 @@
 use super::*;
 
+fn append_session_terminal(group: &mut TuiSessionGroup, session_idx: usize) {
+    if !group.terminal_indices.contains(&session_idx) {
+        group.terminal_indices.push(session_idx);
+    }
+}
+
 impl App {
     fn watched_rules_paths(cfg: &crate::config::Config) -> Vec<PathBuf> {
         let mut paths = Vec::with_capacity(cfg.workspaces.len() + 1);
@@ -385,6 +391,23 @@ impl App {
                     self.activities_for_session(session_idx),
                 ));
             }
+            // A session group can contain more than one terminal (for example,
+            // repeated launches of the same workspace/template). Keep the
+            // group row as the first terminal, then expose the remaining
+            // terminals as selectable child rows.
+            for session_pos in 1..group.terminal_indices.len() {
+                let Some(session_idx) = group.terminal_indices.get(session_pos).copied() else {
+                    continue;
+                };
+                if session_idx >= self.sessions.len() {
+                    continue;
+                }
+                items.push(SidebarItem::SessionTerminal(gi, session_pos));
+                items.extend(Self::sidebar_activity_items_for_session(
+                    session_idx,
+                    self.activities_for_session(session_idx),
+                ));
+            }
             if let Some(pi) = group.workspace_idx {
                 items.push(SidebarItem::Settings(pi));
             }
@@ -464,8 +487,7 @@ impl App {
 
     pub(crate) fn add_session_terminal(&mut self, session_group: usize, session_idx: usize) {
         if let Some(group) = self.session_groups.get_mut(session_group) {
-            group.terminal_indices.clear();
-            group.terminal_indices.push(session_idx);
+            append_session_terminal(group, session_idx);
         }
     }
 
@@ -542,7 +564,10 @@ impl App {
         let Some(session) = self.sessions.get(session_idx) else {
             return false;
         };
-        if session.is_exited() || self.session_is_loading(session_idx) {
+        if session.is_exited()
+            || session.is_terminal_detached()
+            || self.session_is_loading(session_idx)
+        {
             return false;
         }
         session.terminal_stable_for() >= std::time::Duration::from_secs(2)
@@ -897,7 +922,7 @@ impl App {
         let Some(session) = self.sessions.get(session_idx) else {
             return false;
         };
-        if session.is_exited() {
+        if session.is_exited() || session.is_terminal_detached() {
             return false;
         }
         let term = session.term.lock();
@@ -1317,5 +1342,28 @@ impl App {
                 true,
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TuiSessionGroup, append_session_terminal};
+
+    #[test]
+    fn appending_session_terminals_keeps_existing_indices() {
+        let mut group = TuiSessionGroup {
+            workspace_name: "Intent Kit".to_string(),
+            workspace_idx: Some(0),
+            template_name: "dev".to_string(),
+            template_idx: Some(0),
+            terminal_indices: Vec::new(),
+        };
+
+        append_session_terminal(&mut group, 0);
+        append_session_terminal(&mut group, 1);
+        append_session_terminal(&mut group, 2);
+        append_session_terminal(&mut group, 1);
+
+        assert_eq!(group.terminal_indices, vec![0, 1, 2]);
     }
 }

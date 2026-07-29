@@ -8,15 +8,18 @@ pub(crate) fn render_terminal(
     dimmed: bool,
     fullscreen: bool,
 ) {
-    let (term, container_id, tab_label, session_exited) = match app.sessions.get(session_idx) {
-        Some(s) => (
-            std::sync::Arc::clone(&s.term),
-            s.container_id.clone(),
-            s.tab_label(),
-            s.is_exited(),
-        ),
-        None => return,
-    };
+    let (term, container_id, tab_label, session_exited, terminal_detached, shell_command) =
+        match app.sessions.get(session_idx) {
+            Some(s) => (
+                std::sync::Arc::clone(&s.term),
+                s.container_id.clone(),
+                s.tab_label(),
+                s.is_exited(),
+                s.is_terminal_detached(),
+                s.shell_in_hint(),
+            ),
+            None => return,
+        };
 
     let focused = app.focus == Focus::Terminal;
     let in_scroll_mode = focused && app.scroll_mode;
@@ -87,8 +90,28 @@ pub(crate) fn render_terminal(
         render_terminal_border_hint(frame, content_area, terminal_fullscreen_hint(false));
     }
 
-    if let Some(session) = app.sessions.get_mut(session_idx) {
+    if let Some(session) = app.sessions.get_mut(session_idx)
+        && !terminal_detached
+    {
         let _ = session.resize(inner.height, inner.width);
+    }
+
+    if terminal_detached {
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "Terminal connection closed; container is still running.",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!("Reconnect from a host terminal: {shell_command}"),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+        return;
     }
 
     let mut term = term.lock();
@@ -141,6 +164,7 @@ pub(crate) fn render_session_detail(
     let mount_target = session.mount_target.clone();
     let shell_command = session.shell_in_hint();
     let exited = session.is_exited();
+    let terminal_detached = session.is_terminal_detached();
     let launched_secs = session.launched_at.elapsed().as_secs();
     let usage = if exited {
         None
@@ -188,9 +212,17 @@ pub(crate) fn render_session_detail(
         return;
     }
 
-    let status = if exited { "stopped" } else { "running" };
+    let status = if exited {
+        "stopped"
+    } else if terminal_detached {
+        "running (terminal detached)"
+    } else {
+        "running"
+    };
     let status_color = if exited {
         Color::DarkGray
+    } else if terminal_detached {
+        Color::Yellow
     } else {
         Color::Green
     };

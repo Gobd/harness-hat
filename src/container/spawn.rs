@@ -545,13 +545,15 @@ pub fn spawn(
     let window_size_arc = Arc::new(Mutex::new(window_size));
 
     let exited = Arc::new(AtomicBool::new(false));
+    let pty_exited = Arc::new(AtomicBool::new(false));
+    let terminal_detached = Arc::new(AtomicBool::new(false));
     let has_bell = Arc::new(AtomicBool::new(false));
     let bell_count = Arc::new(AtomicU64::new(0));
 
     let proxy = SessionEventProxy {
         sender: Arc::new(Mutex::new(None)),
         window_size: Arc::clone(&window_size_arc),
-        exited: Arc::clone(&exited),
+        pty_exited: Arc::clone(&pty_exited),
         has_bell: Arc::clone(&has_bell),
         bell_count: Arc::clone(&bell_count),
         default_fg,
@@ -583,7 +585,7 @@ pub fn spawn(
     }
     let _handle = event_loop.spawn();
 
-    let container_id = match read_container_id(&cidfile, &docker_run_name, &exited) {
+    let container_id = match read_container_id(&cidfile, &docker_run_name, &pty_exited) {
         Ok(id) => id,
         Err(error) => {
             let docker_output = {
@@ -622,9 +624,12 @@ pub fn spawn(
             notifier,
             window_size: window_size_arc,
             exited,
+            pty_exited,
+            terminal_detached,
             has_bell,
             bell_count,
             exit_reported: false,
+            pty_exit_reported: false,
             _scoped_proxy: scoped_proxy,
             _seed_tempfiles: seed_tempfiles,
             _env_tempfile: Some(env_file),

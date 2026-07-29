@@ -479,6 +479,7 @@ pub struct TuiFrameItem {
     pub width: u16,
     pub height: u16,
     pub input: Option<TuiInput>,
+    pub full_frame: bool,
     pub response_tx: oneshot::Sender<Vec<u8>>,
 }
 
@@ -488,6 +489,10 @@ pub struct TuiFrameRequest {
     pub height: u16,
     #[serde(default)]
     pub input: Option<TuiInput>,
+    /// The attached terminal starts with a blank alternate screen and cannot
+    /// apply a delta against the daemon's previous client's screen.
+    #[serde(default)]
+    pub full_frame: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -708,6 +713,7 @@ async fn tui_frame_handler(
         width: request.width,
         height: request.height,
         input: request.input,
+        full_frame: request.full_frame,
         response_tx,
     };
     if state.tui_tx.send(item).await.is_err() {
@@ -1200,6 +1206,7 @@ mod tests {
                 width: 80,
                 height: 24,
                 input: None,
+                full_frame: false,
             }),
         )
         .await;

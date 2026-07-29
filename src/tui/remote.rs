@@ -74,6 +74,7 @@ fn relay_loop(
     stdout: &mut io::Stdout,
 ) -> Result<()> {
     let mut needs_render = true;
+    let mut needs_full_frame = true;
     let mut last_frame: Vec<u8> = Vec::new();
     loop {
         let input = if poll_event(Duration::from_millis(50))? {
@@ -111,6 +112,7 @@ fn relay_loop(
                 width,
                 height,
                 input,
+                full_frame: needs_full_frame,
             })
             .send()
             .context("requesting daemon TUI frame")?;
@@ -132,6 +134,7 @@ fn relay_loop(
             write_frame(stdout, &frame)?;
             last_frame = frame.to_vec();
         }
+        needs_full_frame = false;
         needs_render = false;
     }
 }

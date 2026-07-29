@@ -232,6 +232,8 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                         |session| {
                             let (prefix, name_color) = if session.is_exited() {
                                 ("  ✗ ".to_string(), Color::DarkGray)
+                            } else if session.is_terminal_detached() {
+                                ("  ! ".to_string(), Color::Yellow)
                             } else if app.session_is_waiting(session_idx) {
                                 ("  ".to_string(), Color::Yellow)
                             } else {
@@ -284,6 +286,8 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                     let indent = sidebar_child_indent(app.session_depth(session_idx));
                     let (prefix, name_color) = if session.is_exited() {
                         (format!("{indent}✗"), Color::DarkGray)
+                    } else if session.is_terminal_detached() {
+                        (format!("{indent}!"), Color::Yellow)
                     } else if app.session_is_waiting(session_idx) {
                         (indent.to_string(), Color::Yellow)
                     } else {

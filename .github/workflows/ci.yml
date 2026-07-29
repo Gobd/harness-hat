@@ -26,3 +26,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Parse helper scripts without generating bytecode
         run: python3 -c 'import ast, pathlib; [ast.parse(path.read_text(), filename=str(path)) for path in pathlib.Path("docker/scripts").glob("*.py")]'
+
+  docker-images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the shared base image
+        run: docker build -t harness-hat-base:local -f docker/harness-hat-base.dockerfile docker
+      - name: Build every language image
+        run: |
+          for template in default typescript python go rust kotlin php csharp; do
+            docker build -t "harness-hat-${template}:ci" -f "docker/${template}.dockerfile" docker
+          done
+      - name: Smoke-test the installed toolchains
+        run: |
+          docker run --rm --entrypoint dotnet harness-hat-csharp:ci --list-sdks
+          docker run --rm --entrypoint bun harness-hat-typescript:ci --version
+          docker run --rm --entrypoint uv harness-hat-python:ci --version
+          docker run --rm --entrypoint go harness-hat-go:ci version
+          docker run --rm --entrypoint rustc harness-hat-rust:ci --version
+          docker run --rm --entrypoint kotlinc harness-hat-kotlin:ci -version

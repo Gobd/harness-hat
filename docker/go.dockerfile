@@ -3,6 +3,11 @@
 # Build after harness-hat-base:local:
 #   docker build -t harness-hat-go:local -f docker/go.dockerfile .
 
+# Go's official manifest is pinned and selects the matching target
+# architecture. This avoids maintaining separate release URLs and hashes.
+ARG GO_IMAGE=golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651
+FROM ${GO_IMAGE} AS go
+
 FROM harness-hat-base:local
 
 USER root
@@ -28,47 +33,20 @@ RUN set -eu; \
       direnv; \
     rm -rf /var/lib/apt/lists/*
 
-# Pinned Go toolchain (H5): the official tarball, verified against the sha256
-# published on go.dev/dl, replaces Ubuntu's golang-go (whose Go is too old for
-# the pinned tool versions below). Bump by editing the ARGs and rebuilding.
-ARG GO_VERSION=1.26.5
-ARG GO_SHA256_AMD64=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053
-ARG GO_SHA256_ARM64=fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49
-ARG TARGETARCH
-RUN set -eu; \
-    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
-      amd64|x86_64) go_arch="amd64"; go_sha="${GO_SHA256_AMD64}" ;; \
-      arm64|aarch64) go_arch="arm64"; go_sha="${GO_SHA256_ARM64}" ;; \
-      *) echo "unsupported Go architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL -o /tmp/go.tar.gz \
-      "https://go.dev/dl/go${GO_VERSION}.linux-${go_arch}.tar.gz"; \
-    echo "${go_sha}  /tmp/go.tar.gz" | sha256sum -c -; \
-    tar -C /usr/local -xzf /tmp/go.tar.gz; \
-    rm -f /tmp/go.tar.gz; \
-    /usr/local/go/bin/go version
+COPY --from=go /usr/local/go /usr/local/go
+RUN go version
 
 RUN set -eu; \
     mkdir -p "${GOPATH}/bin"; \
     chown -R coder:coder "${GOPATH}"
 
-# gofumpt: stricter gofmt, pinned release binary verified against sha256.
+# gofumpt: stricter gofmt. `go install` verifies the exact module version via
+# the public checksum database and builds it for the target architecture.
 ARG GOFUMPT_VERSION=0.10.0
-ARG GOFUMPT_SHA256_AMD64=48ee398ec72afdaca6accb70f5ed741349d5dcccb52c5bb4c4469d698980b186
-ARG GOFUMPT_SHA256_ARM64=5d239f93b1ed2dfe74d39b25112bb770a04f6581f986d4b4f5d380521e12ca61
 RUN set -eu; \
-    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
-        amd64|x86_64)  gf_arch="amd64"; gf_sha="${GOFUMPT_SHA256_AMD64}" ;; \
-        arm64|aarch64) gf_arch="arm64"; gf_sha="${GOFUMPT_SHA256_ARM64}" ;; \
-        *) echo "unsupported gofumpt architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL \
-        -o /tmp/gofumpt \
-        "https://github.com/mvdan/gofumpt/releases/download/v${GOFUMPT_VERSION}/gofumpt_v${GOFUMPT_VERSION}_linux_${gf_arch}"; \
-    echo "${gf_sha}  /tmp/gofumpt" | sha256sum -c -; \
-    install -m 0755 /tmp/gofumpt /usr/local/bin/gofumpt; \
-    rm -f /tmp/gofumpt; \
-    gofumpt --version
+    GOBIN=/usr/local/bin go install "mvdan.cc/gofumpt@v${GOFUMPT_VERSION}"; \
+    gofumpt --version; \
+    chown -R coder:coder "${GOPATH}"
 
 USER coder
 

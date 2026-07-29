@@ -5,7 +5,9 @@ mod helpers;
 mod spawn;
 
 pub use core::*;
-pub use helpers::{ContainerUsageStats, inspect_container_exit, inspect_container_usage};
+pub use helpers::{
+    ContainerState, ContainerUsageStats, inspect_container_state, inspect_container_usage,
+};
 pub(crate) use helpers::{docker_image_exists, read_container_id};
 pub use spawn::*;
 

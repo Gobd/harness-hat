@@ -79,10 +79,16 @@ pub struct ContainerSession {
     pub term: Arc<FairMutex<Term<SessionEventProxy>>>,
     pub(crate) notifier: Notifier,
     pub(crate) window_size: Arc<Mutex<WindowSize>>,
+    /// The container itself has stopped. This is deliberately distinct from a
+    /// lost `docker run` PTY: Docker can keep the container running after the
+    /// attach client goes away.
     pub exited: Arc<AtomicBool>,
+    pub(crate) pty_exited: Arc<AtomicBool>,
+    pub(crate) terminal_detached: Arc<AtomicBool>,
     pub has_bell: Arc<AtomicBool>,
     pub bell_count: Arc<AtomicU64>,
     pub exit_reported: bool,
+    pub pty_exit_reported: bool,
     pub(crate) _scoped_proxy: Option<crate::proxy::ScopedProxyListener>,
     /// Private per-session copies of seeded mounts (e.g. `.claude.json`), kept
     /// alive for the container's lifetime and cleaned up on drop.
@@ -98,7 +104,7 @@ pub struct ContainerSession {
 pub struct SessionEventProxy {
     pub(crate) sender: Arc<Mutex<Option<alacritty_terminal::event_loop::EventLoopSender>>>,
     pub(crate) window_size: Arc<Mutex<WindowSize>>,
-    pub(crate) exited: Arc<AtomicBool>,
+    pub(crate) pty_exited: Arc<AtomicBool>,
     pub(crate) has_bell: Arc<AtomicBool>,
     pub(crate) bell_count: Arc<AtomicU64>,
     pub(crate) default_fg: alacritty_terminal::vte::ansi::Rgb,
@@ -114,8 +120,12 @@ impl EventListener for SessionEventProxy {
                 self.has_bell.store(true, Ordering::Relaxed);
                 self.bell_count.fetch_add(1, Ordering::Relaxed);
             }
+            // This only says the local `docker run` client / PTY went away.
+            // It does *not* prove Docker stopped the container; the TUI
+            // reconciles it against `docker inspect` before marking a session
+            // exited.
             Event::Exit | Event::ChildExit(_) => {
-                self.exited.store(true, Ordering::Relaxed);
+                self.pty_exited.store(true, Ordering::Relaxed);
             }
             Event::PtyWrite(s) => {
                 if let Some(tx) = sender {
@@ -203,6 +213,20 @@ impl ContainerSession {
     pub fn is_exited(&self) -> bool {
         self.exited.load(Ordering::Relaxed)
     }
+
+    /// Whether Docker still has this container running but the manager's
+    /// original terminal attachment has gone away.
+    pub fn is_terminal_detached(&self) -> bool {
+        self.terminal_detached.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn pty_exited(&self) -> bool {
+        self.pty_exited.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn mark_terminal_detached(&self) {
+        self.terminal_detached.store(true, Ordering::Relaxed);
+    }
     /// Checks if the terminal has received a bell event.
     pub fn has_bell(&self) -> bool {
         self.has_bell.load(Ordering::Relaxed)
@@ -217,6 +241,9 @@ impl ContainerSession {
     }
     /// Sends input bytes to the container's PTY, mimicking user input.
     pub fn send_input(&self, bytes: Vec<u8>) {
+        if self.is_terminal_detached() {
+            return;
+        }
         if let Ok(mut last_input_at) = self.last_input_at.lock() {
             *last_input_at = Some(Instant::now());
         }
@@ -621,7 +648,7 @@ mod tests {
         let proxy = super::SessionEventProxy {
             sender: Arc::new(Mutex::new(None)),
             window_size: Arc::new(Mutex::new(super::window_size(24, 80))),
-            exited: Arc::new(AtomicBool::new(false)),
+            pty_exited: Arc::new(AtomicBool::new(false)),
             has_bell: has_bell.clone(),
             bell_count: bell_count.clone(),
             default_fg: Rgb { r: 0, g: 0, b: 0 },
@@ -634,6 +661,25 @@ mod tests {
         proxy.send_event(Event::Bell);
         assert!(has_bell.load(Ordering::Relaxed));
         assert_eq!(bell_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn session_event_proxy_records_pty_exit_separately_from_container_state() {
+        let pty_exited = Arc::new(AtomicBool::new(false));
+        let proxy = super::SessionEventProxy {
+            sender: Arc::new(Mutex::new(None)),
+            window_size: Arc::new(Mutex::new(super::window_size(24, 80))),
+            pty_exited: pty_exited.clone(),
+            has_bell: Arc::new(AtomicBool::new(false)),
+            bell_count: Arc::new(AtomicU64::new(0)),
+            default_fg: Rgb { r: 0, g: 0, b: 0 },
+            default_bg: Rgb { r: 0, g: 0, b: 0 },
+            grayscale_palette: false,
+        };
+
+        proxy.send_event(Event::Exit);
+
+        assert!(pty_exited.load(Ordering::Relaxed));
     }
 
     #[derive(Clone)]

@@ -1,21 +1,30 @@
 # Changelog
 
-## 0.8.4 Future
+## 0.8.4 July 29, 2026
 
 ### Added
 
 - Added the `hht wp` shortcut for the `hht workspace` command.
 - Added `[[localhost_forwards]]` support to `harness-rules.toml`, including workspace-specific overrides for configured container forwards.
 
-## Fixed
+### Changed
+
+- The TUI now retains and exposes multiple terminal sessions launched for the same workspace and template as selectable child rows.
+- Docker templates now source .NET, Bun, uv, Go, Rust, Temurin, and Gradle from pinned official multi-architecture image manifests instead of maintaining per-CPU release URLs and checksums. `gofumpt` is installed through its checksum-verified Go module.
+- CI now rebuilds every built-in language image and smoke-tests the installed toolchains, catching Docker template regressions before release.
+
+### Fixed
+
 - Remembering a network or host-command decision no longer marks a rules file with a selected workspace template as externally modified. The daemon keeps the canonical policy fingerprint trusted, so proxy traffic continues for existing containers after a remembered choice.
+- A lost manager-side `docker run` terminal connection no longer marks a still-running container as stopped. The session remains visible as terminal-detached and shows the `hht shell` reconnection command.
+- Daemon-attached `hht` clients now receive a complete first terminal frame instead of applying a stale screen delta.
 
 
-## 0.8.3 July 27, 2024
+## 0.8.3 July 27, 2026
 
 - Resolved CI/CD Failures.
 
-## 0.8.2 July 27, 2024
+## 0.8.2 July 27, 2026
 
 ### Changed
 - Forwarded terminal environment variables (`TERM`, `COLORTERM`, `COLORFGBG`) into `hht shell` container exec sessions, with a fallback `TERM=xterm-256color` when `TERM` is unset.

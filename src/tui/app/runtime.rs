@@ -284,6 +284,50 @@ impl App {
         }
 
         for i in (0..self.sessions.len()).rev() {
+            // The embedded terminal owns a `docker run -it` client. That
+            // client can disconnect while its container survives, so an
+            // Alacritty PTY exit is only a signal to inspect Docker, not proof
+            // that the session itself ended.
+            if self.sessions[i].pty_exited()
+                && !self.sessions[i].is_exited()
+                && !self.sessions[i].is_terminal_detached()
+            {
+                let label = self.sessions[i].tab_label();
+                let docker_name = self.sessions[i].docker_name.clone();
+                match crate::container::inspect_container_state(&docker_name) {
+                    Ok(Some(state)) if state.running => {
+                        self.sessions[i].mark_terminal_detached();
+                        self.push_log(
+                            format!(
+                                "terminal connection for '{label}' closed; container is still running (reconnect with {})",
+                                self.sessions[i].shell_in_hint()
+                            ),
+                            true,
+                        );
+                        changed = true;
+                        continue;
+                    }
+                    Ok(Some(_)) | Ok(None) => {
+                        self.sessions[i]
+                            .exited
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(error) => {
+                        if !self.sessions[i].pty_exit_reported {
+                            self.sessions[i].pty_exit_reported = true;
+                            self.push_log(
+                                format!(
+                                    "terminal connection for '{label}' closed; could not verify container state yet: {error}"
+                                ),
+                                true,
+                            );
+                            changed = true;
+                        }
+                        continue;
+                    }
+                }
+            }
+
             if !self.sessions[i].is_exited() {
                 continue;
             }
@@ -292,16 +336,17 @@ impl App {
                 changed = true;
                 self.sessions[i].exit_reported = true;
                 let label = self.sessions[i].tab_label();
-                match crate::container::inspect_container_exit(&self.sessions[i].docker_name) {
-                    Ok(Some((exit_code, error))) => {
-                        let suffix = exit_code
+                match crate::container::inspect_container_state(&self.sessions[i].docker_name) {
+                    Ok(Some(state)) => {
+                        let suffix = state
+                            .exit_code
                             .map(|code| format!(" (exit code {code})"))
                             .unwrap_or_default();
-                        if error.is_empty() {
+                        if state.error.is_empty() {
                             self.push_log(format!("{label} exited immediately{suffix}"), true);
                         } else {
                             self.push_log(
-                                format!("{label} exited immediately{suffix}: {error}"),
+                                format!("{label} exited immediately{suffix}: {}", state.error),
                                 true,
                             );
                         }

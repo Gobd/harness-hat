@@ -139,4 +139,3 @@ allowlist = [
     "domain=code.claude.com",
     "domain=advisories.gitlab.com",
 ]
-denylist = ["domain=160.79.104.10"]
