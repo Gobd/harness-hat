@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # harness-hat base image — shared foundation for all language images.
 # After modifying this file, rebuild with: hht rebuild
 # (This also rebuilds every configured Dockerfile template that extends it.)
