@@ -115,6 +115,8 @@ pub enum DialogCommand {
     HostdoApproval {
         #[arg(long, value_name = "COMMAND")]
         command: String,
+        #[arg(long, value_name = "REASON")]
+        reason: Option<String>,
         #[arg(long, value_name = "CWD")]
         cwd: Option<String>,
         #[arg(long, value_name = "IMAGE")]

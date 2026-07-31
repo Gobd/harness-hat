@@ -3,7 +3,7 @@ use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -130,6 +130,8 @@ pub struct ExecRequest {
     #[serde(default, alias = "image")]
     pub image: Option<String>,
     #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub detach: bool,
@@ -155,6 +157,7 @@ pub struct PendingItem {
     pub timeout_secs: u64,
     pub cwd: PathBuf,
     pub rule_cwd: PathBuf,
+    pub reason: Option<String>,
     pub matched_command: Option<String>,
     pub response_tx: Option<oneshot::Sender<ApprovalDecision>>,
 }
@@ -480,7 +483,16 @@ pub struct TuiFrameItem {
     pub height: u16,
     pub input: Option<TuiInput>,
     pub full_frame: bool,
-    pub response_tx: oneshot::Sender<Vec<u8>>,
+    pub response_tx: oneshot::Sender<TuiFrameResponse>,
+}
+
+/// A rendered frame plus whether the daemon invalidated the client's cached
+/// screen and produced a complete repaint. The flag is sent as an HTTP header
+/// so an attached client writes the frame even when its bytes match its last
+/// frame.
+pub struct TuiFrameResponse {
+    pub frame: Vec<u8>,
+    pub full_frame: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -716,18 +728,39 @@ async fn tui_frame_handler(
         full_frame: request.full_frame,
         response_tx,
     };
-    if state.tui_tx.send(item).await.is_err() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "tui_unavailable".into(),
-                reason: "the daemon TUI is shutting down".into(),
-            }),
-        )
-            .into_response();
+    match state.tui_tx.try_send(item) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "tui_busy".into(),
+                    reason: "the daemon TUI is busy rendering another frame".into(),
+                }),
+            )
+                .into_response();
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "tui_unavailable".into(),
+                    reason: "the daemon TUI is shutting down".into(),
+                }),
+            )
+                .into_response();
+        }
     }
     match tokio::time::timeout(CONTROL_HANDLER_TIMEOUT, response_rx).await {
-        Ok(Ok(frame)) => frame.into_response(),
+        Ok(Ok(frame)) => {
+            let mut response = frame.frame.into_response();
+            if frame.full_frame {
+                response
+                    .headers_mut()
+                    .insert("x-harness-hat-full-frame", HeaderValue::from_static("1"));
+            }
+            response
+        }
         Ok(Err(_)) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
@@ -1211,6 +1244,41 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn tui_frame_returns_busy_when_render_queue_is_full() {
+        let (tui_tx, _tui_rx) = mpsc::channel(1);
+        let (response_tx, _response_rx) = oneshot::channel();
+        tui_tx
+            .try_send(TuiFrameItem {
+                width: 80,
+                height: 24,
+                input: None,
+                full_frame: false,
+                response_tx,
+            })
+            .expect("fill TUI queue");
+
+        let mut server_state =
+            test_server_state(SessionRegistry::default(), ExecJobRegistry::default());
+        server_state.tui_tx = tui_tx;
+        let response = tui_frame_handler(
+            State(Arc::new(server_state)),
+            HeaderMap::from_iter([(
+                axum::http::header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer token"),
+            )]),
+            Json(TuiFrameRequest {
+                width: 80,
+                height: 24,
+                input: None,
+                full_frame: false,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

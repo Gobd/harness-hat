@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.5 Future
+
+### Added
+
+- Added `hostdo --reason <text>` support so approval prompts can carry operator context; when remembered, the reason is persisted in `harness-rules.toml` but is not used in matching.
+
+### Changed
+
+- Hostdo command persistence no longer treats timeout as part of approval matching semantics; exact matches still use `argv + image`, while timeout and reason are stored only for context.
+
+### Fixed
+
+- Attached `hht` clients now retry transient daemon TUI backpressure instead of
+  exiting with a generic `/tui/frame` operation timeout. The daemon reports a
+  bounded render queue as `tui_busy` rather than leaving the HTTP request
+  waiting indefinitely.
+- Entering the terminal view in an attached TUI now forces a complete screen
+  repaint, preventing a stale or blank delta-rendered screen.
+- A lost manager-side `docker run` terminal connection no longer marks a still-running container as stopped. The session remains visible as terminal-detached and shows the `hht shell` reconnection command.
+
 ## 0.8.4 July 29, 2026
 
 ### Added
@@ -16,7 +36,6 @@
 ### Fixed
 
 - Remembering a network or host-command decision no longer marks a rules file with a selected workspace template as externally modified. The daemon keeps the canonical policy fingerprint trusted, so proxy traffic continues for existing containers after a remembered choice.
-- A lost manager-side `docker run` terminal connection no longer marks a still-running container as stopped. The session remains visible as terminal-detached and shows the `hht shell` reconnection command.
 - Daemon-attached `hht` clients now receive a complete first terminal frame instead of applying a stale screen delta.
 
 

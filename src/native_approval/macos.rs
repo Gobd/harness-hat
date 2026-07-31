@@ -141,6 +141,9 @@ pub fn prompt_hostdo_approval(req: &HostdoApprovalRequest) -> Outcome {
 
 fn format_hostdo_body(req: &HostdoApprovalRequest) -> String {
     let mut body = String::new();
+    if let Some(reason) = &req.reason {
+        body.push_str(&format!("Reason: {reason}\n"));
+    }
     body.push_str(&format!("Command: {}\n", req.command));
     if let Some(cwd) = &req.cwd {
         body.push_str(&format!("CWD: {cwd}\n"));

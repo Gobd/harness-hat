@@ -272,6 +272,7 @@ pub(super) async fn exec_handler(
         timeout_secs,
         cwd: host_cwd.clone(),
         rule_cwd: PathBuf::from(&req.cwd),
+        reason: req.reason.clone(),
         matched_command,
         response_tx: Some(response_tx),
     };

@@ -28,9 +28,18 @@ pub fn prompt_hostdo_approval(req: &HostdoApprovalRequest) -> Outcome {
         .as_deref()
         .map(|workspace| format!("\nWorkspace: {workspace}"))
         .unwrap_or_default();
+    let command = format!("\nCommand: {}", req.command);
+    let reason = req
+        .reason
+        .as_deref()
+        .map(|reason| format!("\nReason: {reason}"))
+        .unwrap_or_default();
     approval_outcome(
         "Harness Hat: Host Command Approval",
-        format!("Allow this host command?\n{}{}", req.command, workspace),
+        format!(
+            "Allow this host command?\n{}{}{}",
+            reason, command, workspace,
+        ),
     )
 }
 

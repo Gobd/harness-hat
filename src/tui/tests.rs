@@ -1,5 +1,6 @@
 use super::{
-    App, ContainerPickerState, SidebarItem, move_wrapping_cursor, should_handle_key_event,
+    App, ContainerPickerState, Focus, SidebarItem, move_wrapping_cursor,
+    should_force_remote_full_frame, should_handle_key_event,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -46,6 +47,25 @@ fn key_release_events_are_not_handled_as_repeated_input() {
     assert!(should_handle_key_event(&key(KeyEventKind::Press)));
     assert!(should_handle_key_event(&key(KeyEventKind::Repeat)));
     assert!(!should_handle_key_event(&key(KeyEventKind::Release)));
+}
+
+#[test]
+fn entering_terminal_focus_forces_a_complete_remote_frame() {
+    assert!(should_force_remote_full_frame(
+        Some(&Focus::Sidebar),
+        &Focus::Terminal,
+        false,
+    ));
+    assert!(!should_force_remote_full_frame(
+        Some(&Focus::Terminal),
+        &Focus::Terminal,
+        false,
+    ));
+    assert!(should_force_remote_full_frame(
+        Some(&Focus::Sidebar),
+        &Focus::Sidebar,
+        true,
+    ));
 }
 
 #[test]

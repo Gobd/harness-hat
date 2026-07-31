@@ -12,8 +12,8 @@ Environment variables:
   HARNESS_HAT_SESSION_TOKEN  Per-session token injected by harness-hat     (required)
 
 Usage:
-  hostdo output [--image <docker-image>] [--timeout <seconds>] <command> [args...]
-  hostdo run [--image <docker-image>] [--timeout <seconds>] <command> [args...]
+  hostdo output [--image <docker-image>] [--timeout <seconds>] [--reason <text>] <command> [args...]
+  hostdo run [--image <docker-image>] [--timeout <seconds>] [--reason <text>] <command> [args...]
   hostdo list [--running] [--json]
   hostdo status <job-id>
   hostdo tail <job-id> [--rows <lines>|--all] [--stdout|--stderr] [--json]
@@ -45,8 +45,8 @@ Routes commands through the harness-hat host execution server for policy
 enforcement and developer approval.
 
 Usage:
-  hostdo output [--image <docker-image>] [--timeout <seconds>] <command> [args...]
-  hostdo run [--image <docker-image>] [--timeout <seconds>] <command> [args...]
+  hostdo output [--image <docker-image>] [--timeout <seconds>] [--reason <text>] <command> [args...]
+  hostdo run [--image <docker-image>] [--timeout <seconds>] [--reason <text>] <command> [args...]
   hostdo list [--running] [--json]
   hostdo status <job-id>
   hostdo tail <job-id> [--rows <lines>|--all] [--stdout|--stderr] [--json]
@@ -100,6 +100,10 @@ Options:
       Request a command timeout in seconds. The manager may cap or deny this
       based on its configured limits and matching hostdo rules.
 
+  --reason <text>
+      Provide a short explanation for why this host command is needed.
+      The approval UI shows this to the developer.
+
   --help
       Show this help text and exit.
 
@@ -126,6 +130,8 @@ Host-side commands:
     you to run against a Docker image or containerized runner.
   - `hostdo` requests are policy checked against the `[hostdo]` rules below
     and may prompt the developer.
+    Matching is exact on argv + image only; timeout and reason are shown for
+    context and stored for review, but do not affect matching.
   - Read this workspace's `harness-rules.toml` for the current allowlisted
     commands, aliases, and any project-specific rule updates.
   - Prefer existing auto-approved `hostdo` commands or
@@ -147,6 +153,8 @@ Rule model:
     argv = ["cargo", "test"]  # run inside container with `hostdo run cargo test`
     cwd = "$WORKSPACE"        # execution cwd only, not part of approval matching
     timeout_secs = 60
+    # Optional context persisted for operator review; does not affect matching.
+    reason = "run cargo test for dependency drift checks requested by agent"
     approval_mode = "auto"
 
   Short-lived Docker runner (exact argv + image match, auto-approved):
@@ -155,6 +163,8 @@ Rule model:
     image = "node:20"
     cwd = "$WORKSPACE"
     timeout_secs = 60
+    # Optional context persisted for operator review; does not affect matching.
+    reason = "run npm tests in container for repo parity"
     approval_mode = "auto"
 
   Command alias (agent sends `hostdo run tests`, expands server-side):
@@ -203,6 +213,7 @@ def _parse_positive_int(raw: str, label: str) -> int:
 
 def _parse_hostdo_args(argv: list[str]):
     image = None
+    reason = None
     timeout_secs = None
     command_start = 0
 
@@ -236,6 +247,17 @@ def _parse_hostdo_args(argv: list[str]):
             timeout_secs = _parse_positive_int(arg.split("=", 1)[1], "--timeout")
             command_start += 1
             continue
+        if arg == "--reason":
+            if command_start + 1 >= len(argv):
+                print("hostdo: --reason requires text", file=sys.stderr)
+                sys.exit(1)
+            reason = argv[command_start + 1]
+            command_start += 2
+            continue
+        if arg.startswith("--reason="):
+            reason = arg.split("=", 1)[1]
+            command_start += 1
+            continue
         break
 
     command_argv = argv[command_start:]
@@ -248,7 +270,7 @@ def _parse_hostdo_args(argv: list[str]):
         print("run `hostdo --help` for detailed usage and policy guidance", file=sys.stderr)
         sys.exit(1)
 
-    return command_argv, image, timeout_secs
+    return command_argv, image, timeout_secs, reason
 
 
 def _no_proxy_opener() -> urllib.request.OpenerDirector:
@@ -954,7 +976,7 @@ def _run_detached(
     session_token: str,
     argv: list[str],
 ) -> None:
-    command_argv, image, timeout_secs = _parse_hostdo_args(argv)
+    command_argv, image, timeout_secs, reason = _parse_hostdo_args(argv)
     try:
         cwd = os.getcwd()
     except OSError as exc:
@@ -970,6 +992,8 @@ def _run_detached(
         body_data["image"] = image
     if timeout_secs is not None:
         body_data["timeout_secs"] = timeout_secs
+    if reason is not None:
+        body_data["reason"] = reason
 
     data, selected_base = _json_request_with_fallback(
         opener,
@@ -1007,7 +1031,7 @@ def _run_inline(
     session_token: str,
     argv: list[str],
 ) -> None:
-    command_argv, image, timeout_secs = _parse_hostdo_args(argv)
+    command_argv, image, timeout_secs, reason = _parse_hostdo_args(argv)
     try:
         cwd = os.getcwd()
     except OSError as exc:
@@ -1023,6 +1047,8 @@ def _run_inline(
         body_data["image"] = image
     if timeout_secs is not None:
         body_data["timeout_secs"] = timeout_secs
+    if reason is not None:
+        body_data["reason"] = reason
 
     data, selected_base = _json_request_with_fallback(
         opener,

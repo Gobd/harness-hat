@@ -15,6 +15,7 @@ impl App {
             return;
         }
         let workspace_name = self.pending_exec[idx].workspace_name.clone();
+        let reason = self.pending_exec[idx].reason.clone();
         if let Err(error) = self
             .config
             .ensure_rules_trusted_for_workspace(Some(&workspace_name))
@@ -41,6 +42,7 @@ impl App {
                     image.as_deref(),
                     timeout_secs,
                     &cwd,
+                    reason.as_deref(),
                     NetworkPolicy::Auto,
                 ) {
                     Ok(()) => {
@@ -97,6 +99,7 @@ impl App {
         let image = item.image.clone();
         let timeout_secs = item.timeout_secs;
         let argv = item.argv.clone();
+        let reason = item.reason.clone();
         let project = item.workspace_name.clone();
         let rule_cwd = item.rule_cwd.clone();
         if let Err(error) = self
@@ -118,6 +121,7 @@ impl App {
                 image.as_deref(),
                 timeout_secs,
                 &cwd,
+                reason.as_deref(),
                 NetworkPolicy::Deny,
             ) {
                 Ok(()) => self.push_log(
@@ -368,6 +372,7 @@ impl App {
         image: Option<&str>,
         timeout_secs: u64,
         cwd: &str,
+        reason: Option<&str>,
         approval_mode: NetworkPolicy,
     ) -> Result<()> {
         let mut rules = crate::rules::load(rules_path)
@@ -391,6 +396,10 @@ impl App {
                 existing.timeout_secs = timeout_secs;
                 changed = true;
             }
+            if reason.is_some_and(|reason| existing.reason.as_deref() != Some(reason)) {
+                existing.reason = reason.map(str::to_string);
+                changed = true;
+            }
         } else {
             rules.hostdo.commands.push(crate::rules::HostdoCommand {
                 name: None,
@@ -399,6 +408,7 @@ impl App {
                 cwd: Some(cwd.to_string()),
                 timeout_secs,
                 approval_mode,
+                reason: reason.map(str::to_string),
                 env_allowlist: None,
             });
             changed = true;

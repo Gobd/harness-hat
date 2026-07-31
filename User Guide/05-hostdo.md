@@ -22,6 +22,7 @@ Generally agents will be using `hostdo`, but you are free to use it as well insi
 # Synchronous command; prints output and returns the command's exit code.
 # this runs `cargo test` on your workstation at the workspace root.
 hostdo output cargo test
+hostdo output --reason "run targeted tests requested by user" cargo test
 
 # Long-running command; prints a job ID.
 hostdo run cargo test
@@ -42,6 +43,8 @@ Use `hostdo output` by default. Use `hostdo run` for a job that needs later stat
 ## Approval and remembered rules
 
 `hostdo` checks the global and project `[hostdo]` sections. An unknown command follows `default_policy`, normally `prompt`. A prompt is an approval request, not an automatic permission grant. Review the command, working directory, image, and timeout before allowing it.
+
+Agents can optionally pass `--reason "<text>"` to `hostdo output`/`run` when requesting approval. The reason is persisted in `harness-rules.toml` for review context, but it is intentionally not part of matching: persisted hostdo matching is still exact `argv + image` only.
 
 Choose a remembered decision only after reviewing the command, working directory, image, and timeout. Harness Hat writes the resulting narrow project rule automatically. Team-managed policy can further restrict the environment inherited by direct host commands; image-runner commands already start from a clean environment.
 

@@ -512,6 +512,7 @@ pub async fn run_service(
     tui_events: crate::server::TuiEventBroker,
 ) -> Result<()> {
     let mut last_remote_buffer: Option<ratatui::buffer::Buffer> = None;
+    let mut last_remote_focus: Option<Focus> = None;
     loop {
         let channels_changed = app.drain_channels();
         app.tick_base_rules_file_watch();
@@ -529,34 +530,53 @@ pub async fn run_service(
             if let Some(input) = item.input {
                 apply_remote_input(&mut app, input);
             }
+            let full_frame = should_force_remote_full_frame(
+                last_remote_focus.as_ref(),
+                &app.focus,
+                item.full_frame,
+            );
+            last_remote_focus = Some(app.focus.clone());
             let mut terminal = match Terminal::new(TestBackend::new(item.width, item.height)) {
                 Ok(terminal) => terminal,
                 Err(error) => {
                     tracing::error!(%error, "attached TUI backend initialization failed");
-                    let _ = item
-                        .response_tx
-                        .send(render_relay_error(&error.to_string()));
+                    let _ = item.response_tx.send(crate::server::TuiFrameResponse {
+                        frame: render_relay_error(&error.to_string()),
+                        full_frame: true,
+                    });
                     continue;
                 }
             };
             if let Err(error) = terminal.draw(|frame| render::render(frame, &mut app)) {
                 tracing::error!(%error, "attached TUI render failed");
-                let _ = item
-                    .response_tx
-                    .send(render_relay_error(&error.to_string()));
+                let _ = item.response_tx.send(crate::server::TuiFrameResponse {
+                    frame: render_relay_error(&error.to_string()),
+                    full_frame: true,
+                });
                 continue;
             }
             let buffer = terminal.backend().buffer().clone();
-            let frame = if item.full_frame {
+            let frame = if full_frame {
                 render_buffer(&buffer)
             } else {
                 render_buffer_delta(last_remote_buffer.as_ref(), &buffer)
             };
             last_remote_buffer = Some(buffer);
-            let _ = item.response_tx.send(frame);
+            let _ = item
+                .response_tx
+                .send(crate::server::TuiFrameResponse { frame, full_frame });
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
+}
+
+fn should_force_remote_full_frame(
+    previous_focus: Option<&Focus>,
+    current_focus: &Focus,
+    requested_full_frame: bool,
+) -> bool {
+    requested_full_frame
+        || (*current_focus == Focus::Terminal && previous_focus != Some(&Focus::Terminal))
 }
 
 fn render_buffer_delta(

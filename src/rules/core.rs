@@ -98,6 +98,8 @@ pub struct HostdoCommand {
     pub timeout_secs: u64,
     #[serde(default)]
     pub approval_mode: NetworkPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// When set, the host command runs from a cleared environment containing
     /// only a small base set (PATH, HOME, ...) plus the variables named here,
     /// instead of inheriting the manager's full environment (M3). Only valid
@@ -121,6 +123,7 @@ impl Default for HostdoCommand {
             cwd: None,
             timeout_secs: default_hostdo_timeout_secs(),
             approval_mode: NetworkPolicy::Prompt,
+            reason: None,
             env_allowlist: None,
         }
     }
@@ -707,11 +710,14 @@ fn validate_hostdo_rules(entries: &[HostdoCommand], path: &Path) -> Result<()> {
 ///
 /// The command is deduplicated by `argv + image` and forced to
 /// `approval_mode = "auto"`.
+/// Matching still depends on `argv + image` only; `timeout_secs` and `reason` are
+/// persisted for review context and do not gate future auto-approvals.
 pub fn append_hostdo_auto_approval(
     path: &Path,
     argv: &[String],
     image: Option<&str>,
     timeout_secs: u64,
+    reason: Option<&str>,
 ) -> Result<bool> {
     if argv.is_empty() {
         return Ok(false);
@@ -734,6 +740,10 @@ pub fn append_hostdo_auto_approval(
             existing.timeout_secs = timeout_secs;
             changed = true;
         }
+        if reason.is_some_and(|reason| existing.reason.as_deref() != Some(reason)) {
+            existing.reason = reason.map(str::to_string);
+            changed = true;
+        }
     } else {
         rules.hostdo.commands.push(HostdoCommand {
             name: None,
@@ -742,6 +752,7 @@ pub fn append_hostdo_auto_approval(
             cwd: Some("$WORKSPACE".to_string()),
             timeout_secs,
             approval_mode: NetworkPolicy::Auto,
+            reason: reason.map(str::to_string),
             env_allowlist: None,
         });
         changed = true;
@@ -833,6 +844,8 @@ const RULES_FILE_HEADER: &str = "\
 #   argv = [\"cargo\", \"test\"] # run inside container with `hostdo run cargo test`
 #   cwd = \"$WORKSPACE\"         # execution cwd only, not part of approval matching
 #   timeout_secs = 60
+#   # Optional context persisted for operator review; does not affect matching.
+#   reason = \"run package index refresh after dependency update\"
 #   approval_mode = \"auto\"
 #
 # Short-lived Docker runner (exact argv + image match, auto-approved):
@@ -841,6 +854,8 @@ const RULES_FILE_HEADER: &str = "\
 #   image = \"node:20\"
 #   cwd = \"$WORKSPACE\"
 #   timeout_secs = 60
+#   # Optional context persisted for operator review; does not affect matching.
+#   reason = \"run npm tests in container for repo parity\"
 #   approval_mode = \"auto\"
 #
 # $WORKSPACE = workspace path on the host.

@@ -76,6 +76,7 @@ impl App {
             let target = NativeDialogTarget::Exec(item.activity_id.clone());
             let req = HostdoApprovalRequest {
                 command: item.argv.join(" "),
+                reason: item.reason.clone(),
                 cwd: Some(item.cwd.display().to_string()),
                 workspace: Some(item.workspace_name.clone()),
                 image: item.image.clone(),
@@ -309,6 +310,9 @@ async fn run_native_hostdo_dialog_subprocess(req: &HostdoApprovalRequest) -> Out
     let mut cmd = tokio::process::Command::new(exe);
     cmd.arg("__dialog").arg("hostdo-approval");
     cmd.arg("--command").arg(&req.command);
+    if let Some(reason) = &req.reason {
+        cmd.arg("--reason").arg(reason);
+    }
     if let Some(cwd) = &req.cwd {
         cmd.arg("--cwd").arg(cwd);
     }

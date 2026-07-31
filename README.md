@@ -398,6 +398,7 @@ Managed containers include `hostdo`, a small bridge for running approved host-si
 
 ```sh
 hostdo output cargo test
+hostdo output --reason "run targeted tests requested by user" cargo test
 hostdo run cargo test
 hostdo run --image node:20 npm test
 hostdo list
@@ -408,6 +409,8 @@ hostdo stop <job-id>
 `hostdo output` waits for completion, prints captured stdout and stderr, and returns the underlying command's exit code. Use it when a command's result is needed immediately, for example `TOKEN=$(hostdo output az account get-access-token ...)`; use `hostdo run` when the job should remain independently inspectable or interactive.
 
 `hostdo` is the one deliberate hole in the sandbox: approved commands execute **on the host** (or, with `--image`, in a separate host-side Docker container), outside the session's network policy. Treat every rule you add as a host-execution grant.
+
+`hostdo` matching uses exact `argv + image`; optional `--reason` text is shown in approval UI and saved in `harness-rules.toml` for review context, but it does not gate matching. Timeout is also intentionally not part of matching.
 
 Commands are checked against `[hostdo]` rules in the global and workspace `harness-rules.toml` files. Unknown commands prompt for approval, and remembered approvals are persisted as exact command rules. The `default_policy` key accepts `auto`, `prompt` (the default), or `deny` — and when the global and workspace files disagree, deny wins, so an organization can turn host execution off fleet-wide with `default_policy = "deny"` under `[hostdo]` in the managed global rules file.
 

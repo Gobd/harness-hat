@@ -17,8 +17,13 @@ use std::sync::{
     mpsc,
 };
 use std::time::Duration;
+use std::time::Instant;
 
 use crate::server::{TuiEventsResponse, TuiFrameRequest, TuiInput};
+
+const TUI_FRAME_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+const TUI_FRAME_RETRY_WINDOW: Duration = Duration::from_secs(30);
+const TUI_FRAME_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// Attach the current terminal to the daemon's existing App and renderer.
 pub(crate) fn run_attached(config_path: PathBuf) -> Result<()> {
@@ -30,7 +35,12 @@ pub(crate) fn run_attached(config_path: PathBuf) -> Result<()> {
         config.defaults.control.server_host, config.defaults.control.server_port
     );
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(3))
+        // The daemon deliberately returns `tui_busy` while its single TUI
+        // thread is finishing a synchronous Docker/session operation. Keep
+        // this above the daemon's 10-second handler deadline so the client
+        // receives that useful response instead of a generic transport
+        // timeout.
+        .timeout(TUI_FRAME_REQUEST_TIMEOUT)
         .build()
         .context("building daemon TUI client")?;
 
@@ -105,18 +115,38 @@ fn relay_loop(
             continue;
         }
         let (width, height) = terminal_size()?;
-        let response = client
-            .post(format!("{control_url}/tui/frame"))
-            .bearer_auth(token)
-            .json(&TuiFrameRequest {
-                width,
-                height,
-                input,
-                full_frame: needs_full_frame,
-            })
-            .send()
-            .context("requesting daemon TUI frame")?;
+        let request = TuiFrameRequest {
+            width,
+            height,
+            input,
+            full_frame: needs_full_frame,
+        };
+        let retry_deadline = Instant::now() + TUI_FRAME_RETRY_WINDOW;
+        let response = loop {
+            match client
+                .post(format!("{control_url}/tui/frame"))
+                .bearer_auth(token)
+                .json(&request)
+                .send()
+            {
+                Ok(response) if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                    let status = response.status();
+                    let body = response.text().unwrap_or_default();
+                    if body.contains("\"error\":\"tui_busy\"") && Instant::now() < retry_deadline {
+                        std::thread::sleep(TUI_FRAME_RETRY_DELAY);
+                        continue;
+                    }
+                    bail!("daemon returned {status}: {body}");
+                }
+                Ok(response) => break response,
+                Err(error) if error.is_timeout() && Instant::now() < retry_deadline => {
+                    std::thread::sleep(TUI_FRAME_RETRY_DELAY);
+                }
+                Err(error) => return Err(error).context("requesting daemon TUI frame"),
+            }
+        };
         let status = response.status();
+        let server_sent_full_frame = response.headers().contains_key("x-harness-hat-full-frame");
         if !status.is_success() {
             bail!(
                 "daemon returned {status}: {}",
@@ -130,7 +160,7 @@ fn relay_loop(
                 String::from_utf8_lossy(&frame).replace(['\r', '\x1b'], "")
             );
         }
-        if last_frame != frame {
+        if request.full_frame || server_sent_full_frame || last_frame != frame {
             write_frame(stdout, &frame)?;
             last_frame = frame.to_vec();
         }

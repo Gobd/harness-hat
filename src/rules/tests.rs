@@ -431,7 +431,8 @@ fn remembered_workspace_hostdo_rule_is_persisted_and_effective() {
     let argv = vec!["cargo".to_string(), "test".to_string()];
 
     assert!(
-        append_hostdo_auto_approval(&path, &argv, None, 120).expect("persist remembered approval")
+        append_hostdo_auto_approval(&path, &argv, None, 120, Some("ci verification step"))
+            .expect("persist remembered approval")
     );
 
     let workspace_rules = load(&path).expect("reload remembered approval");
@@ -439,6 +440,10 @@ fn remembered_workspace_hostdo_rule_is_persisted_and_effective() {
     assert_eq!(
         workspace_rules.hostdo.commands[0].approval_mode,
         NetworkPolicy::Auto
+    );
+    assert_eq!(
+        workspace_rules.hostdo.commands[0].reason.as_deref(),
+        Some("ci verification step")
     );
 
     let composed = ComposedRules::compose(&ProjectRules::default(), &[workspace_rules]);

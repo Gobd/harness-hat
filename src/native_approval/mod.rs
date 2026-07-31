@@ -40,6 +40,7 @@ pub struct ApprovalRequest {
 #[derive(Debug, Clone)]
 pub struct HostdoApprovalRequest {
     pub command: String,
+    pub reason: Option<String>,
     pub cwd: Option<String>,
     pub workspace: Option<String>,
     pub image: Option<String>,

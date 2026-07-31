@@ -79,6 +79,15 @@ pub(crate) fn render_exec_approval_overlay(
         )),
         Line::from(""),
         Line::from(vec![
+            Span::styled("  Reason  : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                item.reason
+                    .clone()
+                    .unwrap_or_else(|| "no reason provided".to_string()),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
             Span::styled("  Command : ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 command_label,

@@ -36,6 +36,7 @@ async fn main() -> Result<()> {
                 }
                 DialogCommand::HostdoApproval {
                     command,
+                    reason,
                     image,
                     cwd,
                     timeout_secs,
@@ -43,6 +44,7 @@ async fn main() -> Result<()> {
                 } => {
                     let req = harness_hat::native_approval::HostdoApprovalRequest {
                         command,
+                        reason,
                         cwd,
                         image,
                         timeout_secs,

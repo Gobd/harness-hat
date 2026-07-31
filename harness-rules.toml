@@ -11,6 +11,17 @@
 # - Use `killme` only when the user explicitly asks you to end this container.
 # """
 #
+# Workspace path mirroring (opt-in):
+# mirror_cwd = true
+# Mounts an absolute POSIX workspace path at that same path in the Linux
+# container instead of `/workspace`. Native Windows paths keep the configured
+# container mount target because they cannot be represented exactly.
+#
+# Preferred session template (saved by `hht workspace` after the first choice):
+# template = "rust"
+# A `template` value in the matching `[[workspaces]]` entry in
+# harness-hat.toml overrides this value.
+#
 # Localhost port forwards (workspace/session overrides):
 # [[localhost_forwards]]
 # container_port = 8081
@@ -30,6 +41,8 @@
 #   argv = ["cargo", "test"] # run inside container with `hostdo run cargo test`
 #   cwd = "$WORKSPACE"         # execution cwd only, not part of approval matching
 #   timeout_secs = 60
+#   # Optional context persisted for operator review; does not affect matching.
+#   reason = "run package index refresh after dependency update"
 #   approval_mode = "auto"
 #
 # Short-lived Docker runner (exact argv + image match, auto-approved):
@@ -38,6 +51,8 @@
 #   image = "node:20"
 #   cwd = "$WORKSPACE"
 #   timeout_secs = 60
+#   # Optional context persisted for operator review; does not affect matching.
+#   reason = "run npm tests in container for repo parity"
 #   approval_mode = "auto"
 #
 # $WORKSPACE = workspace path on the host.
@@ -75,6 +90,7 @@
 # - raw CONNECT to other ports requires an explicit `port=...` allow rule
 
 version = 1
+template = "rust"
 
 [hostdo]
 default_policy = "prompt"
@@ -139,3 +155,4 @@ allowlist = [
     "domain=code.claude.com",
     "domain=advisories.gitlab.com",
 ]
+denylist = ["domain=sdmntprsouthcentralus.oaiusercontent.com"]
