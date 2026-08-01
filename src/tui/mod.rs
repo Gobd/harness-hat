@@ -513,11 +513,23 @@ pub async fn run_service(
 ) -> Result<()> {
     let mut last_remote_buffer: Option<ratatui::buffer::Buffer> = None;
     let mut last_remote_focus: Option<Focus> = None;
+    let mut next_refresh_event = tokio::time::Instant::now();
     loop {
+        let build_was_running = app.build_is_running();
         let channels_changed = app.drain_channels();
         app.tick_base_rules_file_watch();
-        if channels_changed {
-            tui_events.publish("tui_refresh", None, "session state changed");
+        let build_is_running = app.build_is_running();
+        let now = tokio::time::Instant::now();
+        if channels_changed
+            || should_publish_service_refresh(
+                !app.sessions.is_empty(),
+                build_was_running,
+                build_is_running,
+                now >= next_refresh_event,
+            )
+        {
+            tui_events.publish("tui_refresh", None, "manager display changed");
+            next_refresh_event = now + tokio::time::Duration::from_millis(250);
         }
         while let Ok(item) = tui_rx.try_recv() {
             let (pty_cols, pty_rows) = (
@@ -568,6 +580,19 @@ pub async fn run_service(
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
+}
+
+fn should_publish_service_refresh(
+    has_sessions: bool,
+    build_was_running: bool,
+    build_is_running: bool,
+    periodic_refresh_due: bool,
+) -> bool {
+    // Builds run before their target container session exists. Keep attached
+    // clients repainting while output arrives, and always send one final event
+    // when a build finishes so fast failures cannot leave a stale build pane.
+    (build_was_running && !build_is_running)
+        || (periodic_refresh_due && (has_sessions || build_is_running))
 }
 
 fn should_force_remote_full_frame(
@@ -1038,5 +1063,22 @@ mod bell_tests {
         let mut buf = Vec::new();
         super::restore_terminal_output(&mut buf, false).expect("restore terminal");
         assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn service_refreshes_builds_before_a_session_exists() {
+        assert!(super::should_publish_service_refresh(
+            false, true, true, true,
+        ));
+        assert!(!super::should_publish_service_refresh(
+            false, true, true, false,
+        ));
+    }
+
+    #[test]
+    fn service_always_refreshes_when_a_build_finishes() {
+        assert!(super::should_publish_service_refresh(
+            false, true, false, false,
+        ));
     }
 }

@@ -86,6 +86,7 @@ fn relay_loop(
     let mut needs_render = true;
     let mut needs_full_frame = true;
     let mut last_frame: Vec<u8> = Vec::new();
+    let mut last_size = None;
     loop {
         let input = if poll_event(Duration::from_millis(50))? {
             match read_event()? {
@@ -115,6 +116,10 @@ fn relay_loop(
             continue;
         }
         let (width, height) = terminal_size()?;
+        let size_changed = last_size.replace((width, height)) != Some((width, height));
+        if size_changed {
+            needs_full_frame = true;
+        }
         let request = TuiFrameRequest {
             width,
             height,
@@ -159,6 +164,11 @@ fn relay_loop(
                 "{}",
                 String::from_utf8_lossy(&frame).replace(['\r', '\x1b'], "")
             );
+        }
+        if size_changed {
+            // Normal frames repaint every current cell without clearing. A
+            // resize can expose rows from the previous viewport.
+            write_frame(stdout, b"\x1b[2J\x1b[H")?;
         }
         if request.full_frame || server_sent_full_frame || last_frame != frame {
             write_frame(stdout, &frame)?;

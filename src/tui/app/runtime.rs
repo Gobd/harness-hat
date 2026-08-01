@@ -65,7 +65,8 @@ impl App {
             }
         }
         // Rules-file changes always use a system dialog. Network and hostdo
-        // approvals use one on macOS and retain the TUI fallback elsewhere.
+        // approvals use one in service mode and on macOS; interactive Windows
+        // and Linux sessions retain the TUI fallback.
         self.maybe_launch_native_dialog();
 
         changed |= self.refresh_session_terminal_states();

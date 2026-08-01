@@ -16,7 +16,9 @@ pub fn ensure_docker_installed_and_running() -> Result<()> {
         bail!("docker not found in PATH — harness-hat requires Docker to run containers");
     }
 
-    let output = std::process::Command::new("docker")
+    let mut command = std::process::Command::new("docker");
+    crate::process_util::hide_console_window(&mut command);
+    let output = command
         .arg("info")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())

@@ -5,6 +5,8 @@
 ### Added
 
 - Added `hostdo --reason <text>` support so approval prompts can carry operator context; when remembered, the reason is persisted in `harness-rules.toml` but is not used in matching.
+- Added native Windows network and host-command approval dialogs with remembered
+  allow/deny decisions and foreground activation.
 
 ### Changed
 
@@ -19,6 +21,12 @@
 - Entering the terminal view in an attached TUI now forces a complete screen
   repaint, preventing a stale or blank delta-rendered screen.
 - A lost manager-side `docker run` terminal connection no longer marks a still-running container as stopped. The session remains visible as terminal-detached and shows the `hht shell` reconnection command.
+- Windows background operations no longer flash transient console windows when
+  invoking Docker, host commands, or process-management utilities.
+- Uninstalling the Windows service now stops both the scheduled task and any
+  remaining daemon process in the current session.
+- Attached TUI clients now refresh while builds run before a session exists,
+  repaint once when a build completes, and clear stale rows after a resize.
 
 ## 0.8.4 July 29, 2026
 

@@ -1072,6 +1072,7 @@ async fn ensure_image_present(
     }
 
     let mut cmd = TokioCommand::new("docker");
+    crate::process_util::hide_tokio_console_window(&mut cmd);
     cmd.arg("pull")
         .arg(image)
         .stdout(Stdio::piped())
@@ -1133,6 +1134,7 @@ fn build_command(run: &CommandRun) -> Result<TokioCommand, ExecFailure> {
     let mut cmd = if let Some(image) = &run.image {
         validate_hostdo_image(image)?;
         let mut cmd = TokioCommand::new("docker");
+        crate::process_util::hide_tokio_console_window(&mut cmd);
         cmd.arg("run").arg("--rm").arg("-i");
         for arg in docker_bind_mount_args(
             &run.workspace_path.display().to_string(),
@@ -1157,6 +1159,7 @@ fn build_command(run: &CommandRun) -> Result<TokioCommand, ExecFailure> {
         cmd
     } else {
         let mut cmd = TokioCommand::new(&run.argv[0]);
+        crate::process_util::hide_tokio_console_window(&mut cmd);
         cmd.args(&run.argv[1..]).current_dir(&run.host_cwd);
         cmd
     };
@@ -1248,7 +1251,9 @@ fn validate_hostdo_image(image: &str) -> Result<(), ExecFailure> {
 }
 
 async fn docker_image_present(image: &str) -> Result<bool, ExecFailure> {
-    let status = TokioCommand::new("docker")
+    let mut command = TokioCommand::new("docker");
+    crate::process_util::hide_tokio_console_window(&mut command);
+    let status = command
         .arg("image")
         .arg("inspect")
         .arg(image)
@@ -1270,7 +1275,9 @@ async fn kill_child_and_group(child: &mut tokio::process::Child) {
     #[cfg(windows)]
     if let Some(pid) = child.id() {
         let pid = pid.to_string();
-        let _ = TokioCommand::new("taskkill")
+        let mut command = TokioCommand::new("taskkill");
+        crate::process_util::hide_tokio_console_window(&mut command);
+        let _ = command
             .args(["/PID", pid.as_str(), "/T", "/F"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())

@@ -1,7 +1,7 @@
-//! Non-macOS native approval dialogs used by the installed desktop agent.
+//! Linux native approval dialogs used by the installed desktop agent.
 //!
-//! Interactive Linux/Windows TUI sessions retain their in-terminal overlay,
-//! but the background agent has no terminal and therefore routes prompts here.
+//! Interactive Linux TUI sessions retain their in-terminal overlay, but the
+//! background agent has no terminal and therefore routes prompts here.
 //! Any backend error, dismissal, or unrecognized response maps to deny.
 
 use super::{ApprovalRequest, HostdoApprovalRequest, Outcome};
@@ -38,7 +38,7 @@ pub fn prompt_hostdo_approval(req: &HostdoApprovalRequest) -> Outcome {
         "Harness Hat: Host Command Approval",
         format!(
             "Allow this host command?\n{}{}{}",
-            reason, command, workspace,
+            reason, command, workspace
         ),
     )
 }

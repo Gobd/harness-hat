@@ -8,9 +8,9 @@
 //! launches that subprocess for the front pending item, collects its result,
 //! and feeds the decision back through the existing approve/deny paths.
 //!
-//! Network and host-command approvals currently use native dialogs only on
-//! macOS. Rules-file tampering always opens a system dialog and remains
-//! fail-closed if that dialog cannot be displayed.
+//! Network and host-command approvals use native dialogs for the background
+//! service and on macOS. Rules-file tampering always opens a system dialog and
+//! remains fail-closed if that dialog cannot be displayed.
 
 use super::*;
 use crate::native_approval::{
@@ -266,6 +266,7 @@ async fn run_native_dialog_subprocess(req: &ApprovalRequest) -> Outcome {
         }
     };
     let mut cmd = tokio::process::Command::new(exe);
+    crate::process_util::hide_tokio_console_window(&mut cmd);
     cmd.arg("__dialog").arg("network-approval");
     cmd.arg("--host").arg(&req.host);
     if !req.method.is_empty() {
@@ -308,6 +309,7 @@ async fn run_native_hostdo_dialog_subprocess(req: &HostdoApprovalRequest) -> Out
         }
     };
     let mut cmd = tokio::process::Command::new(exe);
+    crate::process_util::hide_tokio_console_window(&mut cmd);
     cmd.arg("__dialog").arg("hostdo-approval");
     cmd.arg("--command").arg(&req.command);
     if let Some(reason) = &req.reason {
@@ -349,6 +351,7 @@ async fn run_native_rules_changed_dialog_subprocess(req: &RulesChangedRequest) -
         }
     };
     let mut cmd = tokio::process::Command::new(exe);
+    crate::process_util::hide_tokio_console_window(&mut cmd);
     cmd.arg("__dialog")
         .arg("rules-changed")
         .arg("--path")

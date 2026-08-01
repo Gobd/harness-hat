@@ -126,6 +126,7 @@ pub(crate) async fn run_build_docker_commands(
 
     for docker_args in docker_commands {
         let mut cmd = tokio::process::Command::new("docker");
+        crate::process_util::hide_tokio_console_window(&mut cmd);
         cmd.args(&docker_args)
             .env("BUILDKIT_PROGRESS", "plain")
             .kill_on_drop(true)
@@ -248,7 +249,9 @@ async fn kill_build_child_tree(child: &mut tokio::process::Child) {
     #[cfg(windows)]
     if let Some(pid) = child.id() {
         let pid = pid.to_string();
-        let _ = tokio::process::Command::new("taskkill")
+        let mut command = tokio::process::Command::new("taskkill");
+        crate::process_util::hide_tokio_console_window(&mut command);
+        let _ = command
             .args(["/PID", pid.as_str(), "/T", "/F"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

@@ -687,7 +687,9 @@ fn random_four_digit() -> String {
 /// would let `allocate_session_alias` happily mint an alias that collides with
 /// a live container, breaking `hht shell <alias>` (ambiguous lookup).
 fn running_session_aliases() -> Result<std::collections::HashSet<String>> {
-    let output = std::process::Command::new("docker")
+    let mut command = std::process::Command::new("docker");
+    crate::process_util::hide_console_window(&mut command);
+    let output = command
         .args([
             "ps",
             "--filter",

@@ -360,7 +360,9 @@ impl ContainerSession {
         if target.is_empty() {
             return Ok(());
         }
-        let output = std::process::Command::new("docker")
+        let mut command = std::process::Command::new("docker");
+        crate::process_util::hide_console_window(&mut command);
+        let output = command
             .args(["rm", "-f", target])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

@@ -23,6 +23,7 @@ pub mod manager;
 pub mod native_approval;
 pub mod new_project;
 pub mod notifications;
+mod process_util;
 pub mod proxy;
 pub mod rebuild;
 pub mod rules;

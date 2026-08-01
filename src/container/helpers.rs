@@ -60,7 +60,9 @@ pub(crate) fn read_container_id(
 }
 
 fn inspect_container_id(docker_name: &str) -> Result<Option<String>> {
-    let output = std::process::Command::new("docker")
+    let mut command = std::process::Command::new("docker");
+    crate::process_util::hide_console_window(&mut command);
+    let output = command
         .args(["inspect", "--format", "{{.Id}}", docker_name])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -83,7 +85,9 @@ fn inspect_container_id(docker_name: &str) -> Result<Option<String>> {
 /// `Ok(None)`; callers should not infer an exit merely from a disconnected
 /// Docker attach/PTY client.
 pub fn inspect_container_state(docker_name: &str) -> Result<Option<ContainerState>> {
-    let output = std::process::Command::new("docker")
+    let mut command = std::process::Command::new("docker");
+    crate::process_util::hide_console_window(&mut command);
+    let output = command
         .args([
             "inspect",
             "--format",
@@ -117,7 +121,9 @@ fn parse_container_state(output: &str) -> Option<ContainerState> {
 }
 
 pub fn inspect_container_usage(docker_name: &str) -> Result<Option<ContainerUsageStats>> {
-    let output = std::process::Command::new("docker")
+    let mut command = std::process::Command::new("docker");
+    crate::process_util::hide_console_window(&mut command);
+    let output = command
         .args([
             "stats",
             "--no-stream",
@@ -154,7 +160,9 @@ pub fn inspect_container_usage(docker_name: &str) -> Result<Option<ContainerUsag
 }
 
 pub(crate) fn docker_image_exists(image: &str) -> std::io::Result<bool> {
-    let status = std::process::Command::new("docker")
+    let mut command = std::process::Command::new("docker");
+    crate::process_util::hide_console_window(&mut command);
+    let status = command
         .args(["image", "inspect", image])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

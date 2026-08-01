@@ -59,7 +59,9 @@ pub(crate) struct Session {
 /// in docker's natural order (newest first), so callers wanting most-recent
 /// behavior can take the first element.
 pub(crate) fn running_sessions() -> Result<Vec<Session>> {
-    let output = Command::new("docker")
+    let mut command = Command::new("docker");
+    crate::process_util::hide_console_window(&mut command);
+    let output = command
         .args([
             "ps",
             "--filter",
@@ -149,7 +151,9 @@ pub(crate) fn shell_exec_env_pairs() -> Vec<(String, String)> {
 fn terminate(id: &str) -> Result<()> {
     let wanted = normalize_id(id);
     let name = session_name_for_id(id)?;
-    let output = Command::new("docker")
+    let mut command = Command::new("docker");
+    crate::process_util::hide_console_window(&mut command);
+    let output = command
         .args(["rm", "-f", &name])
         .output()
         .context("terminating session container with docker rm -f")?;
@@ -192,7 +196,9 @@ fn session_name_for_id(id: &str) -> Result<String> {
 /// Run `docker exec` against a container with optional trailing argv (or
 /// `/bin/bash` when empty), with the same TTY auto-detect + signal guarding +
 fn read_container_label(container_name: &str, label: &str) -> Result<String> {
-    let output = Command::new("docker")
+    let mut command = Command::new("docker");
+    crate::process_util::hide_console_window(&mut command);
+    let output = command
         .args([
             "inspect",
             "-f",

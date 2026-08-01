@@ -14,17 +14,20 @@
 //!   `deny remember=false`
 //!   `cancelled`
 //!
-//! Network and host-command approvals use the macOS implementation today.
-//! Rules-file tampering always uses a cross-platform system dialog; failure to
-//! show it is treated as a denial and keeps policy decisions blocked.
+//! Network and host-command approvals use platform-native implementations on
+//! macOS and Windows. Rules-file tampering always uses a cross-platform system
+//! dialog; failure to show it is treated as a denial and keeps policy decisions
+//! blocked.
 
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod fallback;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
 
 /// All the context a native dialog needs to render a useful prompt. Mirrors
 /// the subset of `proxy::PendingNetworkItem` that the user actually reads.
@@ -110,7 +113,11 @@ pub fn run_network_approval(req: &ApprovalRequest) -> Outcome {
     {
         macos::prompt_network_approval(req)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::prompt_network_approval(req)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         fallback::prompt_network_approval(req)
     }
@@ -123,7 +130,11 @@ pub fn run_hostdo_approval(req: &HostdoApprovalRequest) -> Outcome {
     {
         macos::prompt_hostdo_approval(req)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::prompt_hostdo_approval(req)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         fallback::prompt_hostdo_approval(req)
     }

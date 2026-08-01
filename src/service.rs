@@ -8,7 +8,7 @@
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Stdio;
 
 #[cfg(any(target_os = "macos", test))]
@@ -305,10 +305,26 @@ fn install_windows(executable: &Path, config_path: &Path) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn uninstall_windows() -> Result<()> {
-    let _ = Command::new("schtasks")
-        .args(["/Delete", "/TN", WINDOWS_TASK, "/F"])
-        .status();
+    // Deleting a scheduled task does not stop an instance that is already
+    // running. End the registered instance first, then remove the task. A
+    // final image-name kill also cleans up a daemon left behind by an older
+    // installation whose task definition has already disappeared.
+    run_windows_quietly("schtasks", &["/End", "/TN", WINDOWS_TASK]);
+    run_windows_quietly("schtasks", &["/Delete", "/TN", WINDOWS_TASK, "/F"]);
+    crate::process_util::terminate_hht_daemons()
+        .context("terminating running Harness Hat daemon processes")?;
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_quietly(program: &str, args: &[&str]) {
+    let mut command = Command::new(program);
+    crate::process_util::hide_console_window(&mut command);
+    let _ = command
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 #[cfg(any(target_os = "linux", test))]

@@ -205,7 +205,9 @@ fn format_workspace_list(config: &Config) -> Result<String> {
 fn wait_for_container_running(docker_name: &str, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
-        let output = Command::new("docker")
+        let mut command = Command::new("docker");
+        crate::process_util::hide_console_window(&mut command);
+        let output = command
             .args(["inspect", "-f", "{{.State.Running}}", docker_name])
             .output()
             .context("running docker inspect to wait for container readiness")?;
