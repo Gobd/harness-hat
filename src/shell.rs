@@ -19,8 +19,8 @@ use std::io::{IsTerminal, Write};
 use std::process::Command;
 
 use crate::container::{
-    LABEL_ALIAS, LABEL_SHELL, LABEL_TEMPLATE, LABEL_WORKSPACE, SHELL_HOME, SHELL_USER,
-    parse_docker_label,
+    LABEL_ALIAS, LABEL_MOUNT_TARGET, LABEL_SHELL, LABEL_TEMPLATE, LABEL_WORKSPACE, SHELL_HOME,
+    SHELL_USER, parse_docker_label,
 };
 
 /// Entry point for the `shell` subcommand. With an id, attaches to that
@@ -53,6 +53,7 @@ pub(crate) struct Session {
     pub(crate) workspace: String,
     pub(crate) template: String,
     pub(crate) name: String,
+    pub(crate) mount_target: Option<String>,
 }
 
 /// Enumerate running harness-hat sessions via `docker ps`. Returns containers
@@ -101,6 +102,8 @@ fn parse_running_sessions(output: &str) -> Vec<Session> {
             workspace: parse_docker_label(labels, LABEL_WORKSPACE).unwrap_or_default(),
             template: parse_docker_label(labels, LABEL_TEMPLATE).unwrap_or_default(),
             name: name.trim().to_string(),
+            mount_target: parse_docker_label(labels, LABEL_MOUNT_TARGET)
+                .filter(|target| !target.trim().is_empty()),
         });
     }
     sessions
@@ -231,6 +234,17 @@ fn read_container_label(container_name: &str, label: &str) -> Result<String> {
 /// by `docker exec` (which forwards them through the PTY) and we survive to
 /// run the cleanup.
 pub(crate) fn exec_into_container(container_name: &str, extra_args: &[OsString]) -> Result<i32> {
+    exec_into_container_at(container_name, extra_args, None)
+}
+
+/// Same as [`exec_into_container`], but starts the command in an explicit
+/// container workdir. Workspace attach uses this to preserve the caller's
+/// relative directory inside the workspace mount.
+pub(crate) fn exec_into_container_at(
+    container_name: &str,
+    extra_args: &[OsString],
+    workdir: Option<&str>,
+) -> Result<i32> {
     let stdin_is_tty = std::io::stdin().is_terminal();
 
     // Read the shell label stamped at launch time; fall back to bash for
@@ -239,29 +253,52 @@ pub(crate) fn exec_into_container(container_name: &str, extra_args: &[OsString])
         .unwrap_or_else(|_| "/bin/bash".to_string());
 
     let mut command = Command::new("docker");
-    command.args([
-        "exec",
-        if stdin_is_tty { "-it" } else { "-i" },
-        "-u",
-        SHELL_USER,
-    ]);
-    command.arg("-e");
-    command.arg(format!("HOME={SHELL_HOME}"));
-    for env_var in shell_exec_env_vars() {
-        command.arg("-e");
-        command.arg(&env_var);
-    }
-    command.arg(container_name);
-    if extra_args.is_empty() {
-        command.arg(&attach_shell);
-    } else {
-        command.args(extra_args);
-    }
+    command.args(docker_exec_args(
+        container_name,
+        &attach_shell,
+        extra_args,
+        workdir,
+        stdin_is_tty,
+        shell_exec_env_vars(),
+    ));
 
     let _signal_guard = IgnoreTerminalSignals::install();
     let _terminal_reset = TerminalModesResetGuard::new();
     let status = command.status().context("running docker exec")?;
     Ok(status.code().unwrap_or(1))
+}
+
+fn docker_exec_args(
+    container_name: &str,
+    attach_shell: &str,
+    extra_args: &[OsString],
+    workdir: Option<&str>,
+    stdin_is_tty: bool,
+    env_vars: Vec<String>,
+) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("exec"),
+        OsString::from(if stdin_is_tty { "-it" } else { "-i" }),
+        OsString::from("-u"),
+        OsString::from(SHELL_USER),
+        OsString::from("-e"),
+        OsString::from(format!("HOME={SHELL_HOME}")),
+    ];
+    for env_var in env_vars {
+        args.push(OsString::from("-e"));
+        args.push(OsString::from(env_var));
+    }
+    if let Some(workdir) = workdir.filter(|path| !path.is_empty()) {
+        args.push(OsString::from("--workdir"));
+        args.push(OsString::from(workdir));
+    }
+    args.push(OsString::from(container_name));
+    if extra_args.is_empty() {
+        args.push(OsString::from(attach_shell));
+    } else {
+        args.extend(extra_args.iter().cloned());
+    }
+    args
 }
 
 struct TerminalModesResetGuard {
@@ -419,7 +456,8 @@ fn list() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_id, parse_running_sessions};
+    use super::{docker_exec_args, normalize_id, parse_running_sessions};
+    use std::ffi::OsString;
 
     #[test]
     fn numeric_ids_are_zero_padded_to_width_four() {
@@ -446,5 +484,40 @@ mod tests {
         assert_eq!(sessions[0].container_id, "a1b2c3d4e5f6");
         assert_eq!(sessions[0].workspace, "api");
         assert_eq!(sessions[0].template, "rust");
+    }
+
+    #[test]
+    fn docker_exec_places_workdir_before_container_for_shell_and_command() {
+        let shell_args =
+            docker_exec_args("session", "/bin/bash", &[], Some("/work/src"), true, vec![]);
+        assert_eq!(
+            shell_args
+                .iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>(),
+            vec![
+                "exec",
+                "-it",
+                "-u",
+                "1000:1000",
+                "-e",
+                "HOME=/home/coder",
+                "--workdir",
+                "/work/src",
+                "session",
+                "/bin/bash"
+            ]
+        );
+        let command_args = docker_exec_args(
+            "session",
+            "/bin/bash",
+            &[OsString::from("pwd")],
+            Some("/work/src"),
+            false,
+            vec![],
+        );
+        assert_eq!(command_args[6], OsString::from("--workdir"));
+        assert_eq!(command_args[8], OsString::from("session"));
+        assert_eq!(command_args[9], OsString::from("pwd"));
     }
 }

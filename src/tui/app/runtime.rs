@@ -51,6 +51,15 @@ impl App {
                 Err(_) => break,
             }
         }
+        for _ in 0..2 {
+            match self.restart_pending_rx.try_recv() {
+                Ok(item) => {
+                    let _ = item.response_tx.send(self.soft_refresh());
+                    changed = true;
+                }
+                Err(_) => break,
+            }
+        }
         // Apply any native-dialog decisions that landed since the last tick
         // before enqueueing new requests, so a finished dialog frees the
         // in-flight slot and the next pending item can be prompted this tick.

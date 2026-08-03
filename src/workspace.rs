@@ -89,7 +89,9 @@ pub fn run(
         );
         if let Some(session) = newest_session_for_workspace(&matched.name)? {
             println!("attaching to running session {}", session.alias);
-            return crate::shell::exec_into_container(&session.name, &args);
+            let mount_target = mount_target_for_session(&session, &config);
+            let workdir = workspace_workdir(&matched, &pwd, &mount_target);
+            return attach_and_report(&session.name, &args, Some(&workdir));
         }
         let rules_path = workspace_rules_path(&matched.canonical_path);
         let rules = crate::rules::load(&rules_path)?;
@@ -124,7 +126,14 @@ pub fn run(
             resp.alias, resp.docker_name
         );
         wait_for_container_running(&resp.docker_name, Duration::from_secs(15))?;
-        return attach_and_report(&resp.docker_name, &args);
+        // `mount_cwd` deliberately mounts a subdirectory as the mount root, so
+        // relative-to-workspace translation is not safe for that legacy mode.
+        let workdir = if matched.mount_cwd {
+            resp.mount_target.clone()
+        } else {
+            workspace_workdir(&matched, &pwd, &resp.mount_target)
+        };
+        return attach_and_report(&resp.docker_name, &args, Some(&workdir));
     }
 
     let base = pwd
@@ -165,7 +174,68 @@ pub fn run(
         resp.alias, resp.docker_name
     );
     wait_for_container_running(&resp.docker_name, Duration::from_secs(15))?;
-    attach_and_report(&resp.docker_name, &args)
+    attach_and_report(&resp.docker_name, &args, Some(&resp.mount_target))
+}
+
+/// Request the daemon's session-preserving backend refresh. This is not a
+/// service/binary restart: running `docker run --rm -it` sessions remain live.
+pub fn restart() -> Result<()> {
+    // Match normal `hht` daemon attachment: the installed service owns the
+    // global config even if the caller happens to be inside a project with a
+    // local config. Fall back to ordinary discovery for standalone managers.
+    let config_path = crate::manager::default_home_config_path()
+        .ok()
+        .filter(|path| path.exists())
+        .or(crate::manager::resolve_or_prompt_config_path(None)?)
+        .with_context(|| {
+            format!(
+                "no harness-hat config available; run `{} init` first",
+                crate::cli::COMMAND_NAME
+            )
+        })?;
+    let config = crate::config::load(&config_path)?;
+    let token = read_manager_token(&config.logging.log_dir.join("token"))
+        .with_context(|| "could not read manager token â€” is the daemon running?")?;
+    let control_url = format!(
+        "http://{}:{}",
+        config.defaults.control.server_host, config.defaults.control.server_port
+    );
+    probe_manager(&control_url).with_context(|| {
+        format!(
+            "daemon is not reachable at {control_url}; start it with `{}`",
+            crate::cli::COMMAND_NAME
+        )
+    })?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .context("building http client")?;
+    let response = client
+        .post(format!("{control_url}/daemon/restart"))
+        .bearer_auth(token)
+        .send()
+        .context("posting /daemon/restart")?;
+    let status = response.status();
+    let body = response
+        .bytes()
+        .context("reading daemon refresh response")?;
+    if !status.is_success() {
+        if let Ok(error) = serde_json::from_slice::<LaunchError>(&body) {
+            bail!("daemon refresh failed ({status}): {}", error.reason);
+        }
+        bail!(
+            "daemon refresh failed ({status}): {}",
+            String::from_utf8_lossy(&body).trim()
+        );
+    }
+    #[derive(Deserialize)]
+    struct RestartResponse {
+        message: String,
+    }
+    let response: RestartResponse =
+        serde_json::from_slice(&body).context("parsing daemon refresh response")?;
+    println!("{}", response.message);
+    Ok(())
 }
 
 fn format_workspace_list(config: &Config) -> Result<String> {
@@ -234,8 +304,8 @@ fn wait_for_container_running(docker_name: &str, timeout: Duration) -> Result<()
 /// running", or a missing command in the trailing args) silently inherits
 /// the host shell, and the user can't tell whether the attach happened or
 /// failed.
-fn attach_and_report(docker_name: &str, args: &[OsString]) -> Result<i32> {
-    let code = crate::shell::exec_into_container(docker_name, args)?;
+fn attach_and_report(docker_name: &str, args: &[OsString], workdir: Option<&str>) -> Result<i32> {
+    let code = crate::shell::exec_into_container_at(docker_name, args, workdir)?;
     if code != 0 {
         let _ = writeln!(
             io::stderr(),
@@ -307,6 +377,81 @@ fn newest_session_for_workspace(workspace_name: &str) -> Result<Option<crate::sh
     // `docker ps` returns newest-first; preserve that order, just filter.
     sessions.retain(|s| s.workspace == workspace_name);
     Ok(sessions.into_iter().next())
+}
+
+/// Resolve the mount target for a discovered session. New sessions carry an
+/// authoritative label; older sessions get a best-effort lookup from the
+/// current template configuration before falling back to the historic default.
+fn mount_target_for_session(session: &crate::shell::Session, config: &Config) -> String {
+    if let Some(target) = session.mount_target.as_deref() {
+        return target.to_string();
+    }
+    let configured = config
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.name == session.workspace)
+        .and_then(|workspace| {
+            crate::config::resolve_workspace_container_templates(
+                &workspace.canonical_path,
+                &config.defaults.containers,
+                &config.containers,
+            )
+            .ok()
+            .and_then(|templates| {
+                templates
+                    .iter()
+                    .find(|template| template.name == session.template)
+                    .map(|template| crate::config::container_path_string(&template.mount_target))
+            })
+        })
+        .or_else(|| {
+            config
+                .containers
+                .iter()
+                .find(|template| template.name == session.template)
+                .map(|template| crate::config::container_path_string(&template.mount_target))
+        });
+    configured.unwrap_or_else(|| "/workspace".to_string())
+}
+
+/// Translate a canonical host cwd into an in-container directory beneath the
+/// actual workspace mount. A named workspace selected from elsewhere safely
+/// falls back to its mount root.
+pub(crate) fn workspace_workdir(
+    workspace: &WorkspaceConfig,
+    cwd: &Path,
+    mount_target: &str,
+) -> String {
+    let target = mount_target.trim_end_matches('/');
+    let target = if target.is_empty() { "/" } else { target };
+    let Ok(relative) = cwd.strip_prefix(&workspace.canonical_path) else {
+        return target.to_string();
+    };
+    let components: Option<Vec<&str>> = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => name.to_str(),
+            std::path::Component::CurDir => Some(""),
+            _ => None,
+        })
+        .collect();
+    let Some(components) = components else {
+        return target.to_string();
+    };
+    let suffix = components
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    if suffix.is_empty() || target == "/" {
+        if suffix.is_empty() {
+            target.to_string()
+        } else {
+            format!("/{suffix}")
+        }
+    } else {
+        format!("{target}/{suffix}")
+    }
 }
 
 // ── Template picker ─────────────────────────────────────────────────────────
@@ -418,6 +563,7 @@ struct LaunchResponse {
     docker_name: String,
     #[serde(rename = "session_token")]
     _session_token: String,
+    mount_target: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -638,6 +784,67 @@ mod tests {
         let pwd = PathBuf::from("/repos/proj");
         let matched = best_matching_workspace(&config, &pwd).expect("matched");
         assert_eq!(matched.name, "proj");
+    }
+
+    #[test]
+    fn workspace_workdir_maps_root_nested_and_named_workspace_fallback() {
+        let workspace = workspace("proj", "/repos/proj");
+        assert_eq!(
+            workspace_workdir(&workspace, Path::new("/repos/proj"), "/work"),
+            "/work"
+        );
+        assert_eq!(
+            workspace_workdir(&workspace, Path::new("/repos/proj/src/lib"), "/custom"),
+            "/custom/src/lib"
+        );
+        assert_eq!(
+            workspace_workdir(&workspace, Path::new("/elsewhere"), "/custom"),
+            "/custom"
+        );
+    }
+
+    #[test]
+    fn legacy_mount_target_uses_template_then_workspace_default() {
+        let mut config = Config::default();
+        config.workspaces = vec![workspace("proj", "/repos/proj")];
+        let template = ContainerDef {
+            name: "dev".into(),
+            image: String::new(),
+            image_stem: String::new(),
+            dockerfile_path: None,
+            profile: None,
+            mount_target: PathBuf::from("/custom"),
+            command: None,
+            grayscale_palette: false,
+            starter_network_allowlist: vec![],
+            allowed_hosts: vec![],
+            mcp_log_paths: vec![],
+            mcp_log_pattern: None,
+            mounts: vec![],
+            env: Default::default(),
+            env_passthrough: vec![],
+            localhost_forwards: vec![],
+            memory: None,
+            cpus: None,
+            shm_size: None,
+            attach_shell: None,
+            claude_settings: None,
+        };
+        config.containers = vec![template];
+        let legacy = crate::shell::Session {
+            alias: "0001".into(),
+            container_id: String::new(),
+            workspace: "proj".into(),
+            template: "dev".into(),
+            name: String::new(),
+            mount_target: None,
+        };
+        assert_eq!(mount_target_for_session(&legacy, &config), "/custom");
+        let unknown = crate::shell::Session {
+            template: "none".into(),
+            ..legacy
+        };
+        assert_eq!(mount_target_for_session(&unknown, &config), "/workspace");
     }
 
     #[test]

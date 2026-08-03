@@ -690,6 +690,13 @@ fn store_dns_addrs(key: String, addrs: Vec<SocketAddr>) {
     }
 }
 
+/// Clear process-wide DNS state as part of a soft daemon refresh.
+pub(crate) fn clear_dns_cache() {
+    if let Ok(mut cache) = DNS_CACHE.lock() {
+        cache.clear();
+    }
+}
+
 fn ensure_public_ip(ip: IpAddr, host: &str) -> Result<()> {
     anyhow::ensure!(
         !is_restricted_ip(ip),

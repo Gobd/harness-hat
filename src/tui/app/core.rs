@@ -117,6 +117,7 @@ impl App {
         exec_pending_rx: mpsc::Receiver<PendingItem>,
         stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
         launch_pending_rx: mpsc::Receiver<WorkspaceLaunchItem>,
+        restart_pending_rx: mpsc::Receiver<crate::server::DaemonRestartItem>,
         net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
         activity_rx: mpsc::Receiver<ActivityEvent>,
         audit_rx: mpsc::Receiver<AuditEntry>,
@@ -219,6 +220,7 @@ impl App {
             exec_pending_rx,
             stop_pending_rx,
             launch_pending_rx,
+            restart_pending_rx,
             workspace_launch_pending: None,
             net_pending_rx,
             background_channels: BackgroundUiChannels {
@@ -308,6 +310,43 @@ impl App {
                 let _ = tx.blocking_send(stamps);
             }
         });
+    }
+
+    /// Apply a validated configuration refresh without touching session-owned
+    /// PTYs, containers, approvals, builds, listeners, or authentication.
+    pub(crate) fn soft_refresh(&mut self) -> Result<(), String> {
+        let reloaded = crate::config::load(&self.loaded_config_path).map_err(|error| {
+            format!(
+                "could not reload {}: {error}",
+                self.loaded_config_path.display()
+            )
+        })?;
+        let selected_before = {
+            let items = self.sidebar_items();
+            self.selected_sidebar_item_from(&items)
+        };
+        self.config.set(std::sync::Arc::new(reloaded));
+        self.refresh_workspace_statuses();
+        let items = self.sidebar_items();
+        self.restore_sidebar_selection(selected_before.as_ref(), &items);
+
+        let cfg = self.config.get();
+        self.watched_rules_stamps = Self::watched_rules_paths(&cfg)
+            .into_iter()
+            .map(|path| {
+                let stamp = Self::watched_file_stamp(&path);
+                (path, stamp)
+            })
+            .collect();
+        self.pending_base_rules_internal_write.clear();
+        self.rules_scan_in_flight = false;
+        self.last_base_rules_poll = std::time::Instant::now();
+        self.proxy_state.clear_reusable_state();
+        self.push_log(
+            "daemon refreshed configuration and caches; running sessions preserved",
+            false,
+        );
+        Ok(())
     }
 
     /// Apply a background rules-file scan: compare each freshly computed stamp

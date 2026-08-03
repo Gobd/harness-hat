@@ -270,6 +270,7 @@ pub struct App {
     pub exec_pending_rx: mpsc::Receiver<PendingItem>,
     pub stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
     pub launch_pending_rx: mpsc::Receiver<WorkspaceLaunchItem>,
+    pub restart_pending_rx: mpsc::Receiver<crate::server::DaemonRestartItem>,
     pub(crate) workspace_launch_pending: Option<WorkspaceLaunchPending>,
     pub net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
     // Native OS approval dialog (macOS): results of finished `hht __dialog`

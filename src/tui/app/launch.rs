@@ -302,6 +302,7 @@ impl App {
             docker_name: session.docker_name.clone(),
             workspace_name: workspace_name.to_string(),
             template: template.to_string(),
+            mount_target: session.mount_target.clone(),
         })
     }
 

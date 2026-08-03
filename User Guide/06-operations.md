@@ -8,6 +8,7 @@ Run these commands in a **terminal**:
 
 ```sh
 hht                              # attach to the installed hht-daemon TUI
+hht restart                      # refresh daemon config/caches without stopping sessions
 hht workspace                    # attach or launch a session for the current directory
 hht workspace --name my-project  # choose a configured workspace
 hht workspace --list             # list configured workspaces
@@ -21,11 +22,17 @@ hht rebuild rust                  # rebuild the base image and Rust template
 
 `hht shell` is directory-agnostic. Run it from any folder to list or attach to running sessions; it does not affect which workspace is mounted in a container.
 
-`hht workspace` uses the directory you run it in to select/create the workspace and mount it in the container.
+`hht workspace` uses the directory you run it in to select or create a workspace. From a subdirectory of an existing workspace, it enters that same relative directory inside the container; this applies to both an existing session and a newly launched session. `hht workspace --name` from outside the named workspace starts at its mount root.
 
 The attached TUI is rendered by `hht-daemon`, so its workspace, session, terminal, build, settings, and approval behavior is the same as the standalone manager. When the service is not installed or running, `hht` starts the standalone manager instead.
 
 Run `killme` in a **session terminal** to request that Harness Hat stops that session. From a **terminal**, `hht shell --kill <ID>` stops and removes a session listed by `hht shell`.
+
+## Refresh the daemon without losing sessions
+
+Run `hht restart` after changing the primary `harness-hat.toml` or policy-related configuration when you want the running daemon to pick it up. It validates the file first, then refreshes configuration, workspace/sidebar state, rules-watch state, and reusable proxy/DNS clients. Running containers, terminal PTYs, approvals, builds, control listeners, and the daemon token stay intact. If validation fails, the active configuration remains in use.
+
+This is intentionally not a service or binary restart. Restarting the background task would terminate the PTY-owned `docker run --rm` sessions.
 
 ## Remembered Templates
 

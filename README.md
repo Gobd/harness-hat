@@ -48,6 +48,7 @@ The [setup guide](<User Guide/01-setup.md>) includes platform-specific Docker li
 cargo install harness-hat              # binary is `hht`
 hht install                            # create the global config and start hht-daemon at login
 hht                                    # attach to the background Harness Hat TUI
+hht restart                            # reload daemon config and caches; sessions stay running
 ```
 
 `hht` attaches to the installed `hht-daemon` when it is running. It displays the same Harness Hat TUI, backed by the daemon's live session, build, approval, and terminal state. When no daemon is running, `hht` retains its standalone manager behavior.
@@ -64,6 +65,10 @@ hht workspace --name trust-service     # jump to a named workspace without cd-in
 hht workspace --rebuild                # rebuild the image (--no-cache) before launching
 hht workspace claude --resume          # runs "claude --resume" inside the session
 ```
+
+When invoked from a subdirectory of a workspace, `hht workspace` enters that same relative directory in both an existing session and a newly launched one. This also works with a custom container mount target. With `--name`, a cwd outside the named workspace starts at that workspace's mount root.
+
+`hht restart` is a soft daemon refresh: it validates and reloads the configured primary file, refreshes workspace/rules/proxy caches, and keeps running containers, PTYs, approvals, listeners, and the daemon token intact. It does not replace the executable or restart the background task; doing so would stop the PTY-owned `docker run --rm` sessions.
 
 The first time you launch a workspace, `hht workspace` saves the chosen template in that workspace's `harness-rules.toml`. Every subsequent launch skips the picker and goes straight in. Pass `--template` to override it; an optional `template` value in the matching primary-config `[[workspaces]]` entry takes precedence over the workspace-local choice.
 

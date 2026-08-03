@@ -55,6 +55,8 @@ async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
     let (stop_pending_tx, stop_pending_rx) = mpsc::channel::<crate::server::ContainerStopItem>(64);
     let (launch_pending_tx, launch_pending_rx) =
         mpsc::channel::<crate::server::WorkspaceLaunchItem>(16);
+    let (restart_pending_tx, restart_pending_rx) =
+        mpsc::channel::<crate::server::DaemonRestartItem>(4);
     let (exec_pending_tx, exec_pending_rx) = mpsc::channel::<crate::server::PendingItem>(64);
     let (net_pending_tx, net_pending_rx) = mpsc::channel::<crate::proxy::PendingNetworkItem>(64);
     // Bounded (H12): see comments in tui::App and ProxyState/ServerState.
@@ -88,6 +90,7 @@ async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
         pending_tx: exec_pending_tx,
         stop_tx: stop_pending_tx,
         launch_tx: launch_pending_tx,
+        restart_tx: restart_pending_tx,
         audit_tx,
         token: token.clone(),
         sessions: session_registry.clone(),
@@ -146,6 +149,7 @@ async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
                 exec_pending_rx,
                 stop_pending_rx,
                 launch_pending_rx,
+                restart_pending_rx,
                 net_pending_rx,
                 activity_rx,
                 audit_rx,

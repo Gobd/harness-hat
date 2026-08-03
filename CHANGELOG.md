@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `hht restart`, a session-preserving daemon refresh that reloads validated configuration and disposable caches without replacing the daemon process or stopping running sessions.
 - Added `hostdo --reason <text>` support so approval prompts can carry operator context; when remembered, the reason is persisted in `harness-rules.toml` but is not used in matching.
 - Added native Windows network and host-command approval dialogs with remembered
   allow/deny decisions and foreground activation.
@@ -14,6 +15,7 @@
 
 ### Fixed
 
+- `hht workspace` now preserves the caller's relative workspace directory when attaching to an existing session or attaching immediately after a new launch, including custom container mount targets. Named workspaces selected from elsewhere start at their mount root.
 - Attached `hht` clients now retry transient daemon TUI backpressure instead of
   exiting with a generic `/tui/frame` operation timeout. The daemon reports a
   bounded render queue as `tui_busy` rather than leaving the HTTP request

@@ -98,6 +98,11 @@ async fn main() -> Result<()> {
         }) => {
             harness_hat::rebuild::run(templates, no_cache, None)?;
         }
+        Some(Command::Restart) => {
+            tokio::task::spawn_blocking(harness_hat::workspace::restart)
+                .await
+                .context("restart task panicked")??;
+        }
         Some(Command::Install) => {
             harness_hat::service::install(None)?;
         }

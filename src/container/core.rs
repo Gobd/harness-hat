@@ -37,6 +37,9 @@ pub const LABEL_WORKSPACE: &str = "harness-hat.workspace";
 pub const LABEL_TEMPLATE: &str = "harness-hat.template";
 pub const LABEL_SESSION: &str = "harness-hat.session";
 pub const LABEL_SHELL: &str = "harness-hat.shell";
+/// Actual workspace mount target used for this session. This remains valid if
+/// the template or rules change after the container was launched.
+pub const LABEL_MOUNT_TARGET: &str = "harness-hat.mount-target";
 
 /// Identity used when shelling into a running session.
 pub const SHELL_USER: &str = "1000:1000";

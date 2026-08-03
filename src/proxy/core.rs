@@ -378,6 +378,19 @@ impl ProxyState {
         }
         Ok(client)
     }
+
+    /// Discard reusable request state after a daemon config refresh. Existing
+    /// scoped listeners deliberately keep running because containers depend on
+    /// their injected ports; policy is read through `SharedConfig` per request.
+    pub(crate) fn clear_reusable_state(&self) {
+        if let Ok(mut cache) = self.http_client_cache.lock() {
+            cache.clear();
+        }
+        if let Ok(mut limiters) = self.source_connection_limiters.lock() {
+            limiters.clear();
+        }
+        crate::proxy::clear_dns_cache();
+    }
 }
 
 fn is_container_host_alias(host: &str) -> bool {

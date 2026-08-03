@@ -466,6 +466,7 @@ pub struct ServerState {
     pub pending_tx: mpsc::Sender<PendingItem>,
     pub stop_tx: mpsc::Sender<ContainerStopItem>,
     pub launch_tx: mpsc::Sender<WorkspaceLaunchItem>,
+    pub restart_tx: mpsc::Sender<DaemonRestartItem>,
     pub audit_tx: mpsc::Sender<AuditEntry>,
     pub token: String,
     pub sessions: SessionRegistry,
@@ -538,6 +539,18 @@ pub enum ContainerStopDecision {
     NotFound,
 }
 
+/// A session-preserving daemon refresh requested by the host CLI. The App owns
+/// configuration and session state, so the control listener only forwards it.
+pub struct DaemonRestartItem {
+    pub response_tx: oneshot::Sender<std::result::Result<(), String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DaemonRestartResponse {
+    pub ok: bool,
+    pub message: String,
+}
+
 /// Body accepted by `POST /workspace/launch`.
 #[derive(Debug, Deserialize)]
 pub struct WorkspaceLaunchRequest {
@@ -559,6 +572,7 @@ pub struct WorkspaceLaunchResponse {
     pub docker_name: String,
     pub workspace_name: String,
     pub template: String,
+    pub mount_target: String,
 }
 
 /// Events streamed back over `POST /workspace/launch`, one per NDJSON line.
@@ -637,6 +651,7 @@ pub async fn run_with_listener(
     let router = Router::new()
         .route("/container/stop", post(stop_handler))
         .route("/workspace/launch", post(workspace_launch_handler))
+        .route("/daemon/restart", post(daemon_restart_handler))
         .route("/tui/frame", post(tui_frame_handler))
         .route("/tui/events", get(tui_events_handler))
         .route("/exec", post(crate::server::core::exec_handler))
@@ -674,6 +689,85 @@ pub async fn run_with_listener(
 /// caller to load and parse it just to print "manager not running."
 async fn healthz_handler() -> Response {
     (StatusCode::OK, "ok").into_response()
+}
+
+/// Reload configuration and disposable caches without replacing the daemon,
+/// listener, token, PTYs, or running containers.
+pub(super) async fn daemon_restart_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    let semaphore = control_concurrency_semaphore();
+    let _permit = match semaphore.try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "busy".into(),
+                    reason: "control server is at its concurrency limit".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    if let Err(response) = require_bearer(&state, &headers) {
+        return response;
+    }
+    let (response_tx, response_rx) = oneshot::channel();
+    if state
+        .restart_tx
+        .send(DaemonRestartItem { response_tx })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "manager_shutting_down".into(),
+                reason: "manager is shutting down".into(),
+            }),
+        )
+            .into_response();
+    }
+    match tokio::time::timeout(CONTROL_HANDLER_TIMEOUT, response_rx).await {
+        Ok(Ok(Ok(()))) => {
+            state.tui_events.publish(
+                "daemon_refreshed",
+                None,
+                "daemon configuration and caches refreshed; sessions preserved",
+            );
+            Json(DaemonRestartResponse {
+                ok: true,
+                message: "daemon refreshed; running sessions were preserved".into(),
+            })
+            .into_response()
+        }
+        Ok(Ok(Err(reason))) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "refresh_failed".into(),
+                reason,
+            }),
+        )
+            .into_response(),
+        Ok(Err(_)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "manager_shutting_down".into(),
+                reason: "manager stopped before completing the refresh".into(),
+            }),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::REQUEST_TIMEOUT,
+            Json(ErrorResponse {
+                error: "timeout".into(),
+                reason: "timed out waiting for daemon refresh".into(),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn tui_events_handler(
@@ -1131,6 +1225,7 @@ mod tests {
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (stop_tx, _stop_rx) = mpsc::channel(1);
         let (launch_tx, _launch_rx) = mpsc::channel(1);
+        let (restart_tx, _restart_rx) = mpsc::channel(1);
         let (audit_tx, _audit_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
         let (tui_tx, _tui_rx) = mpsc::channel(1);
@@ -1143,6 +1238,7 @@ mod tests {
             pending_tx,
             stop_tx,
             launch_tx,
+            restart_tx,
             audit_tx,
             token: "token".to_string(),
             sessions: registry,

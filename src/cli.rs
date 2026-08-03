@@ -81,6 +81,8 @@ pub enum Command {
         #[arg(value_name = "TEMPLATE")]
         templates: Vec<String>,
     },
+    /// Reload the daemon configuration and refresh its caches without stopping sessions.
+    Restart,
     /// Install Harness Hat as a per-user background agent that starts when
     /// the graphical desktop session starts.
     Install,
@@ -145,7 +147,7 @@ pub fn parse() -> Result<Cli> {
 
 pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
     let usage = format!(
-        "Usage: {COMMAND_NAME} [init [PATH] | shell [ID] [COMMAND...] | workspace (wp) [OPTIONS] [COMMAND...] | shell --kill ID | rebuild [OPTIONS] [TEMPLATE...] | install | uninstall]"
+        "Usage: {COMMAND_NAME} [init [PATH] | shell [ID] [COMMAND...] | workspace (wp) [OPTIONS] [COMMAND...] | shell --kill ID | rebuild [OPTIONS] [TEMPLATE...] | restart | install | uninstall]"
     );
     if raw.is_empty() {
         bail!("missing argv[0]. {usage}");
@@ -266,6 +268,14 @@ mod tests {
         };
         assert!(no_cache);
         assert_eq!(templates, vec!["go", "python"]);
+    }
+
+    #[test]
+    fn restart_parses_as_a_top_level_command() {
+        assert!(matches!(
+            parse_from(argv(&["hht", "restart"])).unwrap().command,
+            Some(Command::Restart)
+        ));
     }
 
     #[test]
