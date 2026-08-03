@@ -73,6 +73,9 @@ pub struct ContainerSession {
     pub session_token: String,
     pub mount_target: String,
     pub launched_at: Instant,
+    /// Last time the manager reconciled this session against Docker. PTY exit
+    /// events are normally immediate, but Windows can occasionally lose one.
+    pub(crate) last_container_state_check: Instant,
     pub terminal_snapshot_hash: u64,
     pub terminal_changed_at: Instant,
     pub last_input_at: Arc<Mutex<Option<Instant>>>,

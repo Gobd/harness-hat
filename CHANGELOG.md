@@ -27,6 +27,9 @@
   remaining daemon process in the current session.
 - Attached TUI clients now refresh while builds run before a session exists,
   repaint once when a build completes, and clear stale rows after a resize.
+- The manager now periodically reconciles live TUI sessions with Docker, so a
+  missed Windows PTY-exit event cannot leave a removed `docker run --rm`
+  container displayed as running.
 
 ## 0.8.4 July 29, 2026
 

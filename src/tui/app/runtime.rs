@@ -292,7 +292,11 @@ impl App {
             if self.sessions[i].pty_exited()
                 && !self.sessions[i].is_exited()
                 && !self.sessions[i].is_terminal_detached()
+                && (!self.sessions[i].pty_exit_reported
+                    || self.sessions[i].last_container_state_check.elapsed()
+                        >= std::time::Duration::from_secs(2))
             {
+                self.sessions[i].last_container_state_check = std::time::Instant::now();
                 let label = self.sessions[i].tab_label();
                 let docker_name = self.sessions[i].docker_name.clone();
                 match crate::container::inspect_container_state(&docker_name) {
@@ -326,6 +330,30 @@ impl App {
                         }
                         continue;
                     }
+                }
+            }
+
+            // The PTY event loop normally reports when `docker run` exits.
+            // On Windows, a client can occasionally terminate without that
+            // event reaching us. Reconcile all live sessions at a low rate so
+            // a `docker run --rm` container that has already disappeared
+            // cannot remain as a false running session in the TUI.
+            if !self.sessions[i].is_exited()
+                && self.sessions[i].last_container_state_check.elapsed()
+                    >= std::time::Duration::from_secs(2)
+            {
+                self.sessions[i].last_container_state_check = std::time::Instant::now();
+                let docker_name = self.sessions[i].docker_name.clone();
+                match crate::container::inspect_container_state(&docker_name) {
+                    Ok(Some(state)) if state.running => {}
+                    Ok(Some(_)) | Ok(None) => {
+                        self.sessions[i]
+                            .exited
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    // Keep the session while Docker is temporarily unavailable;
+                    // a failed inspection must not be treated as an exit.
+                    Err(_) => {}
                 }
             }
 

@@ -617,6 +617,7 @@ pub fn spawn(
             session_token: session_token.to_string(),
             mount_target: mount_str,
             launched_at: Instant::now(),
+            last_container_state_check: Instant::now(),
             terminal_snapshot_hash: 0,
             terminal_changed_at: Instant::now(),
             last_input_at: Arc::new(Mutex::new(None)),
