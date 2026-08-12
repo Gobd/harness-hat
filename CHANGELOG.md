@@ -5,18 +5,34 @@
 ### Added
 
 - Added `hht ws` as the preferred shortcut for `hht workspace`; the previous shortcut remains available for compatibility but is deprecated.
+- Added the `omp` and `omp-yolo` coding-agent commands to the base image, with
+  pinned, architecture-specific release checksums and optional `~/.omp` state
+  mounting.
+- Added `Ctrl+D` workspace deletion from the sidebar, including the existing
+  confirmation flow.
 - Added mouse-driven text selection in the local terminal and activity panes, with OSC 52 clipboard copy support through `Cmd+C` or `Ctrl+Shift+C`.
 - Added complete Docker build logs for failed image builds. The build pane shows the saved log path, and the ten most recent build logs are retained.
 
 ### Changed
 
 - Failed image builds now retain their workspace/template context so the build can be retried directly from the build pane.
+- Updated the base image to Ubuntu 26.04 LTS with Node.js 24.
+- Updated the PHP template to PHPUnit 13.3.0, which is supported by Ubuntu
+  26.04's PHP 8.5 runtime.
+- `env_passthrough` values are now captured from the invoking `hht ws` process,
+  so variables exported after the daemon starts reach new sessions.
+- New sessions can seed their workspace-local zsh history from a read-only copy
+  of the host history file.
 
 ### Fixed
 
 - Attached TUI clients now start correctly on Windows after mouse capture was disabled for terminal text selection.
 - Attached daemon clients now receive a complete frame when a Docker build fails, so the final failure state and saved log location are displayed.
 - The background daemon now stays available when Docker is offline, reports the Docker-specific condition to `hht ws`, and retries Docker readiness every ten seconds so workspace launches work after Docker starts.
+- Docker image builds now retry transient download failures for pinned tool and
+  package sources.
+- Attached daemon TUI actions that depend on the current directory now use the
+  attached client's directory instead of the background service's directory.
 
 
 ## 0.8.5 Aug 2, 2026
