@@ -15,6 +15,7 @@
 ### Fixed
 
 - Attached daemon clients now receive a complete frame when a Docker build fails, so the final failure state and saved log location are displayed.
+- The background daemon now stays available when Docker is offline, reports the Docker-specific condition to `hht ws`, and retries Docker readiness every ten seconds so workspace launches work after Docker starts.
 
 
 ## 0.8.5 Aug 2, 2026

@@ -38,9 +38,16 @@ pub async fn run_service(config_path: PathBuf) -> Result<()> {
 }
 
 async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
-    crate::container::ensure_docker_installed_and_running()?;
-
     let config = crate::config::load(&config_path)?;
+    let docker_status = crate::container::DockerStatus::new();
+    let docker_available = docker_status.refresh();
+    if !docker_available && !service_mode {
+        return Err(anyhow::anyhow!(docker_status.reason()));
+    }
+    if !docker_available {
+        tracing::warn!(reason = %docker_status.reason(), "Docker is unavailable; daemon will keep checking in the background");
+    }
+
     // ensure_docker_assets covers the base and default dockerfiles too.
     crate::init::ensure_docker_assets(&config.docker_dir)?;
 
@@ -98,6 +105,7 @@ async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
         activity_tx: activity_tx.clone(),
         tui_tx,
         tui_events: tui_events.clone(),
+        docker_status: docker_status.clone(),
     };
     let control_listener = tokio::net::TcpListener::bind(&control_addr)
         .await
@@ -106,6 +114,30 @@ async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
     let control_handle = tokio::spawn(async move {
         if let Err(e) = crate::server::run_with_listener(server_state, control_listener).await {
             error!("control server error: {e}");
+        }
+    });
+
+    let docker_monitor_status = docker_status.clone();
+    let docker_monitor_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            let was_available = docker_monitor_status.is_available();
+            let status = docker_monitor_status.clone();
+            let available = match tokio::task::spawn_blocking(move || status.refresh()).await {
+                Ok(available) => available,
+                Err(error) => {
+                    tracing::warn!(%error, "Docker availability check task failed");
+                    false
+                }
+            };
+            if available != was_available {
+                if available {
+                    tracing::info!("Docker is available; daemon is ready to launch workspaces");
+                } else {
+                    tracing::warn!(reason = %docker_monitor_status.reason(), "Docker became unavailable; daemon will retry in 10 seconds");
+                }
+            }
         }
     });
 
@@ -178,6 +210,7 @@ async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
         error!(%error, "Harness Hat TUI stopped");
     }
     control_handle.abort();
+    docker_monitor_handle.abort();
     telemetry_handle.shutdown()?;
     tui_result.map_err(|e| anyhow::anyhow!("TUI thread panicked: {e}"))??;
     Ok(())
@@ -196,7 +229,15 @@ async fn daemon_is_reachable(config: &crate::config::Config) -> bool {
         Ok(client) => client,
         Err(_) => return false,
     };
-    matches!(client.get(control_url).send().await, Ok(response) if response.status().is_success())
+    // A healthy response or the daemon's Docker-readiness 503 proves the
+    // daemon/control server is alive. Other responses may belong to an
+    // unrelated process occupying the configured port.
+    matches!(
+        client.get(control_url).send().await,
+        Ok(response)
+            if response.status().is_success()
+                || response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE
+    )
 }
 
 async fn run_attached_client(config_path: PathBuf) -> Result<()> {

@@ -551,10 +551,21 @@ fn probe_manager(control_url: &str) -> Result<()> {
         .get(format!("{control_url}/healthz"))
         .send()
         .context("connecting to manager")?;
-    if !resp.status().is_success() {
-        bail!("manager returned {} on /healthz", resp.status());
+    if resp.status().is_success() {
+        return Ok(());
     }
-    Ok(())
+
+    let status = resp.status();
+    let body = resp.bytes().context("reading manager health response")?;
+    if let Ok(error) = serde_json::from_slice::<LaunchError>(&body)
+        && error.error == "docker_unavailable"
+    {
+        bail!(
+            "daemon is running, but Docker is unavailable: {}",
+            error.reason
+        );
+    }
+    bail!("manager returned {status} on /healthz");
 }
 
 #[derive(Debug, Deserialize)]
@@ -569,7 +580,7 @@ struct LaunchResponse {
 #[derive(Debug, Deserialize)]
 struct LaunchError {
     #[serde(rename = "error")]
-    _error: String,
+    error: String,
     reason: String,
 }
 

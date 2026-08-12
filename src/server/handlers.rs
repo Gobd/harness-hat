@@ -475,6 +475,7 @@ pub struct ServerState {
     pub activity_tx: mpsc::Sender<ActivityEvent>,
     pub tui_tx: mpsc::Sender<TuiFrameItem>,
     pub tui_events: TuiEventBroker,
+    pub docker_status: crate::container::DockerStatus,
 }
 
 /// A frame request from the foreground `hht` terminal. The daemon owns the
@@ -687,8 +688,19 @@ pub async fn run_with_listener(
 /// when the manager isn't running. Intentionally no auth — the response
 /// contains nothing sensitive, and requiring the token would force every CLI
 /// caller to load and parse it just to print "manager not running."
-async fn healthz_handler() -> Response {
-    (StatusCode::OK, "ok").into_response()
+async fn healthz_handler(State(state): State<Arc<ServerState>>) -> Response {
+    if state.docker_status.is_available() {
+        return (StatusCode::OK, "ok").into_response();
+    }
+
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse {
+            error: "docker_unavailable".into(),
+            reason: state.docker_status.reason(),
+        }),
+    )
+        .into_response()
 }
 
 /// Reload configuration and disposable caches without replacing the daemon,
@@ -1246,7 +1258,15 @@ mod tests {
             activity_tx,
             tui_tx,
             tui_events: TuiEventBroker::default(),
+            docker_status: crate::container::DockerStatus::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn healthz_reports_when_docker_is_unavailable() {
+        let state = test_server_state(SessionRegistry::default(), ExecJobRegistry::default());
+        let response = healthz_handler(State(Arc::new(state))).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
