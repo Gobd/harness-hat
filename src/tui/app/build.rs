@@ -43,11 +43,19 @@ impl App {
         let tx = self.build_event_tx.clone();
         let launch_session_group = self.build_session_group;
         let label = label.to_string();
+        let build_log_path = self.config.get().logging.log_dir.join(format!(
+            "docker-build-{}-{}.log",
+            chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let command_display_for_task = command_display.clone();
         let task_cancel = Arc::clone(&cancel_flag);
         let handle = tokio::spawn(async move {
             run_build_docker_commands(
                 label,
                 docker_commands,
+                command_display_for_task,
+                build_log_path,
                 launch_workspace_idx,
                 launch_container_idx,
                 launch_session_group,

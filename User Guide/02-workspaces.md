@@ -29,6 +29,12 @@ cd ~/src/my-awesome-project
 hht workspace
 ```
 
+The shorter `hht ws` spelling is equivalent and is the preferred shortcut:
+
+```sh
+hht ws
+```
+
 `hht workspace` uses the host directory you run it from to select a configured workspace. When that directory is a subdirectory of the workspace, Harness Hat opens the session at the same relative container path.
 
 If the directory is not already registered, Harness Hat adds it as a workspace, asks you to choose a template, then opens the session.
@@ -47,9 +53,9 @@ To run a command immediately inside docker instead of opening a shell, put it af
 
 ```sh
 # launch claude with all permission asks disabled.
-hht workspace claude-yolo
+hht ws claude-yolo
 # resume a previous claude session in this workspace.
-hht workspace claude --resume
+hht ws claude --resume
 ```
 
 > **Expected result:** Harness Hat starts or attaches to the workspace session, then runs `claude-yolo` in that container. The command's exit status is returned to the terminal.

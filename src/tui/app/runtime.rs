@@ -165,6 +165,8 @@ impl App {
                     exit_code,
                     error,
                     diagnostic,
+                    log_path,
+                    log_error,
                 }) => {
                     changed = true;
                     let command = self
@@ -173,8 +175,6 @@ impl App {
                         .map(|task| task.command_display)
                         .unwrap_or_default();
                     if let Some(error) = error {
-                        self.build_workspace_idx = None;
-                        self.build_session_group = None;
                         self.pending_force_rebuild = false;
                         self.push_log(format!("{label} failed: {error}"), true);
                         if let Some(diagnostic) = &diagnostic {
@@ -187,6 +187,8 @@ impl App {
                             cancelled: false,
                             exit_code,
                             diagnostic: diagnostic_for_state,
+                            log_path,
+                            log_error,
                         });
                         self.focus = Focus::ImageBuild;
                         if let Some(pending) = self.workspace_launch_pending.take() {
@@ -207,6 +209,8 @@ impl App {
                             cancelled: true,
                             exit_code,
                             diagnostic,
+                            log_path,
+                            log_error,
                         });
                         self.focus = Focus::ImageBuild;
                         if let Some(pending) = self.workspace_launch_pending.take() {
@@ -256,8 +260,6 @@ impl App {
                         let suffix = exit_code
                             .map(|code| format!(" (exit code {code})"))
                             .unwrap_or_default();
-                        self.build_workspace_idx = None;
-                        self.build_session_group = None;
                         self.pending_force_rebuild = false;
                         self.push_log(format!("{label} failed{suffix}"), true);
                         if let Some(diagnostic) = &diagnostic {
@@ -269,6 +271,8 @@ impl App {
                             cancelled: false,
                             exit_code,
                             diagnostic,
+                            log_path,
+                            log_error,
                         });
                         self.focus = Focus::ImageBuild;
                         if let Some(pending) = self.workspace_launch_pending.take() {
@@ -510,7 +514,133 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
-        let _ = mouse;
+        if !matches!(self.focus, Focus::Terminal | Focus::Activity) {
+            return;
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll_mode = true;
+                self.terminal_scroll = self.terminal_scroll.saturating_add(3);
+                return;
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_mode = true;
+                self.terminal_scroll = self.terminal_scroll.saturating_sub(3);
+                return;
+            }
+            _ => {}
+        }
+
+        let area = self.terminal_selection_area;
+        let mut dragging = self.selection_dragging;
+        match self.focus {
+            Focus::Terminal => {
+                let Some(session_idx) = self.active_session else {
+                    return;
+                };
+                let Some(session) = self.sessions.get_mut(session_idx) else {
+                    return;
+                };
+                let mut term = session.term.lock();
+                Self::handle_terminal_selection_mouse(&mut *term, area, &mut dragging, mouse);
+            }
+            Focus::Activity => {
+                let Some(activity_id) = self.active_activity.clone() else {
+                    return;
+                };
+                let Some(activity) = self.activity_by_id_mut(&activity_id) else {
+                    return;
+                };
+                let mut term = activity.terminal.term.lock();
+                Self::handle_terminal_selection_mouse(&mut *term, area, &mut dragging, mouse);
+            }
+            _ => {}
+        }
+        self.selection_dragging = dragging;
+    }
+
+    fn handle_terminal_selection_mouse<T: alacritty_terminal::event::EventListener>(
+        term: &mut alacritty_terminal::term::Term<T>,
+        area: Option<ratatui::layout::Rect>,
+        dragging: &mut bool,
+        mouse: MouseEvent,
+    ) {
+        let point = area.and_then(|area| {
+            if mouse.column < area.x
+                || mouse.row < area.y
+                || mouse.column >= area.right()
+                || mouse.row >= area.bottom()
+            {
+                return None;
+            }
+            let viewport = alacritty_terminal::index::Point::new(
+                usize::from(mouse.row - area.y),
+                alacritty_terminal::index::Column::from(usize::from(mouse.column - area.x)),
+            );
+            Some(alacritty_terminal::term::viewport_to_point(
+                term.grid().display_offset(),
+                viewport,
+            ))
+        });
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(point) = point {
+                    term.selection = Some(alacritty_terminal::selection::Selection::new(
+                        alacritty_terminal::selection::SelectionType::Simple,
+                        point,
+                        alacritty_terminal::index::Side::Left,
+                    ));
+                    *dragging = true;
+                } else {
+                    term.selection = None;
+                    *dragging = false;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+                if *dragging =>
+            {
+                if let Some(point) = point
+                    && let Some(selection) = term.selection.as_mut()
+                {
+                    selection.update(point, alacritty_terminal::index::Side::Right);
+                }
+                if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+                    *dragging = false;
+                }
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                term.selection = None;
+                *dragging = false;
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn copy_terminal_selection(&mut self) -> bool {
+        let selected = match self.focus {
+            Focus::Terminal => self
+                .active_session
+                .and_then(|idx| self.sessions.get(idx))
+                .and_then(|session| session.term.lock().selection_to_string()),
+            Focus::Activity => self
+                .active_activity
+                .as_deref()
+                .and_then(|id| self.activity_by_id(id))
+                .and_then(|activity| activity.terminal.term.lock().selection_to_string()),
+            _ => None,
+        };
+
+        let Some(selected) = selected else {
+            return false;
+        };
+        self.pending_clipboard = Some(selected);
+        true
+    }
+
+    pub(crate) fn take_clipboard_text(&mut self) -> Option<String> {
+        self.pending_clipboard.take()
     }
 }
 

@@ -91,6 +91,7 @@
 
 version = 1
 template = "rust"
+mirror_cwd = true
 
 [hostdo]
 default_policy = "prompt"

@@ -2,6 +2,11 @@ use super::*;
 
 impl App {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
+        if crate::tui::is_copy_key(&key) {
+            self.copy_terminal_selection();
+            return;
+        }
+
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if self.focus == Focus::Activity
                 && let Some(id) = self.active_activity.clone()

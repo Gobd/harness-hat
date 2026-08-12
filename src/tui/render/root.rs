@@ -14,6 +14,7 @@ const STATUS_HEIGHT: u16 = 1;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    app.terminal_selection_area = None;
 
     if app.log_fullscreen {
         let split = Layout::default()

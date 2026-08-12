@@ -85,6 +85,9 @@ pub(crate) fn render_terminal(
     } else {
         block.inner(content_area)
     };
+    if focused {
+        app.terminal_selection_area = Some(inner);
+    }
     frame.render_widget(block, content_area);
     if !fullscreen {
         render_terminal_border_hint(frame, content_area, terminal_fullscreen_hint(false));
@@ -548,6 +551,13 @@ pub(crate) fn render_term_buffer<T: alacritty_terminal::event::EventListener>(
         }
         if cell.flags.contains(TermFlags::DIM) || cell.flags.contains(TermFlags::DIM_BOLD) {
             style = attenuate_style(style.add_modifier(Modifier::DIM));
+        }
+        if content
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.contains(indexed.point))
+        {
+            style = style.add_modifier(Modifier::REVERSED);
         }
         if dimmed {
             style = attenuate_style(style);

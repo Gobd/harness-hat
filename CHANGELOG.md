@@ -1,13 +1,29 @@
 # Changelog
 
+## 0.8.6 Future
+
+### Added
+
+- Added `hht ws` as the preferred shortcut for `hht workspace`; the previous shortcut remains available for compatibility but is deprecated.
+- Added mouse-driven text selection in the local terminal and activity panes, with OSC 52 clipboard copy support through `Cmd+C` or `Ctrl+Shift+C`.
+- Added complete Docker build logs for failed image builds. The build pane shows the saved log path, and the ten most recent build logs are retained.
+
+### Changed
+
+- Failed image builds now retain their workspace/template context so the build can be retried directly from the build pane.
+
+### Fixed
+
+- Attached daemon clients now receive a complete frame when a Docker build fails, so the final failure state and saved log location are displayed.
+
+
 ## 0.8.5 Aug 2, 2026
 
 ### Added
 
 - Added `hht restart`, a session-preserving daemon refresh that reloads validated configuration and disposable caches without replacing the daemon process or stopping running sessions.
 - Added `hostdo --reason <text>` support so approval prompts can carry operator context; when remembered, the reason is persisted in `harness-rules.toml` but is not used in matching.
-- Added native Windows network and host-command approval dialogs with remembered
-  allow/deny decisions and foreground activation.
+- Added native Windows network and host-command approval dialogs with remembered allow/deny decisions and foreground activation.
 
 ### Changed
 
@@ -16,28 +32,19 @@
 ### Fixed
 
 - `hht workspace` now preserves the caller's relative workspace directory when attaching to an existing session or attaching immediately after a new launch, including custom container mount targets. Named workspaces selected from elsewhere start at their mount root.
-- Attached `hht` clients now retry transient daemon TUI backpressure instead of
-  exiting with a generic `/tui/frame` operation timeout. The daemon reports a
-  bounded render queue as `tui_busy` rather than leaving the HTTP request
-  waiting indefinitely.
-- Entering the terminal view in an attached TUI now forces a complete screen
-  repaint, preventing a stale or blank delta-rendered screen.
+- Attached `hht` clients now retry transient daemon TUI backpressure instead of exiting with a generic `/tui/frame` operation timeout. The daemon reports a bounded render queue as `tui_busy` rather than leaving the HTTP request waiting indefinitely.
+- Entering the terminal view in an attached TUI now forces a complete screen repaint, preventing a stale or blank delta-rendered screen.
 - A lost manager-side `docker run` terminal connection no longer marks a still-running container as stopped. The session remains visible as terminal-detached and shows the `hht shell` reconnection command.
-- Windows background operations no longer flash transient console windows when
-  invoking Docker, host commands, or process-management utilities.
-- Uninstalling the Windows service now stops both the scheduled task and any
-  remaining daemon process in the current session.
-- Attached TUI clients now refresh while builds run before a session exists,
-  repaint once when a build completes, and clear stale rows after a resize.
-- The manager now periodically reconciles live TUI sessions with Docker, so a
-  missed Windows PTY-exit event cannot leave a removed `docker run --rm`
-  container displayed as running.
+- Windows background operations no longer flash transient console windows when invoking Docker, host commands, or process-management utilities.
+- Uninstalling the Windows service now stops both the scheduled task and any remaining daemon process in the current session.
+- Attached TUI clients now refresh while builds run before a session exists, repaint once when a build completes, and clear stale rows after a resize.
+- The manager now periodically reconciles live TUI sessions with Docker, so a missed Windows PTY-exit event cannot leave a removed `docker run --rm` container displayed as running.
 
 ## 0.8.4 July 29, 2026
 
 ### Added
 
-- Added the `hht wp` shortcut for the `hht workspace` command.
+- Added a shortcut for the `hht workspace` command.
 - Added `[[localhost_forwards]]` support to `harness-rules.toml`, including workspace-specific overrides for configured container forwards.
 
 ### Changed

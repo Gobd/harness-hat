@@ -131,19 +131,35 @@ pub(crate) fn build_output_is_selected(app: &App) -> bool {
 
 pub(crate) fn render_activity_detail(
     frame: &mut Frame,
-    app: &App,
+    app: &mut App,
     area: Rect,
     activity_id: &str,
     dimmed: bool,
 ) {
-    let Some(activity) = app.activity_by_id(activity_id) else {
-        render_idle(frame, area);
-        return;
-    };
     let tone = |c| maybe_dim(c, dimmed);
-    let title = match &activity.kind {
-        crate::activity::ActivityKind::Hostdo { .. } => " Hostdo Activity ",
-        crate::activity::ActivityKind::Network { .. } => " Network Activity ",
+    let (title, lines, activity_terminal) = {
+        let Some(activity) = app.activity_by_id(activity_id) else {
+            render_idle(frame, area);
+            return;
+        };
+        let title = match &activity.kind {
+            crate::activity::ActivityKind::Hostdo { .. } => " Hostdo Activity ",
+            crate::activity::ActivityKind::Network { .. } => " Network Activity ",
+        };
+        let mut lines = Vec::new();
+        lines.push(Line::from(""));
+        append_activity_summary_lines(&mut lines, activity, &tone);
+        match &activity.kind {
+            crate::activity::ActivityKind::Hostdo { .. } => {
+                append_hostdo_detail_lines(&mut lines, activity, &tone)
+            }
+            crate::activity::ActivityKind::Network { .. } => {
+                append_network_detail_lines(&mut lines, activity, &tone)
+            }
+        }
+        append_activity_status_line(&mut lines, activity, &tone);
+        lines.push(Line::from(""));
+        (title, lines, activity.terminal.clone())
     };
     let block = Block::default()
         .title(title)
@@ -155,24 +171,8 @@ pub(crate) fn render_activity_detail(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(tone(Color::Cyan)));
 
-    let _status_color = activity_status_color(&activity.state);
     let activity_focused = !dimmed && app.focus == Focus::Activity;
     let in_scroll_mode = activity_focused && app.scroll_mode;
-    let mut lines = Vec::new();
-    lines.push(Line::from(""));
-    append_activity_summary_lines(&mut lines, activity, &tone);
-    match &activity.kind {
-        crate::activity::ActivityKind::Hostdo { .. } => {
-            append_hostdo_detail_lines(&mut lines, activity, &tone)
-        }
-        crate::activity::ActivityKind::Network { .. } => {
-            append_network_detail_lines(&mut lines, activity, &tone)
-        }
-    }
-
-    append_activity_status_line(&mut lines, activity, &tone);
-
-    lines.push(Line::from(""));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -200,14 +200,18 @@ pub(crate) fn render_activity_detail(
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), chunks[0]);
     }
     if output_height > 0 {
-        activity.terminal.resize(chunks[1].height, chunks[1].width);
-        let mut term = activity.terminal.term.lock();
+        activity_terminal.resize(chunks[1].height, chunks[1].width);
+        let output_area = chunks[1];
+        if activity_focused {
+            app.terminal_selection_area = Some(output_area);
+        }
+        let mut term = activity_terminal.term.lock();
         render_term_buffer(
             frame,
-            chunks[1],
+            output_area,
             &mut *term,
             dimmed,
-            false,
+            activity_focused,
             in_scroll_mode,
             app.terminal_scroll,
         );

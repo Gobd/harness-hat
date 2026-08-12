@@ -48,7 +48,7 @@ pub enum Command {
     ///
     /// Any args after the subcommand are passed verbatim to `docker exec`
     /// (same passthrough behavior as `hht shell ID …`).
-    #[command(alias = "wp")]
+    #[command(visible_alias = "ws", alias = "wp")]
     Workspace {
         /// List configured workspaces without starting or attaching to a session.
         #[arg(long, conflicts_with_all = ["template", "name", "rebuild", "args"])]
@@ -147,7 +147,7 @@ pub fn parse() -> Result<Cli> {
 
 pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
     let usage = format!(
-        "Usage: {COMMAND_NAME} [init [PATH] | shell [ID] [COMMAND...] | workspace (wp) [OPTIONS] [COMMAND...] | shell --kill ID | rebuild [OPTIONS] [TEMPLATE...] | restart | install | uninstall]"
+        "Usage: {COMMAND_NAME} [init [PATH] | shell [ID] [COMMAND...] | workspace (ws) [OPTIONS] [COMMAND...] | shell --kill ID | rebuild [OPTIONS] [TEMPLATE...] | restart | install | uninstall]"
     );
     if raw.is_empty() {
         bail!("missing argv[0]. {usage}");
@@ -156,10 +156,13 @@ pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
     // `Error::exit()` prints --help/--version to stdout and exits 0, and prints
     // genuine usage errors to stderr (exit 2) with clap's formatting, rather
     // than surfacing them as an anyhow "Error: ..." message.
-    let options = match CliOptions::try_parse_from(raw) {
+    let options = match CliOptions::try_parse_from(raw.clone()) {
         Ok(options) => options,
         Err(err) => err.exit(),
     };
+    if raw.get(1).is_some_and(|arg| arg == "wp") {
+        eprintln!("warning: `hht wp` is deprecated; use `hht ws` instead");
+    }
     Ok(Cli {
         command: options.command,
     })
@@ -238,7 +241,16 @@ mod tests {
     }
 
     #[test]
-    fn wp_alias_parses_as_workspace_and_preserves_trailing_args() {
+    fn ws_alias_parses_as_workspace_and_preserves_trailing_args() {
+        let cli = parse_from(argv(&["hht", "ws", ".."])).expect("parse");
+        let Some(Command::Workspace { args, .. }) = cli.command else {
+            panic!("expected Workspace subcommand");
+        };
+        assert_eq!(args, vec![OsString::from("..")]);
+    }
+
+    #[test]
+    fn wp_alias_remains_compatible_and_preserves_trailing_args() {
         let cli = parse_from(argv(&["hht", "wp", ".."])).expect("parse");
         let Some(Command::Workspace { args, .. }) = cli.command else {
             panic!("expected Workspace subcommand");

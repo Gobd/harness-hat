@@ -393,6 +393,10 @@ pub(crate) fn render_build_output(frame: &mut Frame, app: &mut App, area: Rect, 
         header_lines.push(Line::from(""));
     }
 
+    let build_failed = app
+        .build_finished
+        .as_ref()
+        .is_some_and(|finished| !finished.cancelled);
     if let Some(finished) = app.build_finished.as_ref() {
         let (label, color) = if finished.cancelled {
             ("BUILD CANCELLED".to_string(), Color::Yellow)
@@ -416,11 +420,43 @@ pub(crate) fn render_build_output(frame: &mut Frame, app: &mut App, area: Rect, 
                 Style::default().fg(tone(color)),
             )));
         }
+        if let Some(log_path) = finished.log_path.as_ref() {
+            // Keep the full path here. Paragraph wrapping must be allowed to
+            // split long paths across rows; clamping would hide the filename
+            // on narrow terminals.
+            let path = log_path.display().to_string();
+            header_lines.push(Line::from(vec![
+                Span::styled(
+                    "Docker build log: ",
+                    Style::default().fg(tone(Color::DarkGray)),
+                ),
+                Span::styled(path, Style::default().fg(tone(Color::White))),
+            ]));
+        }
+        if let Some(log_error) = finished.log_error.as_ref() {
+            let detail = clamp_for_width(
+                &format!("Could not save/finish build log: {log_error}"),
+                max_cols,
+            );
+            header_lines.push(Line::from(Span::styled(
+                detail,
+                Style::default().fg(tone(Color::Yellow)),
+            )));
+        }
         header_lines.push(Line::from(Span::styled(
             "[r] Rebuild   [^B/Esc] Back to sidebar",
             Style::default().fg(tone(Color::DarkGray)),
         )));
         header_lines.push(Line::from(""));
+    }
+
+    if build_failed {
+        frame.render_widget(Clear, output_area);
+        frame.render_widget(
+            Paragraph::new(header_lines).wrap(Wrap { trim: false }),
+            output_area,
+        );
+        return;
     }
 
     let visible_rows = (output_area.height as usize).saturating_sub(header_lines.len());

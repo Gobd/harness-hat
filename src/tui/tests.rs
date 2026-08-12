@@ -1,8 +1,23 @@
 use super::{
     App, ContainerPickerState, Focus, SidebarItem, move_wrapping_cursor,
-    should_force_remote_full_frame, should_handle_key_event,
+    should_force_remote_build_failure_frame, should_force_remote_full_frame,
+    should_handle_key_event,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+#[test]
+fn copy_shortcuts_are_recognized_without_confusing_quit() {
+    let command_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER);
+    let control_shift_c = KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    let control_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+    assert!(super::is_copy_key(&command_c));
+    assert!(super::is_copy_key(&control_shift_c));
+    assert!(!super::is_copy_key(&control_c));
+}
 
 #[test]
 fn container_picker_steps_are_distinct() {
@@ -66,6 +81,13 @@ fn entering_terminal_focus_forces_a_complete_remote_frame() {
         &Focus::Sidebar,
         true,
     ));
+}
+
+#[test]
+fn a_new_remote_build_failure_forces_a_complete_frame() {
+    assert!(should_force_remote_build_failure_frame(false, true));
+    assert!(!should_force_remote_build_failure_frame(true, true));
+    assert!(!should_force_remote_build_failure_frame(true, false));
 }
 
 #[test]

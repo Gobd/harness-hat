@@ -51,7 +51,9 @@ pub(crate) fn run_attached(config_path: PathBuf) -> Result<()> {
         EnterAlternateScreen,
         Clear(ClearType::All),
         cursor::Hide,
-        crossterm::event::EnableMouseCapture,
+        // Attached frames contain both terminal cells and ordinary Ratatui text.
+        // Leave selection to the host terminal so users can select either one.
+        crossterm::event::DisableMouseCapture,
         crossterm::terminal::SetTitle("Harness Hat")
     ) {
         let _ = disable_raw_mode();
@@ -93,10 +95,12 @@ fn relay_loop(
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
+                    let copy_key = crate::tui::is_copy_key(&key);
                     if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('c'))
                         && key
                             .modifiers
                             .contains(crossterm::event::KeyModifiers::CONTROL)
+                        && !copy_key
                     {
                         return Ok(());
                     }

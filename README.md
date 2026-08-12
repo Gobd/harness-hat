@@ -59,7 +59,7 @@ With the manager running in another terminal, you can also attach to or start th
 
 ```sh
 hht workspace                          # match $PWD to a workspace, launch if needed, attach
-hht wp ..                              # `workspace` shortcut; pass a command after it
+hht ws ..                              # `workspace` shortcut; pass a command after it
 hht workspace --template go         # skip the template picker, use a specific profile
 hht workspace --name trust-service     # jump to a named workspace without cd-ing in
 hht workspace --rebuild                # rebuild the image (--no-cache) before launching

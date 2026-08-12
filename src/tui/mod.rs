@@ -6,11 +6,12 @@ pub(crate) use remote::run_attached;
 
 use alacritty_terminal::grid::Dimensions;
 use anyhow::{Context, Result};
+use base64::Engine;
 use crossterm::{
     cursor,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableMouseCapture, Event, EventStream,
-        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
+        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     style::ResetColor,
@@ -23,9 +24,11 @@ use futures::StreamExt;
 use ratatui::{
     Terminal,
     backend::{CrosstermBackend, TestBackend},
+    layout::Rect,
     style::{Color, Modifier},
 };
 use std::collections::{HashMap, VecDeque};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
@@ -301,6 +304,9 @@ pub struct App {
     last_terminal_esc: Option<std::time::Instant>,
     pub scroll_mode: bool,
     pub terminal_scroll: usize,
+    pub(crate) terminal_selection_area: Option<Rect>,
+    pub(crate) selection_dragging: bool,
+    pending_clipboard: Option<String>,
     pub(crate) container_usage: HashMap<String, CachedContainerUsage>,
     last_base_rules_poll: std::time::Instant,
     watched_rules_stamps: HashMap<PathBuf, WatchedFileStamp>,
@@ -329,6 +335,8 @@ enum BuildEvent {
         exit_code: Option<i32>,
         error: Option<String>,
         diagnostic: Option<String>,
+        log_path: Option<PathBuf>,
+        log_error: Option<String>,
     },
 }
 
@@ -350,6 +358,8 @@ pub(crate) struct BuildFinished {
     pub cancelled: bool,
     pub exit_code: Option<i32>,
     pub diagnostic: Option<String>,
+    pub log_path: Option<PathBuf>,
+    pub log_error: Option<String>,
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -514,6 +524,7 @@ pub async fn run_service(
 ) -> Result<()> {
     let mut last_remote_buffer: Option<ratatui::buffer::Buffer> = None;
     let mut last_remote_focus: Option<Focus> = None;
+    let mut last_remote_build_failure = false;
     let mut next_refresh_event = tokio::time::Instant::now();
     loop {
         let build_was_running = app.build_is_running();
@@ -547,8 +558,17 @@ pub async fn run_service(
                 last_remote_focus.as_ref(),
                 &app.focus,
                 item.full_frame,
+            ) || should_force_remote_build_failure_frame(
+                last_remote_build_failure,
+                app.build_finished
+                    .as_ref()
+                    .is_some_and(|finished| !finished.cancelled),
             );
             last_remote_focus = Some(app.focus.clone());
+            last_remote_build_failure = app
+                .build_finished
+                .as_ref()
+                .is_some_and(|finished| !finished.cancelled);
             let mut terminal = match Terminal::new(TestBackend::new(item.width, item.height)) {
                 Ok(terminal) => terminal,
                 Err(error) => {
@@ -575,6 +595,10 @@ pub async fn run_service(
                 render_buffer_delta(last_remote_buffer.as_ref(), &buffer)
             };
             last_remote_buffer = Some(buffer);
+            let mut frame = frame;
+            if let Some(text) = app.take_clipboard_text() {
+                frame.extend_from_slice(&clipboard_sequence(&text));
+            }
             let _ = item
                 .response_tx
                 .send(crate::server::TuiFrameResponse { frame, full_frame });
@@ -603,6 +627,10 @@ fn should_force_remote_full_frame(
 ) -> bool {
     requested_full_frame
         || (*current_focus == Focus::Terminal && previous_focus != Some(&Focus::Terminal))
+}
+
+fn should_force_remote_build_failure_frame(previous_visible: bool, current_visible: bool) -> bool {
+    current_visible && !previous_visible
 }
 
 fn render_buffer_delta(
@@ -951,6 +979,12 @@ async fn event_loop(
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if should_handle_key_event(&key) => {
                         app.handle_key(key);
+                        if let Some(text) = app.take_clipboard_text() {
+                            terminal
+                                .backend_mut()
+                                .write_all(&clipboard_sequence(&text))?;
+                            terminal.backend_mut().flush()?;
+                        }
                         needs_render = true;
                     }
                     Some(Ok(Event::Mouse(mouse))) => {
@@ -1025,8 +1059,20 @@ fn ring_new_session_bells<W: std::io::Write>(
 }
 
 fn should_enable_mouse_capture(app: &App) -> bool {
-    let _ = app;
-    false
+    matches!(app.focus, Focus::Terminal | Focus::Activity)
+}
+
+pub(crate) fn is_copy_key(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('c')
+        && (key.modifiers.contains(KeyModifiers::SUPER)
+            || key
+                .modifiers
+                .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT))
+}
+
+fn clipboard_sequence(text: &str) -> Vec<u8> {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    format!("\x1b]52;c;{encoded}\x07").into_bytes()
 }
 
 fn sync_mouse_capture<W: std::io::Write>(
@@ -1064,6 +1110,14 @@ mod bell_tests {
         let mut buf = Vec::new();
         super::restore_terminal_output(&mut buf, false).expect("restore terminal");
         assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn clipboard_sequence_uses_osc52() {
+        assert_eq!(
+            super::clipboard_sequence("hello"),
+            b"\x1b]52;c;aGVsbG8=\x07"
+        );
     }
 
     #[test]

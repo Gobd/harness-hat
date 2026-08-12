@@ -1,4 +1,156 @@
 use super::*;
+
+struct BuildLog {
+    path: PathBuf,
+    file: Mutex<std::fs::File>,
+    write_error: Mutex<Option<String>>,
+}
+
+impl BuildLog {
+    fn create(path: PathBuf, command_display: &str) -> Result<Arc<Self>> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating build log directory {}", parent.display()))?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&path)
+            .with_context(|| format!("creating build log {}", path.display()))?;
+        if let Err(error) = (|| -> std::io::Result<()> {
+            writeln!(file, "Harness Hat Docker build")?;
+            writeln!(file, "$ {command_display}")?;
+            writeln!(file)?;
+            Ok(())
+        })() {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(error.into());
+        }
+        Ok(Arc::new(Self {
+            path,
+            file: Mutex::new(file),
+            write_error: Mutex::new(None),
+        }))
+    }
+
+    fn write_line(&self, line: &str) {
+        let result = self
+            .file
+            .lock()
+            .map_err(|_| anyhow::anyhow!("build log lock poisoned"))
+            .and_then(|mut file| writeln!(file, "{line}").map_err(Into::into));
+        if let Err(error) = result
+            && let Ok(mut first_error) = self.write_error.lock()
+            && first_error.is_none()
+        {
+            *first_error = Some(error.to_string());
+        }
+    }
+
+    fn finish(&self, retain: bool, status: &str) -> (Option<PathBuf>, Option<String>) {
+        self.write_line(status);
+        let mut errors = self.write_error.lock().ok().and_then(|error| error.clone());
+        if let Ok(file) = self.file.lock()
+            && let Err(error) = file.sync_all()
+            && errors.is_none()
+        {
+            errors = Some(error.to_string());
+        }
+
+        if !retain {
+            if let Err(error) = std::fs::remove_file(&self.path)
+                && error.kind() != std::io::ErrorKind::NotFound
+                && errors.is_none()
+            {
+                errors = Some(error.to_string());
+            }
+            return (None, errors);
+        }
+
+        if let Err(error) = retain_recent_build_logs(&self.path)
+            && errors.is_none()
+        {
+            errors = Some(error.to_string());
+        }
+        (Some(self.path.clone()), errors)
+    }
+}
+
+fn retain_recent_build_logs(current: &Path) -> Result<()> {
+    let Some(parent) = current.parent() else {
+        return Ok(());
+    };
+    let mut paths = std::fs::read_dir(parent)
+        .with_context(|| format!("reading build log directory {}", parent.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with("docker-build-") && name.ends_with(".log"))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    let remove_count = paths.len().saturating_sub(10);
+    for path in paths.into_iter().take(remove_count) {
+        if path != current {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("removing old build log {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod build_log_tests {
+    use super::*;
+
+    #[test]
+    fn build_log_keeps_complete_output_beyond_live_buffer_limit() {
+        let dir = tempfile::tempdir().expect("temporary build log directory");
+        let path = dir.path().join("docker-build-test.log");
+        let log = BuildLog::create(path.clone(), "docker build example").expect("create log");
+        for line in 0..500 {
+            log.write_line(&format!("build: line {line}"));
+        }
+        let (saved_path, error) = log.finish(true, "BUILD FAILED (exit code 1)");
+
+        assert_eq!(saved_path, Some(path.clone()));
+        assert!(error.is_none(), "unexpected log error: {error:?}");
+        let contents = std::fs::read_to_string(path).expect("read saved build log");
+        assert!(contents.contains("build: line 0"));
+        assert!(contents.contains("build: line 499"));
+        assert!(contents.contains("BUILD FAILED (exit code 1)"));
+    }
+
+    #[test]
+    fn build_log_retention_keeps_only_the_ten_newest_logs() {
+        let dir = tempfile::tempdir().expect("temporary build log directory");
+        for index in 0..11 {
+            std::fs::write(
+                dir.path().join(format!("docker-build-{index:02}.log")),
+                "failure",
+            )
+            .expect("write old build log");
+        }
+        let current = dir.path().join("docker-build-10.log");
+        retain_recent_build_logs(&current).expect("retain recent logs");
+
+        let count = std::fs::read_dir(dir.path())
+            .expect("read build log directory")
+            .count();
+        assert_eq!(count, 10);
+        assert!(!dir.path().join("docker-build-00.log").exists());
+        assert!(current.exists());
+    }
+}
+
 pub(crate) fn shell_command_for_docker_args(args: &[String]) -> String {
     format!("docker {}", shell_words::join(args))
 }
@@ -46,6 +198,7 @@ async fn forward_build_stream<R>(
     mark_stderr: bool,
     stderr_tail: Option<Arc<Mutex<VecDeque<String>>>>,
     output_tail: Arc<Mutex<VecDeque<String>>>,
+    build_log: Option<Arc<BuildLog>>,
     tx: mpsc::Sender<BuildEvent>,
 ) where
     R: tokio::io::AsyncRead + Unpin,
@@ -55,6 +208,9 @@ async fn forward_build_stream<R>(
     loop {
         match lines.next_line().await {
             Ok(Some(line)) => {
+                if let Some(build_log) = build_log.as_ref() {
+                    build_log.write_line(&format!("build: {line}"));
+                }
                 let is_error = mark_stderr && build_line_looks_like_error(&line);
                 if is_error
                     && let Some(tail) = stderr_tail.as_ref()
@@ -94,13 +250,27 @@ async fn forward_build_stream<R>(
 pub(crate) async fn run_build_docker_commands(
     label: String,
     docker_commands: Vec<Vec<String>>,
+    command_display: String,
+    build_log_path: PathBuf,
     launch_workspace_idx: usize,
     launch_container_idx: usize,
     launch_session_group: Option<usize>,
     cancel_flag: Arc<AtomicBool>,
     tx: mpsc::Sender<BuildEvent>,
 ) {
+    let (build_log, mut log_error) = match BuildLog::create(build_log_path, &command_display) {
+        Ok(build_log) => (Some(build_log), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+
     if docker_commands.is_empty() {
+        let (log_path, finish_error) = build_log
+            .as_ref()
+            .map(|log| log.finish(true, "BUILD FAILED: no docker build commands were provided"))
+            .unwrap_or((None, None));
+        if log_error.is_none() {
+            log_error = finish_error;
+        }
         let _ = tx
             .send(BuildEvent::Finished {
                 label,
@@ -112,6 +282,8 @@ pub(crate) async fn run_build_docker_commands(
                 exit_code: None,
                 error: Some("no docker build commands were provided".to_string()),
                 diagnostic: None,
+                log_path,
+                log_error,
             })
             .await;
         return;
@@ -147,17 +319,28 @@ pub(crate) async fn run_build_docker_commands(
         let stdout_task = child.stdout.take().map(|stdout| {
             let tx = tx.clone();
             let output_tail = output_tail.clone();
+            let build_log = build_log.clone();
             tokio::spawn(async move {
-                forward_build_stream(stdout, "build: ", false, None, output_tail, tx).await;
+                forward_build_stream(stdout, "build: ", false, None, output_tail, build_log, tx)
+                    .await;
             })
         });
         let stderr_task = child.stderr.take().map(|stderr| {
             let tx = tx.clone();
             let stderr_tail = stderr_tail.clone();
             let output_tail = output_tail.clone();
+            let build_log = build_log.clone();
             tokio::spawn(async move {
-                forward_build_stream(stderr, "build: ", true, Some(stderr_tail), output_tail, tx)
-                    .await;
+                forward_build_stream(
+                    stderr,
+                    "build: ",
+                    true,
+                    Some(stderr_tail),
+                    output_tail,
+                    build_log,
+                    tx,
+                )
+                .await;
             })
         });
 
@@ -180,6 +363,14 @@ pub(crate) async fn run_build_docker_commands(
 
     if let Some(error) = spawn_error {
         let diagnostic = join_build_tail(&stderr_tail).or_else(|| join_build_tail(&output_tail));
+        let status = format!("BUILD FAILED: {error}");
+        let (log_path, finish_error) = build_log
+            .as_ref()
+            .map(|log| log.finish(true, &status))
+            .unwrap_or((None, None));
+        if log_error.is_none() {
+            log_error = finish_error;
+        }
         let _ = tx
             .send(BuildEvent::Finished {
                 label,
@@ -191,6 +382,8 @@ pub(crate) async fn run_build_docker_commands(
                 exit_code: None,
                 error: Some(error),
                 diagnostic,
+                log_path,
+                log_error,
             })
             .await;
         return;
@@ -201,6 +394,25 @@ pub(crate) async fn run_build_docker_commands(
     // Prefer lines that looked like errors; otherwise fall back to the tail of
     // raw output so a failure is never reported with an empty diagnostic.
     let diagnostic = join_build_tail(&stderr_tail).or_else(|| join_build_tail(&output_tail));
+    let status = if cancelled {
+        "BUILD CANCELLED".to_string()
+    } else if success {
+        "BUILD SUCCEEDED".to_string()
+    } else {
+        format!(
+            "BUILD FAILED{}",
+            exit_code
+                .map(|code| format!(" (exit code {code})"))
+                .unwrap_or_default()
+        )
+    };
+    let (log_path, finish_error) = build_log
+        .as_ref()
+        .map(|log| log.finish(!success && !cancelled, &status))
+        .unwrap_or((None, None));
+    if log_error.is_none() {
+        log_error = finish_error;
+    }
     let _ = tx
         .send(BuildEvent::Finished {
             label,
@@ -212,6 +424,8 @@ pub(crate) async fn run_build_docker_commands(
             exit_code,
             error: None,
             diagnostic,
+            log_path,
+            log_error,
         })
         .await;
 }
