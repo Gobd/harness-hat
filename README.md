@@ -95,7 +95,7 @@ You can attach VS Code, Windsurf, and other VS Code-based IDEs directly to a run
 
 ## Built-in templates
 
-The base image is Ubuntu 26.04 with Node 24, bundled agent CLIs (`claude`, `codex`, `agy`, `pi`), and the shared proxy/control plumbing. Stacked on top:
+The base image is Ubuntu 26.04 with Node 24, bundled agent CLIs (`claude`, `codex`, `agy`, `pi`, `omp`), and the shared proxy/control plumbing. Stacked on top:
 
 On Windows, Codex auth, config, rules, skills, and plugins are copied into private container-local state at session startup. Its SQLite databases, logs, and caches stay inside the Linux container instead of being opened through Docker Desktop's Windows bind filesystem, which does not provide the locking semantics Codex requires. Host state is mounted read-only during this seed step.
 
@@ -138,7 +138,7 @@ Then Gradle will auto-download whichever JDK version your build requests via `ja
 
 ### YOLO wrappers
 
-The base image also ships `claude-yolo`, `codex-yolo`, and `agy-yolo` — thin wrappers that launch each agent with its own permission prompts disabled (`claude --dangerously-skip-permissions`, `codex --yolo`, `agy --dangerously-skip-permissions`). Running an agent like that on a bare host is exactly what Harness Hat exists to avoid; inside a session, the container boundary and the network policy are the guardrails instead, so the agent can work uninterrupted while the proxy still gates every outbound connection. Use them when you trust the sandbox, not the agent.
+The base image also ships `claude-yolo`, `codex-yolo`, `agy-yolo`, and `omp-yolo` — thin wrappers that launch each agent with its own permission prompts disabled (`claude --dangerously-skip-permissions`, `codex --yolo`, `agy --dangerously-skip-permissions`, `omp --yolo`). Running an agent like that on a bare host is exactly what Harness Hat exists to avoid; inside a session, the container boundary and the network policy are the guardrails instead, so the agent can work uninterrupted while the proxy still gates every outbound connection. Use them when you trust the sandbox, not the agent.
 
 ## Network policy
 
