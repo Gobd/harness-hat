@@ -63,11 +63,12 @@ ENV PATH="${COMPOSER_HOME}/vendor/bin:/home/coder/.local/bin:${PATH}"
 
 # Pinned tool versions (H5). Composer verifies package dist archives against
 # the hashes in Packagist metadata, so an exact version is also a content pin.
-# phpunit stays on the 12.x line: 13.x requires PHP >= 8.4.1 and Ubuntu 24.04
-# ships PHP 8.3. Bump by editing the versions and rebuilding.
+# phpunit was stuck on the 12.x line while the base image shipped PHP 8.3
+# (13.x requires PHP >= 8.4.1); Ubuntu 26.04 ships PHP 8.5, so 13.x is used
+# now. Bump by editing the versions and rebuilding.
 RUN set -eu; \
     composer global require \
-      phpunit/phpunit:12.5.31 \
+      phpunit/phpunit:13.3.0 \
       friendsofphp/php-cs-fixer:v3.95.12 \
       phpstan/phpstan:2.2.5 \
       laravel/pint:v1.29.3
