@@ -108,6 +108,26 @@ RUN set -eu; \
     rm -rf /tmp/sg.zip /tmp/sg-extract; \
     sg --version
 
+# oh-my-pi (omp): coding agent CLI. Pinned release binary verified against
+# sha256 from the release's SHA256SUMS.txt.
+ARG OMP_VERSION=17.2.15
+ARG OMP_SHA256_AMD64=fa884941f932f4f5d2046acba971790ae6aae18fd4806472b01f041de670368a
+ARG OMP_SHA256_ARM64=36507ba3d98332f52649d22009ead86f154ab007cb169d68690fa2b0111769ad
+ARG TARGETARCH
+RUN set -eu; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+        amd64|x86_64)  omp_arch="x64";   omp_sha="${OMP_SHA256_AMD64}" ;; \
+        arm64|aarch64) omp_arch="arm64"; omp_sha="${OMP_SHA256_ARM64}" ;; \
+        *) echo "unsupported oh-my-pi architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL \
+        -o /tmp/omp \
+        "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/omp-linux-${omp_arch}"; \
+    echo "${omp_sha}  /tmp/omp" | sha256sum -c -; \
+    install -m 0755 /tmp/omp /usr/local/bin/omp; \
+    rm -f /tmp/omp; \
+    omp --version
+
 # Match Coder's conventional non-root user while keeping uid/gid 1000 for
 # host-mounted auth and workspace files.
 RUN set -eu; \
@@ -572,16 +592,29 @@ RUN mkdir -p /home/coder/.local/bin /home/coder/.codex \
        > /home/coder/.local/bin/codex-yolo \
     && printf '#!/bin/sh\nexec agy --dangerously-skip-permissions "$@"\n' \
        > /home/coder/.local/bin/agy-yolo \
+    && printf '#!/bin/sh\nexec omp --yolo "$@"\n' \
+       > /home/coder/.local/bin/omp-yolo \
     && chmod 755 /home/coder/.local/bin/claude-yolo \
                  /home/coder/.local/bin/codex-yolo \
-                 /home/coder/.local/bin/agy-yolo
+                 /home/coder/.local/bin/agy-yolo \
+                 /home/coder/.local/bin/omp-yolo
 
-# Minimal zshrc: per-workspace history.
+# Minimal zshrc: per-workspace history, seeded once from the host's own
+# history (bind-mounted read-only at ~/.zsh_history.host, see
+# shared_session_state_mounts) so a fresh workspace starts with the commands
+# you already know instead of an empty file. After the first run, HISTFILE
+# stays pointed at the workspace-local copy — the host file is never written
+# to, so there's no risk of container sessions corrupting your live shell
+# history or racing with it.
 RUN cat > /home/coder/.zshrc <<'EOF'
 HISTFILE="/workspace/.zsh_history"
 HISTSIZE=10000
 SAVEHIST=10000
 setopt SHARE_HISTORY APPEND_HISTORY HIST_IGNORE_DUPS
+
+if [ ! -e "$HISTFILE" ] && [ -r "$HOME/.zsh_history.host" ]; then
+    cp "$HOME/.zsh_history.host" "$HISTFILE" 2>/dev/null || true
+fi
 EOF
 
 # Oh My Zsh with git plugin. Pin both the source revision and archive hash so

@@ -485,6 +485,12 @@ pub struct TuiFrameItem {
     pub height: u16,
     pub input: Option<TuiInput>,
     pub full_frame: bool,
+    /// The attached terminal's own cwd, sent every frame so the daemon-owned
+    /// `App` can use it for actions that should reflect where the user
+    /// actually is (e.g. pre-filling the new-workspace directory) instead of
+    /// the daemon process's own cwd, which is meaningless for a background
+    /// service (see `App::remote_client_cwd`).
+    pub client_cwd: Option<String>,
     pub response_tx: oneshot::Sender<TuiFrameResponse>,
 }
 
@@ -507,6 +513,9 @@ pub struct TuiFrameRequest {
     /// apply a delta against the daemon's previous client's screen.
     #[serde(default)]
     pub full_frame: bool,
+    /// This client's own current working directory. See `TuiFrameItem::client_cwd`.
+    #[serde(default)]
+    pub client_cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -832,6 +841,7 @@ async fn tui_frame_handler(
         height: request.height,
         input: request.input,
         full_frame: request.full_frame,
+        client_cwd: request.client_cwd,
         response_tx,
     };
     match state.tui_tx.try_send(item) {
@@ -1356,6 +1366,7 @@ mod tests {
                 height: 24,
                 input: None,
                 full_frame: false,
+                client_cwd: None,
             }),
         )
         .await;
@@ -1372,6 +1383,7 @@ mod tests {
                 height: 24,
                 input: None,
                 full_frame: false,
+                client_cwd: None,
                 response_tx,
             })
             .expect("fill TUI queue");
@@ -1390,6 +1402,7 @@ mod tests {
                 height: 24,
                 input: None,
                 full_frame: false,
+                client_cwd: None,
             }),
         )
         .await;

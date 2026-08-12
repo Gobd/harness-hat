@@ -74,7 +74,6 @@ pub fn run(
         .context("canonicalizing current working directory")?;
 
     // Match workspace by --name flag first, then by cwd.
-    let terminal_env = crate::shell::shell_exec_env_pairs();
     let matched = if let Some(ref n) = name_override {
         config.workspaces.iter().find(|w| w.name == *n).cloned()
     } else {
@@ -111,6 +110,9 @@ pub fn run(
         if matched.template.is_none() && rules.template.as_deref() != Some(&template) {
             save_workspace_template(&rules_path, &template)?;
         }
+        let terminal_env = crate::shell::shell_exec_env_pairs_with_passthrough(
+            env_passthrough_for_template(&config, &template),
+        );
         let launch_cwd = matched.mount_cwd.then(|| pwd.to_str()).flatten();
         let resp = post_launch(
             &control_url,
@@ -119,7 +121,7 @@ pub fn run(
             &template,
             force_rebuild,
             launch_cwd,
-            terminal_env.clone(),
+            terminal_env,
         )?;
         println!(
             "launched session {} ({}); attaching",
@@ -160,6 +162,9 @@ pub fn run(
     });
     let template = choose_template(&config, pwd.as_path(), template_override.as_deref())?;
     save_workspace_template(&workspace_rules_path(&pwd), &template)?;
+    let terminal_env = crate::shell::shell_exec_env_pairs_with_passthrough(
+        env_passthrough_for_template(&config, &template),
+    );
     let resp = post_launch(
         &control_url,
         &token,
@@ -454,6 +459,23 @@ pub(crate) fn workspace_workdir(
     }
 }
 
+/// Look up `env_passthrough` for a chosen template so the caller's live
+/// process env can be captured for those names (see
+/// `shell::shell_exec_env_pairs_with_passthrough`). Falls back to
+/// `defaults.containers.env_passthrough` for workspace-local templates (see
+/// `resolve_workspace_container_templates`), which aren't in `config.containers`
+/// but still inherit the default passthrough list. env_passthrough is
+/// best-effort here regardless — the daemon's own `docker run -e NAME`
+/// fallback (reading its own process env) still applies.
+fn env_passthrough_for_template<'a>(config: &'a Config, template: &str) -> &'a [String] {
+    config
+        .containers
+        .iter()
+        .find(|c| c.name == template)
+        .map(|c| c.env_passthrough.as_slice())
+        .unwrap_or(&config.defaults.containers.env_passthrough)
+}
+
 // ── Template picker ─────────────────────────────────────────────────────────
 
 fn choose_template(
@@ -744,6 +766,65 @@ mod tests {
         assert_eq!(
             format_workspace_list(&Config::default()).unwrap(),
             "No workspaces configured."
+        );
+    }
+
+    fn container_def_named(name: &str, env_passthrough: Vec<String>) -> ContainerDef {
+        ContainerDef {
+            name: name.to_string(),
+            image: String::new(),
+            image_stem: String::new(),
+            dockerfile_path: None,
+            profile: None,
+            mount_target: PathBuf::from("/workspace"),
+            command: None,
+            grayscale_palette: false,
+            starter_network_allowlist: Vec::new(),
+            allowed_hosts: Vec::new(),
+            mcp_log_paths: Vec::new(),
+            mcp_log_pattern: None,
+            mounts: Vec::new(),
+            env: std::collections::HashMap::new(),
+            env_passthrough,
+            localhost_forwards: Vec::new(),
+            memory: None,
+            cpus: None,
+            shm_size: None,
+            attach_shell: None,
+            claude_settings: None,
+        }
+    }
+
+    #[test]
+    fn env_passthrough_for_template_uses_matching_container_def() {
+        let mut config = Config::default();
+        config.containers = vec![
+            container_def_named("rust", vec!["FOO".to_string()]),
+            container_def_named("go", vec!["BAR".to_string()]),
+        ];
+
+        assert_eq!(
+            env_passthrough_for_template(&config, "rust"),
+            &["FOO".to_string()]
+        );
+        assert_eq!(
+            env_passthrough_for_template(&config, "go"),
+            &["BAR".to_string()]
+        );
+    }
+
+    #[test]
+    fn env_passthrough_for_template_falls_back_to_defaults_for_local_templates() {
+        let mut config = Config::default();
+        config.containers = vec![container_def_named("rust", vec!["FOO".to_string()])];
+        config.defaults.containers.env_passthrough = vec!["DEFAULT_VAR".to_string()];
+
+        // "local" templates (workspace .dockerfile files) aren't materialized
+        // into config.containers, so lookups by that name must still surface
+        // the default passthrough list rather than silently returning none.
+        assert_eq!(
+            env_passthrough_for_template(&config, "local-thing"),
+            &["DEFAULT_VAR".to_string()]
         );
     }
 

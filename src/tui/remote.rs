@@ -90,6 +90,13 @@ fn relay_loop(
     let mut needs_full_frame = true;
     let mut last_frame: Vec<u8> = Vec::new();
     let mut last_size = None;
+    // This process's cwd never changes for the lifetime of the attach, so
+    // compute it once rather than on every frame. Sent with each request so
+    // the daemon-owned App can use it in place of its own (meaningless,
+    // background-service) cwd — see `TuiFrameItem::client_cwd`.
+    let client_cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
     loop {
         let input = if poll_event(Duration::from_millis(50))? {
             match read_event()? {
@@ -130,6 +137,7 @@ fn relay_loop(
             height,
             input,
             full_frame: needs_full_frame,
+            client_cwd: client_cwd.clone(),
         };
         let retry_deadline = Instant::now() + TUI_FRAME_RETRY_WINDOW;
         let response = loop {

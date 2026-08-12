@@ -134,6 +134,11 @@ host = "~/.pi"
 container = "/home/coder/.pi"
 mode = "rw"
 
+[[defaults.containers.mounts]]
+host = "~/.omp"
+container = "/home/coder/.omp"
+mode = "rw"
+
 # Optional defaults applied to every template.
 # mount_target = "/workspace"
 # memory = "16g"
