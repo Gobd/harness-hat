@@ -47,8 +47,6 @@ The [setup guide](<User Guide/01-setup.md>) includes platform-specific Docker li
 ```sh
 cargo install harness-hat              # binary is `hht`
 hht install                            # create the global config and start hht-daemon at login
-hht                                    # attach to the background Harness Hat TUI
-hht restart                            # reload daemon config and caches; sessions stay running
 ```
 
 `hht` attaches to the installed `hht-daemon` when it is running. It displays the same Harness Hat TUI, backed by the daemon's live session, build, approval, and terminal state. When no daemon is running, `hht` retains its standalone manager behavior.
@@ -59,8 +57,7 @@ With the manager running in another terminal, you can also attach to or start th
 
 ```sh
 hht workspace                          # match $PWD to a workspace, launch if needed, attach
-hht ws ..                              # `workspace` shortcut; pass a command after it
-hht workspace --template go         # skip the template picker, use a specific profile
+hht workspace --template go            # skip the template picker, use a specific profile
 hht workspace --name trust-service     # jump to a named workspace without cd-ing in
 hht workspace --rebuild                # rebuild the image (--no-cache) before launching
 hht workspace claude --resume          # runs "claude --resume" inside the session

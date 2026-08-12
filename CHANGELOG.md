@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.6 Future
+## 0.8.6 Aug 12, 2026
 
 ### Added
 
@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Attached TUI clients now start correctly on Windows after mouse capture was disabled for terminal text selection.
 - Attached daemon clients now receive a complete frame when a Docker build fails, so the final failure state and saved log location are displayed.
 - The background daemon now stays available when Docker is offline, reports the Docker-specific condition to `hht ws`, and retries Docker readiness every ten seconds so workspace launches work after Docker starts.
 

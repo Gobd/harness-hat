@@ -107,50 +107,6 @@ fn retain_recent_build_logs(current: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod build_log_tests {
-    use super::*;
-
-    #[test]
-    fn build_log_keeps_complete_output_beyond_live_buffer_limit() {
-        let dir = tempfile::tempdir().expect("temporary build log directory");
-        let path = dir.path().join("docker-build-test.log");
-        let log = BuildLog::create(path.clone(), "docker build example").expect("create log");
-        for line in 0..500 {
-            log.write_line(&format!("build: line {line}"));
-        }
-        let (saved_path, error) = log.finish(true, "BUILD FAILED (exit code 1)");
-
-        assert_eq!(saved_path, Some(path.clone()));
-        assert!(error.is_none(), "unexpected log error: {error:?}");
-        let contents = std::fs::read_to_string(path).expect("read saved build log");
-        assert!(contents.contains("build: line 0"));
-        assert!(contents.contains("build: line 499"));
-        assert!(contents.contains("BUILD FAILED (exit code 1)"));
-    }
-
-    #[test]
-    fn build_log_retention_keeps_only_the_ten_newest_logs() {
-        let dir = tempfile::tempdir().expect("temporary build log directory");
-        for index in 0..11 {
-            std::fs::write(
-                dir.path().join(format!("docker-build-{index:02}.log")),
-                "failure",
-            )
-            .expect("write old build log");
-        }
-        let current = dir.path().join("docker-build-10.log");
-        retain_recent_build_logs(&current).expect("retain recent logs");
-
-        let count = std::fs::read_dir(dir.path())
-            .expect("read build log directory")
-            .count();
-        assert_eq!(count, 10);
-        assert!(!dir.path().join("docker-build-00.log").exists());
-        assert!(current.exists());
-    }
-}
-
 pub(crate) fn shell_command_for_docker_args(args: &[String]) -> String {
     format!("docker {}", shell_words::join(args))
 }
@@ -488,3 +444,47 @@ pub(crate) fn is_scroll_mode_toggle_key(key: KeyEvent) -> bool {
 }
 
 // ── Key → PTY bytes (Streamlined mapping) ────────────────────────────────────
+
+#[cfg(test)]
+mod build_log_tests {
+    use super::*;
+
+    #[test]
+    fn build_log_keeps_complete_output_beyond_live_buffer_limit() {
+        let dir = tempfile::tempdir().expect("temporary build log directory");
+        let path = dir.path().join("docker-build-test.log");
+        let log = BuildLog::create(path.clone(), "docker build example").expect("create log");
+        for line in 0..500 {
+            log.write_line(&format!("build: line {line}"));
+        }
+        let (saved_path, error) = log.finish(true, "BUILD FAILED (exit code 1)");
+
+        assert_eq!(saved_path, Some(path.clone()));
+        assert!(error.is_none(), "unexpected log error: {error:?}");
+        let contents = std::fs::read_to_string(path).expect("read saved build log");
+        assert!(contents.contains("build: line 0"));
+        assert!(contents.contains("build: line 499"));
+        assert!(contents.contains("BUILD FAILED (exit code 1)"));
+    }
+
+    #[test]
+    fn build_log_retention_keeps_only_the_ten_newest_logs() {
+        let dir = tempfile::tempdir().expect("temporary build log directory");
+        for index in 0..11 {
+            std::fs::write(
+                dir.path().join(format!("docker-build-{index:02}.log")),
+                "failure",
+            )
+            .expect("write old build log");
+        }
+        let current = dir.path().join("docker-build-10.log");
+        retain_recent_build_logs(&current).expect("retain recent logs");
+
+        let count = std::fs::read_dir(dir.path())
+            .expect("read build log directory")
+            .count();
+        assert_eq!(count, 10);
+        assert!(!dir.path().join("docker-build-00.log").exists());
+        assert!(current.exists());
+    }
+}

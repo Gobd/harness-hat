@@ -52,8 +52,9 @@ pub(crate) fn run_attached(config_path: PathBuf) -> Result<()> {
         Clear(ClearType::All),
         cursor::Hide,
         // Attached frames contain both terminal cells and ordinary Ratatui text.
-        // Leave selection to the host terminal so users can select either one.
-        crossterm::event::DisableMouseCapture,
+        // Do not change mouse capture here: leaving it disabled lets the host
+        // terminal select either one. In particular, Crossterm cannot disable
+        // mouse capture on Windows unless this process previously enabled it.
         crossterm::terminal::SetTitle("Harness Hat")
     ) {
         let _ = disable_raw_mode();
