@@ -43,8 +43,8 @@ RUN set -eu; \
 # this, a compromised/MITM'd installer would run as part of the image build
 # (H5). The `--check` flag makes the installer abort on a bad signature.
 RUN set -eu; \
-    curl -fsSL https://getcomposer.org/installer -o /tmp/composer-setup.php; \
-    EXPECTED="$(curl -fsSL https://composer.github.io/installer.sig)"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 https://getcomposer.org/installer -o /tmp/composer-setup.php; \
+    EXPECTED="$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 https://composer.github.io/installer.sig)"; \
     ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"; \
     if [ "$EXPECTED" != "$ACTUAL" ]; then \
       echo "ERROR: composer installer signature mismatch" >&2; \

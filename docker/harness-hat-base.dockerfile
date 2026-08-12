@@ -97,7 +97,7 @@ RUN set -eu; \
         arm64|aarch64) sg_arch="aarch64-unknown-linux-gnu"; sg_sha="${ASTGREP_SHA256_AARCH64}" ;; \
         *) echo "unsupported ast-grep architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
         -o /tmp/sg.zip \
         "https://github.com/ast-grep/ast-grep/releases/download/${ASTGREP_VERSION}/app-${sg_arch}.zip"; \
     echo "${sg_sha}  /tmp/sg.zip" | sha256sum -c -; \
@@ -120,7 +120,7 @@ RUN set -eu; \
         arm64|aarch64) omp_arch="arm64"; omp_sha="${OMP_SHA256_ARM64}" ;; \
         *) echo "unsupported oh-my-pi architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
         -o /tmp/omp \
         "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/omp-linux-${omp_arch}"; \
     echo "${omp_sha}  /tmp/omp" | sha256sum -c -; \
@@ -148,7 +148,7 @@ RUN set -eu; \
 # package conflicts with it.
 RUN set -eu; \
     mkdir -p /etc/apt/keyrings; \
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg; \
     echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
       > /etc/apt/sources.list.d/nodesource.list; \
@@ -550,7 +550,7 @@ RUN set -eu; \
       arm64|aarch64) agy_arch="arm64"; agy_sha="be6303d4b891a79457ca6ed169aff2efd3ceb694354634e85ef58c883bae6739" ;; \
       *) echo "unsupported Antigravity CLI architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
       -o /tmp/agy_cli_linux.tar.gz \
       "https://github.com/google-antigravity/antigravity-cli/releases/download/${ANTIGRAVITY_CLI_VERSION}/agy_cli_linux_${agy_arch}.tar.gz"; \
     echo "${agy_sha}  /tmp/agy_cli_linux.tar.gz" | sha256sum -c -; \
@@ -573,7 +573,7 @@ RUN apt-get update -o APT::Update::Error-Mode=any \
 # execute unpinned remote code and produce different binaries.
 RUN set -eu; \
     install -d -m 0755 /etc/apt/keyrings; \
-    curl -fsSL https://downloads.claude.ai/keys/claude-code.asc \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 https://downloads.claude.ai/keys/claude-code.asc \
       -o /etc/apt/keyrings/claude-code.asc; \
     echo "deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude.ai/claude-code/apt/stable stable main" \
       > /etc/apt/sources.list.d/claude-code.list; \
@@ -622,7 +622,7 @@ EOF
 ARG OH_MY_ZSH_COMMIT=59a9740721b734835812121322d6fe4827b0853a
 ARG OH_MY_ZSH_SHA256=897a7ffb6bbf96b1f2914eb3da37c774cbd72be5f73242c568be7807dd2967e8
 RUN set -eu; \
-    curl -fsSL \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
         -o /tmp/oh-my-zsh.tar.gz \
         "https://github.com/ohmyzsh/ohmyzsh/archive/${OH_MY_ZSH_COMMIT}.tar.gz"; \
     echo "${OH_MY_ZSH_SHA256}  /tmp/oh-my-zsh.tar.gz" | sha256sum -c -; \
