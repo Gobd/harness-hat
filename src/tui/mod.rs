@@ -311,6 +311,15 @@ pub struct App {
     last_base_rules_poll: std::time::Instant,
     watched_rules_stamps: HashMap<PathBuf, WatchedFileStamp>,
     pending_base_rules_internal_write: HashMap<PathBuf, PendingBaseRulesInternalWrite>,
+    /// Most recent cwd reported by an attached client (see
+    /// `TuiFrameItem::client_cwd`). The daemon process itself runs as a
+    /// background service with no meaningful cwd, so actions that should
+    /// reflect "where the user is" — e.g. pre-filling the new-workspace
+    /// directory — read this instead of `std::env::current_dir()`. Stays
+    /// `None` when running without an attached remote client (the terminal
+    /// owns its own `App` in that case, so `current_dir()` is already
+    /// correct there).
+    pub(crate) remote_client_cwd: Option<String>,
 }
 
 /// Cached workspace metadata for the sidebar.
@@ -550,6 +559,9 @@ pub async fn run_service(
             );
             for session in &mut app.sessions {
                 let _ = session.resize(pty_rows, pty_cols);
+            }
+            if item.client_cwd.is_some() {
+                app.remote_client_cwd = item.client_cwd;
             }
             if let Some(input) = item.input {
                 apply_remote_input(&mut app, input);

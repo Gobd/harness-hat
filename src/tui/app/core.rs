@@ -255,6 +255,7 @@ impl App {
             last_base_rules_poll: std::time::Instant::now(),
             watched_rules_stamps,
             pending_base_rules_internal_write: std::collections::HashMap::new(),
+            remote_client_cwd: None,
         })
     }
 
@@ -958,6 +959,17 @@ impl App {
         self.session_groups
             .get(group_idx)
             .and_then(|group| group.workspace_idx)
+    }
+
+    /// Resolve the currently hovered sidebar row to a workspace index for the
+    /// Ctrl+D delete shortcut, whether the row is the not-yet-running launch
+    /// entry or a running session group's row.
+    pub(crate) fn sidebar_workspace_idx_for_delete(&self, items: &[SidebarItem]) -> Option<usize> {
+        match items.get(self.sidebar_idx)? {
+            SidebarItem::Launch(pi) => Some(*pi),
+            SidebarItem::Session(si) => self.selected_workspace_idx_for_group(*si),
+            _ => None,
+        }
     }
 
     pub(crate) fn session_is_loading(&self, session_idx: usize) -> bool {

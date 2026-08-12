@@ -133,6 +133,23 @@ fn shell_exec_env_vars() -> Vec<String> {
 }
 
 pub(crate) fn shell_exec_env_pairs() -> Vec<(String, String)> {
+    shell_exec_env_pairs_with_passthrough(&[])
+}
+
+/// Like [`shell_exec_env_pairs`], but also reads `extra_passthrough` names
+/// (typically a container's configured `env_passthrough` list) from this
+/// process's own environment.
+///
+/// This exists so `env_passthrough` values are captured from the short-lived
+/// CLI invocation — which always has the caller's current shell environment —
+/// rather than relying on `docker run -e NAME` (no value) to read them from
+/// the long-running daemon process, whose environment is frozen at whatever
+/// it was when the daemon started (typically just `PATH`; see
+/// `service::install`). Without this, a var exported after the daemon started
+/// is invisible to it until the daemon process itself is restarted.
+pub(crate) fn shell_exec_env_pairs_with_passthrough(
+    extra_passthrough: &[String],
+) -> Vec<(String, String)> {
     const PASSTHROUGH: [&str; 3] = ["TERM", "COLORTERM", "COLORFGBG"];
     let mut env_vars: Vec<(String, String)> = PASSTHROUGH
         .into_iter()
@@ -146,6 +163,15 @@ pub(crate) fn shell_exec_env_pairs() -> Vec<(String, String)> {
 
     if !env_vars.iter().any(|(name, _)| name == "TERM") {
         env_vars.push(("TERM".to_string(), "xterm-256color".to_string()));
+    }
+
+    for name in extra_passthrough {
+        if env_vars.iter().any(|(existing, _)| existing == name) {
+            continue;
+        }
+        if let Some(value) = env::var(name).ok().filter(|value| !value.trim().is_empty()) {
+            env_vars.push((name.clone(), value));
+        }
     }
 
     env_vars

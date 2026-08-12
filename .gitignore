@@ -38,3 +38,6 @@ __pycache__/
 
 # Runtime helper temp files created by older container launch code
 /docker/scripts/harness-hat-hostdo-*
+
+# Per-workspace zsh history seeded/appended by the dev container itself
+/.zsh_history

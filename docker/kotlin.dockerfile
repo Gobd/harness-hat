@@ -45,7 +45,7 @@ ARG KOTLIN_VERSION=2.4.10
 ARG KOTLIN_SHA256=473dd66c7a3ef4b182065b3da670466c1bf2773a9dbb0ed8b33a39fe9d4f876d
 
 RUN set -eu; \
-    curl -fsSL \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
         -o /tmp/kotlin-compiler.zip \
         "https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VERSION}/kotlin-compiler-${KOTLIN_VERSION}.zip"; \
     echo "${KOTLIN_SHA256}  /tmp/kotlin-compiler.zip" | sha256sum -c -; \

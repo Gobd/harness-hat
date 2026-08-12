@@ -210,6 +210,20 @@ impl App {
                 self.sidebar_move_down(&items);
             }
             KeyCode::Enter => self.handle_sidebar_enter(&items),
+            KeyCode::Char('d') | KeyCode::Char('D')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                // Delete-from-sidebar shortcut: Ctrl (not a bare letter) so it
+                // never collides with a workspace's assigned jump-to hotkey,
+                // which only matches an unmodified Char press (see above).
+                // Works on both the not-yet-running Launch row and a running
+                // Session row, so removal doesn't require starting a session
+                // first — unlike the Settings-pane `x` route, which only
+                // appears once a workspace has a session group.
+                if let Some(pi) = self.sidebar_workspace_idx_for_delete(&items) {
+                    self.prompt_remove_workspace(pi);
+                }
+            }
             _ => {}
         }
 
@@ -409,11 +423,22 @@ impl App {
     const NEW_PROJECT_ROW_COUNT: usize = 5;
 
     pub(crate) fn open_new_workspace(&mut self) {
-        let cwd = std::env::current_dir()
+        // Prefer the attached client's reported cwd over this process's own:
+        // when daemon-owned (service_mode), `std::env::current_dir()` reads
+        // the background service's cwd, which is meaningless (see
+        // `remote_client_cwd`'s doc comment). Falls back to this process's
+        // own cwd, which is correct when there's no attached remote client.
+        let cwd_path = self
+            .remote_client_cwd
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::current_dir().ok());
+        let cwd = cwd_path
+            .as_ref()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let default_name = std::env::current_dir()
-            .ok()
+        let default_name = cwd_path
+            .as_ref()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_default();
         self.new_workspace = Some(NewWorkspaceState {

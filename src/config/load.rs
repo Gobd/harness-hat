@@ -9,8 +9,8 @@ use toml_edit::{DocumentMut, value};
 use tracing::instrument;
 
 use crate::config::{
-    Config, ContainerDefaults, ContainerMount, ContainerProfile, LocalhostForward, WorkspaceConfig,
-    container_path_string, default_mount_target, is_absolute_container_path,
+    Config, ContainerDefaults, ContainerMount, ContainerProfile, LocalhostForward, MountMode,
+    WorkspaceConfig, container_path_string, default_mount_target, is_absolute_container_path,
 };
 
 const WORKSPACE_SIDEBAR_HOTKEY_POOL: &[char] = &[
@@ -753,15 +753,29 @@ fn shared_session_state_mounts() -> Result<Vec<ContainerMount>> {
         // Skip mounts whose host source does not exist rather than asking
         // Docker to bind a missing path (which silently creates a root-owned
         // empty dir on the host, or fails the run outright).
-        if let Some(mount) = shared_session_mount(host, container)? {
+        if let Some(mount) = shared_session_mount(host, container, MountMode::Rw)? {
             mounts.push(mount);
         }
+    }
+    // Read-only: the container only ever reads this once (see .zshrc) to seed
+    // its own workspace-local history file. It never writes back, so there's
+    // no risk of the container corrupting the host's live shell history.
+    if let Some(mount) = shared_session_mount(
+        "~/.zsh_history",
+        "/home/coder/.zsh_history.host",
+        MountMode::Ro,
+    )? {
+        mounts.push(mount);
     }
     mounts.push(shared_container_keyring_mount()?);
     Ok(mounts)
 }
 
-fn shared_session_mount(host: &str, container: &str) -> Result<Option<ContainerMount>> {
+fn shared_session_mount(
+    host: &str,
+    container: &str,
+    mode: MountMode,
+) -> Result<Option<ContainerMount>> {
     let host = expand_path(Path::new(host))?;
     if !host.exists() {
         return Ok(None);
@@ -769,7 +783,7 @@ fn shared_session_mount(host: &str, container: &str) -> Result<Option<ContainerM
     Ok(Some(ContainerMount {
         host: host.clone(),
         container: PathBuf::from(container),
-        mode: Default::default(),
+        mode,
         // Unset: the `.claude.json` mount picks up the seed-by-default heuristic
         // in container::spawn; the directory mounts (.claude, .codex, …) don't.
         seed: None,

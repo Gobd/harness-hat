@@ -97,7 +97,7 @@ RUN set -eu; \
         arm64|aarch64) sg_arch="aarch64-unknown-linux-gnu"; sg_sha="${ASTGREP_SHA256_AARCH64}" ;; \
         *) echo "unsupported ast-grep architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
         -o /tmp/sg.zip \
         "https://github.com/ast-grep/ast-grep/releases/download/${ASTGREP_VERSION}/app-${sg_arch}.zip"; \
     echo "${sg_sha}  /tmp/sg.zip" | sha256sum -c -; \
@@ -107,6 +107,26 @@ RUN set -eu; \
     chmod 0755 /usr/local/bin/sg /usr/local/bin/ast-grep; \
     rm -rf /tmp/sg.zip /tmp/sg-extract; \
     sg --version
+
+# oh-my-pi (omp): coding agent CLI. Pinned release binary verified against
+# sha256 from the release's SHA256SUMS.txt.
+ARG OMP_VERSION=17.2.15
+ARG OMP_SHA256_AMD64=fa884941f932f4f5d2046acba971790ae6aae18fd4806472b01f041de670368a
+ARG OMP_SHA256_ARM64=36507ba3d98332f52649d22009ead86f154ab007cb169d68690fa2b0111769ad
+ARG TARGETARCH
+RUN set -eu; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+        amd64|x86_64)  omp_arch="x64";   omp_sha="${OMP_SHA256_AMD64}" ;; \
+        arm64|aarch64) omp_arch="arm64"; omp_sha="${OMP_SHA256_ARM64}" ;; \
+        *) echo "unsupported oh-my-pi architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+        -o /tmp/omp \
+        "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/omp-linux-${omp_arch}"; \
+    echo "${omp_sha}  /tmp/omp" | sha256sum -c -; \
+    install -m 0755 /tmp/omp /usr/local/bin/omp; \
+    rm -f /tmp/omp; \
+    omp --version
 
 # Match Coder's conventional non-root user while keeping uid/gid 1000 for
 # host-mounted auth and workspace files.
@@ -128,7 +148,7 @@ RUN set -eu; \
 # package conflicts with it.
 RUN set -eu; \
     mkdir -p /etc/apt/keyrings; \
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg; \
     echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
       > /etc/apt/sources.list.d/nodesource.list; \
@@ -530,7 +550,7 @@ RUN set -eu; \
       arm64|aarch64) agy_arch="arm64"; agy_sha="be6303d4b891a79457ca6ed169aff2efd3ceb694354634e85ef58c883bae6739" ;; \
       *) echo "unsupported Antigravity CLI architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
       -o /tmp/agy_cli_linux.tar.gz \
       "https://github.com/google-antigravity/antigravity-cli/releases/download/${ANTIGRAVITY_CLI_VERSION}/agy_cli_linux_${agy_arch}.tar.gz"; \
     echo "${agy_sha}  /tmp/agy_cli_linux.tar.gz" | sha256sum -c -; \
@@ -553,7 +573,7 @@ RUN apt-get update -o APT::Update::Error-Mode=any \
 # execute unpinned remote code and produce different binaries.
 RUN set -eu; \
     install -d -m 0755 /etc/apt/keyrings; \
-    curl -fsSL https://downloads.claude.ai/keys/claude-code.asc \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 https://downloads.claude.ai/keys/claude-code.asc \
       -o /etc/apt/keyrings/claude-code.asc; \
     echo "deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude.ai/claude-code/apt/stable stable main" \
       > /etc/apt/sources.list.d/claude-code.list; \
@@ -572,16 +592,29 @@ RUN mkdir -p /home/coder/.local/bin /home/coder/.codex \
        > /home/coder/.local/bin/codex-yolo \
     && printf '#!/bin/sh\nexec agy --dangerously-skip-permissions "$@"\n' \
        > /home/coder/.local/bin/agy-yolo \
+    && printf '#!/bin/sh\nexec omp --yolo "$@"\n' \
+       > /home/coder/.local/bin/omp-yolo \
     && chmod 755 /home/coder/.local/bin/claude-yolo \
                  /home/coder/.local/bin/codex-yolo \
-                 /home/coder/.local/bin/agy-yolo
+                 /home/coder/.local/bin/agy-yolo \
+                 /home/coder/.local/bin/omp-yolo
 
-# Minimal zshrc: per-workspace history.
+# Minimal zshrc: per-workspace history, seeded once from the host's own
+# history (bind-mounted read-only at ~/.zsh_history.host, see
+# shared_session_state_mounts) so a fresh workspace starts with the commands
+# you already know instead of an empty file. After the first run, HISTFILE
+# stays pointed at the workspace-local copy — the host file is never written
+# to, so there's no risk of container sessions corrupting your live shell
+# history or racing with it.
 RUN cat > /home/coder/.zshrc <<'EOF'
 HISTFILE="/workspace/.zsh_history"
 HISTSIZE=10000
 SAVEHIST=10000
 setopt SHARE_HISTORY APPEND_HISTORY HIST_IGNORE_DUPS
+
+if [ ! -e "$HISTFILE" ] && [ -r "$HOME/.zsh_history.host" ]; then
+    cp "$HOME/.zsh_history.host" "$HISTFILE" 2>/dev/null || true
+fi
 EOF
 
 # Oh My Zsh with git plugin. Pin both the source revision and archive hash so
@@ -589,7 +622,7 @@ EOF
 ARG OH_MY_ZSH_COMMIT=59a9740721b734835812121322d6fe4827b0853a
 ARG OH_MY_ZSH_SHA256=897a7ffb6bbf96b1f2914eb3da37c774cbd72be5f73242c568be7807dd2967e8
 RUN set -eu; \
-    curl -fsSL \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
         -o /tmp/oh-my-zsh.tar.gz \
         "https://github.com/ohmyzsh/ohmyzsh/archive/${OH_MY_ZSH_COMMIT}.tar.gz"; \
     echo "${OH_MY_ZSH_SHA256}  /tmp/oh-my-zsh.tar.gz" | sha256sum -c -; \
