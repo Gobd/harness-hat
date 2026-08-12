@@ -169,10 +169,7 @@ pub(crate) fn shell_exec_env_pairs_with_passthrough(
         if env_vars.iter().any(|(existing, _)| existing == name) {
             continue;
         }
-        if let Some(value) = env::var(name)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-        {
+        if let Some(value) = env::var(name).ok().filter(|value| !value.trim().is_empty()) {
             env_vars.push((name.clone(), value));
         }
     }
