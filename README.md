@@ -95,7 +95,7 @@ You can attach VS Code, Windsurf, and other VS Code-based IDEs directly to a run
 
 ## Built-in templates
 
-The base image is Ubuntu 24.04 with Node 22, bundled agent CLIs (`claude`, `codex`, `agy`, `pi`), and the shared proxy/control plumbing. Stacked on top:
+The base image is Ubuntu 26.04 with Node 24, bundled agent CLIs (`claude`, `codex`, `agy`, `pi`), and the shared proxy/control plumbing. Stacked on top:
 
 On Windows, Codex auth, config, rules, skills, and plugins are copied into private container-local state at session startup. Its SQLite databases, logs, and caches stay inside the Linux container instead of being opened through Docker Desktop's Windows bind filesystem, which does not provide the locking semantics Codex requires. Host state is mounted read-only during this seed step.
 

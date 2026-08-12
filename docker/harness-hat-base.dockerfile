@@ -10,7 +10,7 @@ ENV GIT_HASH=crates-io
 ARG TUN2PROXY_VERSION=0.7.21
 RUN cargo install --locked --version "${TUN2PROXY_VERSION}" --bin tun2proxy-bin tun2proxy
 
-# harness-hat base — Ubuntu 24.04 LTS (Noble Numbat)
+# harness-hat base — Ubuntu 26.04 LTS (Resolute Raccoon)
 #
 # Build (context is the docker/ directory, matching the TUI's builder):
 #   docker build -t harness-hat-base:local -f docker/harness-hat-base.dockerfile docker/
@@ -21,7 +21,7 @@ RUN cargo install --locked --version "${TUN2PROXY_VERSION}" --bin tun2proxy-bin 
 # Harness Hat parses plain HTTP and gates HTTPS/raw TCP by CONNECT destination;
 # TLS remains end-to-end and no private CA is injected into the container.
 
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG UBUNTU_ARCHIVE_MIRRORS="http://archive.ubuntu.com/ubuntu/ http://us.archive.ubuntu.com/ubuntu/ http://mirrors.edge.kernel.org/ubuntu/ http://mirror.us.leaseweb.net/ubuntu/"
@@ -150,7 +150,7 @@ RUN set -eu; \
     mkdir -p /etc/apt/keyrings; \
     curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg; \
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" \
       > /etc/apt/sources.list.d/nodesource.list; \
     apt-get update -o APT::Update::Error-Mode=any && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -358,7 +358,7 @@ if [ "${HARNESS_HAT_STRICT_NETWORK:-0}" = "1" ]; then
     fi
 
     # ── Pick the iptables binary that actually works ──────────────────────
-    # Ubuntu 24.04 defaults to iptables-nft.  Docker Desktop's LinuxKit VM
+    # Ubuntu 26.04 defaults to iptables-nft.  Docker Desktop's LinuxKit VM
     # may only support iptables-legacy.  Probe both and use the first that
     # succeeds at listing the filter/OUTPUT chain.
     IPT=""
