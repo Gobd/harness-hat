@@ -933,9 +933,9 @@ fn seed_private_mount(
     // credentials in place so a normally logged-in user still authenticates.)
     let force_empty_credentials = is_claude_credentials && claude_oauth_token_available;
 
-    if !mount.is_seeded()
-        && !(is_claude_config && claude_oauth_token_available)
-        && !force_empty_credentials
+    if !(mount.is_seeded()
+        || force_empty_credentials
+        || is_claude_config && claude_oauth_token_available)
     {
         return Ok(None);
     }
