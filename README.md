@@ -1,4 +1,4 @@
-# Harness Hat
+# 🎩 Harness Hat
 
 [![Crates.io](https://img.shields.io/crates/v/harness-hat.svg)](https://crates.io/crates/harness-hat)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
