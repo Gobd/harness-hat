@@ -7,10 +7,18 @@
 - Added an `android` Docker template with Kotlin, Gradle, Android SDK command-line tools, API 36, Build Tools 36.0.0, platform-tools, and `adb` for Android builds.
 - Added `hht install --headless` for Linux servers without a graphical session. The installer creates a `systemd --user` service, enables lingering so it can run across logout and at boot, and keeps installation scoped to the normal Docker-enabled user.
 - Added headless approval management through `hht approvals list [--json]`, `allow ID [--remember]`, `deny ID [--remember]`, and `trust ID`. Pending requests use short four-digit IDs, remain fail-closed while waiting, and can also be decided from an attached TUI.
+- Added nested `open EDITOR` actions (`hht sh ID open <vscode|cursor>` and `hht ws open <vscode|cursor>`) for opening sessions through the editor's Dev Containers integration.
+- Added canonical `hht sh`/`hht ws` session entry points, nested IDE actions, `ws --new` fresh-session launches, and launch-only `hht sh new --path DIRECTORY`, which prints the new integer session ID.
 
 ### Changed
 
 - Workspace path mirroring is now enabled by default. Absolute POSIX paths are preserved, and Windows drive paths use a best-effort container equivalent such as `/C/Users/example/project`. Set `mirror_cwd = false` to retain the configured mount target.
+- Changed the canonical session termination syntax to `hht sh ID --kill`.
+- Standardized CLI help and documentation around Clap-generated command usage, `sh`/`ws` (with `shell`/`workspace` compatibility aliases), compact shell actions, and approval subcommands.
+- `ws` is now current-directory-only; explicit directory launch belongs to `hht sh new --path DIRECTORY`.
+- Shell session IDs are now monotonically increasing integers (with legacy zero-padded IDs still accepted when attaching).
+- Expanded the TUI's selected-session Shell section to show attach, command, IDE, and stop forms for `hht sh`.
+- Fixed the TUI workspace action flow so Launch moves into the container-template picker while Remove remains available without launching a session.
 - `hostdo` now rejects direct invocation of `hht` or `hht.exe` before policy matching, marks hostdo process trees so wrapped `hht` calls also refuse to run, and rejects rules files containing direct Harness Hat control commands.
 - The maximum hostdo command timeout is now five minutes; larger requested or configured values are capped at 300 seconds.
 

@@ -2,7 +2,7 @@
 
 [Previous: Workspaces](02-workspaces.md) | [Guide index](README.md) | [Next: Claude Code](04-claude.md)
 
-Harness Hat manages its configuration and policy files for normal developer workflows. `hht install` creates the global configuration at `~/.config/harness-hat/harness-hat.toml`; creating a workspace through the TUI or `hht workspace` records the workspace automatically.
+Harness Hat manages its configuration and policy files for normal developer workflows. `hht install` creates the global configuration at `~/.config/harness-hat/harness-hat.toml`; creating a workspace through the TUI or `hht ws` records the workspace automatically.
 
 ## Global Configuration
 

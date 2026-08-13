@@ -15,5 +15,5 @@ Start with [Set up Harness Hat](01-setup.md).
 ## Where commands run
 
 - **Terminal** means Terminal, PowerShell, Command Prompt, or a Linux shell on the development machine. Run all `hht`, `docker`, `cargo`, and `rustup` commands there unless a guide page says otherwise.
-- **Session terminal** means a shell after `hht workspace` has attached to a Harness Hat container. Run agent CLIs, `hostdo`, `killme`, and normal project commands there.
+- **Session terminal** means a shell after `hht sh` or `hht ws` has attached to a Harness Hat container. Run agent CLIs, `hostdo`, `killme`, and normal project commands there.
 - Harness Hat writes its configuration and project-policy files for normal workflows.

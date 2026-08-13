@@ -12,10 +12,12 @@ Run these commands in a **terminal**:
 
 ```sh
 cd ~/src/my-awesome-project
-hht workspace
+hht ws
 ```
 
 > **Expected result:** Harness Hat opens or attaches to a session for the project. Leave the session running while you use the editor.
+
+For a running session whose integer ID is known, `hht sh <ID> open vscode` (or `hht sh <ID> open cursor`) launches the editor directly through its Dev Containers integration. To create a fresh session for an explicit directory without attaching, use `hht sh new --path DIRECTORY`.
 
 ## Step 2: Install The Container Integration
 
@@ -37,7 +39,7 @@ In the editor:
 
 1. Open the Command Palette with `Cmd+Shift+P` on macOS or `Ctrl+Shift+P` on Linux and Windows.
 2. Run **Dev Containers: Attach to Running Container**.
-3. Select the running Harness Hat container for your project. Use `hht shell` in a **terminal** to list the Harness Hat session ID and Docker container ID when more than one is running.
+3. Select the running Harness Hat container for your project. Use `hht sh` in a **terminal** to list the Harness Hat session ID and Docker container ID when more than one is running.
 4. Open the workspace folder in the attached editor. It is normally the mirrored absolute POSIX path. On Windows, use the best-effort drive path (for example, `/C/Users/you/project`); when mirroring is disabled, use the configured mount target (normally `/workspace`).
 
 > **Expected result:** the editor opens a remote window backed by the already-running Harness Hat container. Integrated terminals, language servers, debugging, and extensions run in that container and use the project files mounted by Harness Hat.
@@ -51,7 +53,7 @@ Once you're attached to the running container, any agents you use in the IDE wil
 ## Troubleshooting
 
 - **The attach command is missing:** install or enable the editor’s Development Containers integration, then reload the editor window.
-- **No Harness Hat container appears:** run `hht shell` in a **terminal** and confirm the session is listed. Start one with `hht workspace` if needed.
+- **No Harness Hat container appears:** run `hht sh` in a **terminal** and confirm the session is listed. Start one with `hht ws` if needed.
 - **The workspace folder is not `/workspace`:** check whether the workspace has mirroring enabled (the default); open the mirrored path described above.
 - **An extension is only installed locally:** install it again in the attached remote window. Editor extensions that run tools or language servers must be installed in the container.
 

@@ -33,6 +33,8 @@ const CLAUDE_CODE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 const CLAUDE_CODE_OAUTH_SCOPES_ENV: &str = "CLAUDE_CODE_OAUTH_SCOPES";
 const CLAUDE_CODE_HOST_AUTH_ENV_VAR_ENV: &str = "CLAUDE_CODE_HOST_AUTH_ENV_VAR";
 const CLAUDE_CODE_DEFAULT_OAUTH_SCOPES: &str = "user:inference";
+static SESSION_ALIAS_LOCK: Mutex<()> = Mutex::new(());
+static LAST_SESSION_ALIAS: AtomicU64 = AtomicU64::new(0);
 const CLAUDE_CONFIG_CONTAINER_PATH: &str = "/home/coder/.claude.json";
 const CODEX_HOME_CONTAINER_PATH: &str = "/home/coder/.codex";
 const CODEX_SEED_CONTAINER_PATH: &str = "/run/harness-hat/codex-seed";
@@ -121,7 +123,7 @@ pub fn spawn(
         cidfile.display().to_string(),
     ];
 
-    // Discovery labels so `hht shell` can find and identify this session
+    // Discovery labels so `hht sh` can find and identify this session
     // without the manager process being alive.
     //
     // `docker ps --format '{{.Labels}}'` serializes labels as a single
@@ -676,33 +678,38 @@ fn docker_pty_options(docker_args: Vec<String>) -> tty::Options {
     options
 }
 
-/// Pick a zero-padded 4-digit id not currently used by a running harness-hat
-/// container. Randomness is derived from a fresh UUID to avoid pulling in a
-/// dedicated RNG dependency. Collisions among the ~10k space are rare; we retry
-/// a bounded number of times and fall back to a random value if every probe
-/// somehow clashes (effectively impossible for realistic session counts).
+/// Pick the next integer id after both the largest numeric id currently used by
+/// a running container and the last id allocated by this manager process. The
+/// lock prevents concurrent launches in the same process from selecting the
+/// same id.
 fn allocate_session_alias() -> Result<String> {
+    let _guard = SESSION_ALIAS_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("session ID allocator lock is poisoned"))?;
     let used = running_session_aliases()?;
-    for _ in 0..64 {
-        let candidate = random_four_digit();
-        if !used.contains(&candidate) {
-            return Ok(candidate);
-        }
-    }
-    Ok(random_four_digit())
+    let previous = LAST_SESSION_ALIAS.load(std::sync::atomic::Ordering::Relaxed);
+    let next = next_session_alias(&used, previous)?;
+    LAST_SESSION_ALIAS.store(next, std::sync::atomic::Ordering::Relaxed);
+    Ok(next.to_string())
 }
 
-fn random_four_digit() -> String {
-    let bytes = uuid::Uuid::new_v4().into_bytes();
-    let value = u16::from_le_bytes([bytes[0], bytes[1]]) as u32 % 10_000;
-    format!("{value:04}")
+fn next_session_alias(used: &std::collections::HashSet<String>, previous: u64) -> Result<u64> {
+    let largest = used
+        .iter()
+        .filter_map(|alias| alias.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0);
+    largest
+        .max(previous)
+        .checked_add(1)
+        .context("session ID space exhausted")
 }
 
 /// List `harness-hat.alias` values currently in use by running containers.
 ///
 /// Returns `Err` when `docker ps` fails — silently returning an empty set
 /// would let `allocate_session_alias` happily mint an alias that collides with
-/// a live container, breaking `hht shell <alias>` (ambiguous lookup).
+/// a live container, breaking `hht sh <alias>` (ambiguous lookup).
 fn running_session_aliases() -> Result<std::collections::HashSet<String>> {
     let mut command = std::process::Command::new("docker");
     crate::process_util::hide_console_window(&mut command);
@@ -1125,13 +1132,32 @@ mod tests {
     use super::docker_pty_options;
     use super::{
         ensure_claude_interactive_onboarding, format_localhost_forwards, has_nonempty_env_source,
-        mirrored_workspace_mount_target, normalize_script_line_endings, proxy_addr_without_auth,
-        seed_claude_oauth_onboarding_config, seed_private_mount, should_inject_coder_home,
+        mirrored_workspace_mount_target, next_session_alias, normalize_script_line_endings,
+        proxy_addr_without_auth, seed_claude_oauth_onboarding_config, seed_private_mount,
+        should_inject_coder_home,
     };
     use crate::config::{ContainerMount, LocalhostForward, MountMode};
     use std::collections::HashMap;
     use std::io::Write as _;
     use std::path::PathBuf;
+
+    #[test]
+    fn session_aliases_increment_after_largest_numeric_id() {
+        let used = ["1", "7", "0042", "legacy"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(next_session_alias(&used, 0).expect("next id"), 43);
+    }
+
+    #[test]
+    fn session_aliases_start_at_one_and_report_exhaustion() {
+        let empty = std::collections::HashSet::new();
+        assert_eq!(next_session_alias(&empty, 0).expect("first id"), 1);
+
+        let maxed = [u64::MAX.to_string()].into_iter().collect();
+        assert!(next_session_alias(&maxed, 0).is_err());
+    }
 
     fn mount(host: &str, container: &str, seed: Option<bool>) -> ContainerMount {
         ContainerMount {

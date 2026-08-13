@@ -856,7 +856,7 @@ const RULES_FILE_HEADER: &str = "\
 # container instead of `/workspace`. Windows drive paths use a best-effort
 # container path such as `/C/Users/example/project`.
 #
-# Preferred session template (saved by `hht workspace` after the first choice):
+# Preferred session template (saved by `hht ws` after the first choice):
 # template = \"rust\"
 # A `template` value in the matching `[[workspaces]]` entry in
 # harness-hat.toml overrides this value.

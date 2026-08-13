@@ -67,20 +67,52 @@ async fn main() -> Result<()> {
             println!("config written to: {}", path.display());
             println!("Run `hht install` to create and start the default background service.");
         }
-        Some(Command::Shell { id, kill, args }) => {
-            // Pure-Docker passthrough; intentionally bypasses manager init.
+        Some(Command::Shell {
+            id,
+            path,
+            kill,
+            args,
+            open,
+        }) => {
+            // Existing-session actions are a pure-Docker passthrough and
+            // intentionally bypass manager initialization. The reserved
+            // `new` action uses the workspace launcher to create a session.
+            if id.as_deref() == Some("new") {
+                let path = path.expect("cli validation requires sh new --path");
+                let code = tokio::task::spawn_blocking(move || {
+                    harness_hat::workspace::run(
+                        Vec::new(),
+                        false,
+                        None,
+                        None,
+                        false,
+                        true,
+                        Some(path),
+                        true,
+                        None,
+                        None,
+                    )
+                })
+                .await
+                .context("session launch task panicked")??;
+                std::process::exit(code);
+            }
+            if let Some(editor) = open {
+                let id = id.context("`sh ID open EDITOR` requires a session ID")?;
+                harness_hat::shell::open(&id, editor)?;
+                return Ok(());
+            }
             let code = harness_hat::shell::run(id, kill, args)?;
             std::process::exit(code);
-        }
-        Some(Command::Open { id, editor }) => {
-            harness_hat::shell::open(&id, editor)?;
         }
         Some(Command::Workspace {
             list,
             template,
             name,
             rebuild,
+            new,
             args,
+            open,
         }) => {
             // `workspace::run` uses `reqwest::blocking`, which spins up an
             // inner tokio runtime and drops it on the way out. Doing that
@@ -90,7 +122,9 @@ async fn main() -> Result<()> {
             // blocking pool — the inner runtime drop happens off the main
             // runtime thread.
             let code = tokio::task::spawn_blocking(move || {
-                harness_hat::workspace::run(args, list, template, name, rebuild, None)
+                harness_hat::workspace::run(
+                    args, list, template, name, rebuild, new, None, false, open, None,
+                )
             })
             .await
             .context("workspace task panicked")??;

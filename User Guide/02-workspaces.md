@@ -26,26 +26,30 @@ Run these commands in a **terminal**:
 
 ```sh
 cd ~/src/my-awesome-project
-hht workspace
+hht ws
 ```
 
-The shorter `hht ws` spelling is equivalent and is the preferred shortcut:
+`hht ws` is the canonical spelling (`hht workspace` remains available as a compatibility alias):
 
 ```sh
 hht ws
 ```
 
-`hht workspace` uses the host directory you run it from to select a configured workspace. When that directory is a subdirectory of the workspace, Harness Hat opens the session at the same relative container path.
+`hht ws` uses the host directory you run it from to select a configured workspace. When that directory is a subdirectory of the workspace, Harness Hat opens the session at the same relative container path.
 
 If the directory is not already registered, Harness Hat adds it as a workspace, asks you to choose a template, then opens the session.
 
 > **Expected result:** Harness Hat identifies or creates the workspace, launches or attaches to a session, and opens a session shell. Run this command from the directory you want the agent to access.
 
-## Clarify `hht shell` vs `hht workspace` behavior
+## Global sessions and `hht sh` versus `hht ws`
 
-You can run `hht shell` from any directory to list sessions or attach to one by ID; it never remounts a workspace.
+All running sessions are global Harness Hat objects. They are visible in the TUI and can be listed or operated on with `hht sh`.
 
-Use `hht workspace` from a workspace root or any of its subdirectories. The configured workspace remains the mount source by default, and a subdirectory invocation maps to that same relative path beneath the session's mount target (including a custom or mirrored target). `mount_cwd = true` remains the opt-in exception that mounts the invoking directory itself.
+You can run `hht sh` from anywhere on your disk to list sessions or attach to one by ID; it never remounts a workspace. `hht ws` uses the current directory to select or create the matching workspace, then attaches to or launches a session in the same way.
+
+Use `hht ws` from a workspace root or any of its subdirectories. The configured workspace remains the mount source by default, and a subdirectory invocation maps to that same relative path beneath the session's mount target (including a custom or mirrored target). `mount_cwd = true` remains the opt-in exception that mounts the invoking directory itself.
+
+The two commands operate on the same global sessions: choose `hht sh <ID>` for an ID-based workflow from any directory, or choose `hht ws` when the current directory should determine the workspace.
 
 Use this path when you are already in the project and want to start work immediately.
 
@@ -82,14 +86,14 @@ Run these commands in a **terminal**:
 
 ```sh
 # Run your workspace using the "rust" template.
-hht workspace --template rust
+hht ws --template rust
 # Run your workspace with a specific name and the "python" template
-hht workspace --name my-project --template python
+hht ws --name my-project --template python
 ```
 
 > **Expected result:** each command selects the requested workspace/template and attaches to its session.
 
-`hht workspace --rebuild` rebuilds the selected session image without Docker's layer cache before launch. Run a full image refresh about once a week in a **terminal**:
+`hht ws --rebuild` rebuilds the selected session image without Docker's layer cache before launch. Run a full image refresh about once a week in a **terminal**:
 
 ```sh
 hht rebuild --no-cache

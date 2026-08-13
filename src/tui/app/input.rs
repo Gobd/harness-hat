@@ -470,6 +470,7 @@ impl App {
                 if self.open_template_picker_for_workspace(workspace_idx) {
                     self.workspace_action_workspace = None;
                     self.workspace_action_cursor = 0;
+                    self.focus = Focus::ContainerPicker;
                 }
             }
             WorkspaceAction::RemoveWorkspace => {

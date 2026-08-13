@@ -30,7 +30,7 @@ const INPUT_ECHO_GRACE: Duration = Duration::from_millis(350);
 pub const TERMINAL_SCROLLBACK_LINES: usize = 10_000;
 
 /// Docker label keys stamped on every harness-hat container so that other
-/// processes (e.g. `hht shell`) can discover and identify running sessions
+/// processes (e.g. `hht sh`) can discover and identify running sessions
 /// without depending on the manager being alive.
 pub const LABEL_ALIAS: &str = "harness-hat.alias";
 pub const LABEL_WORKSPACE: &str = "harness-hat.workspace";
@@ -70,7 +70,7 @@ pub struct ContainerSession {
     pub container_name: String,
     pub container_id: String,
     pub docker_name: String,
-    /// Short random id (zero-padded 4 digits) used by `hht shell <alias>`.
+    /// Monotonically increasing integer id used by `hht sh <alias>`.
     pub alias: String,
     pub workspace_name: String,
     pub session_token: String,
@@ -292,7 +292,20 @@ impl ContainerSession {
 
     /// Friendly hint shown in the UI for shelling into this session.
     pub fn shell_in_hint(&self) -> String {
-        format!("{} shell {}", crate::cli::COMMAND_NAME, self.alias)
+        format!("{} sh {}", crate::cli::COMMAND_NAME, self.alias)
+    }
+
+    /// Every useful `hht sh` form for this session. Keep this list next to the
+    /// session identity so the TUI and reconnect messages use the same ID.
+    pub fn shell_commands(&self) -> [String; 5] {
+        let base = self.shell_in_hint();
+        [
+            format!("{base}  [attach]"),
+            format!("{base} <COMMAND...>  [run a command]"),
+            format!("{base} open vscode  [open VS Code]"),
+            format!("{base} open cursor  [open Cursor]"),
+            format!("{base} --kill  [stop the session]"),
+        ]
     }
 
     fn terminal_visible_hash(&self) -> u64 {
@@ -637,10 +650,10 @@ mod tests {
 
     #[test]
     fn parse_docker_label_extracts_value() {
-        let labels = "com.example=1,harness-hat.alias=0042,harness-hat.workspace=my proj";
+        let labels = "com.example=1,harness-hat.alias=42,harness-hat.workspace=my proj";
         assert_eq!(
             super::parse_docker_label(labels, "harness-hat.alias").as_deref(),
-            Some("0042")
+            Some("42")
         );
         assert_eq!(
             super::parse_docker_label(labels, "harness-hat.workspace").as_deref(),

@@ -851,7 +851,7 @@ fn manager_unavailable_response() -> Response {
         .into_response()
 }
 
-/// Liveness probe used by `hht workspace` to fail fast with a clear message
+/// Liveness probe used by `hht ws` to fail fast with a clear message
 /// when the manager isn't running. Intentionally no auth — the response
 /// contains nothing sensitive, and requiring the token would force every CLI
 /// caller to load and parse it just to print "manager not running."

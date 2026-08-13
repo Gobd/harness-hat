@@ -1,4 +1,4 @@
-//! `hht workspace` — attach to (or start) a session for `$PWD`.
+//! `hht ws` — attach to (or start) a session for `$PWD`.
 //!
 //! This subcommand needs a running manager (the `hht` default action) to do
 //! anything useful: it discovers the manager via the same config file the
@@ -18,14 +18,18 @@ use std::time::{Duration, Instant};
 
 use crate::config::{Config, ContainerDef, WorkspaceConfig};
 
-/// Entry point for the `workspace` subcommand. `explicit_config` is reserved
-/// for the daemon-attached client so it uses the service's exact config.
+/// Entry point for workspace/session launch. `explicit_config` is reserved for
+/// the daemon-attached client so it uses the service's exact config.
 pub fn run(
     args: Vec<OsString>,
     list: bool,
     template_override: Option<String>,
     name_override: Option<String>,
     force_rebuild: bool,
+    force_new: bool,
+    explicit_path: Option<PathBuf>,
+    launch_only: bool,
+    open_editor: Option<crate::cli::OpenEditor>,
     explicit_config: Option<PathBuf>,
 ) -> Result<i32> {
     let config_path = crate::manager::resolve_or_prompt_config_path(explicit_config)?
@@ -44,7 +48,7 @@ pub fn run(
 
     if which::which("docker").is_err() {
         bail!(
-            "docker not found in PATH — `{} workspace` requires Docker",
+            "docker not found in PATH — `{} ws` requires Docker",
             crate::cli::COMMAND_NAME
         );
     }
@@ -68,10 +72,10 @@ pub fn run(
         )
     })?;
 
-    let pwd = std::env::current_dir()
-        .context("getting current working directory")?
+    let pwd = explicit_path
+        .unwrap_or(std::env::current_dir().context("getting current working directory")?)
         .canonicalize()
-        .context("canonicalizing current working directory")?;
+        .context("canonicalizing workspace directory")?;
 
     // Match workspace by --name flag first, then by cwd.
     let matched = if let Some(ref n) = name_override {
@@ -81,15 +85,25 @@ pub fn run(
     };
 
     if let Some(matched) = matched {
-        println!(
-            "using workspace \"{}\" at {}",
-            matched.name,
-            matched.canonical_path.display()
+        status(
+            launch_only,
+            format!(
+                "using workspace \"{}\" at {}",
+                matched.name,
+                matched.canonical_path.display()
+            ),
         );
-        if let Some(session) = newest_session_for_workspace(&matched.name)? {
-            println!("attaching to running session {}", session.alias);
+        if !force_new && let Some(session) = newest_session_for_workspace(&matched.name)? {
+            status(
+                launch_only,
+                format!("attaching to running session {}", session.alias),
+            );
             let mount_target = mount_target_for_session(&session, &config);
             let workdir = workspace_workdir(&matched, &pwd, &mount_target);
+            if let Some(editor) = open_editor {
+                crate::shell::open(&session.alias, editor)?;
+                return Ok(0);
+            }
             return attach_and_report(&session.name, &args, Some(&workdir));
         }
         let rules_path = workspace_rules_path(&matched.canonical_path);
@@ -104,6 +118,7 @@ pub fn run(
             &config,
             matched.canonical_path.as_path(),
             effective_override,
+            launch_only,
         )?;
         // Primary config values are explicit overrides. All remembered choices
         // belong to the workspace and are persisted in harness-rules.toml.
@@ -123,11 +138,19 @@ pub fn run(
             launch_cwd,
             terminal_env,
         )?;
-        println!(
-            "launched session {} ({}); attaching",
-            resp.alias, resp.docker_name
+        status(
+            launch_only,
+            format!("launched session {} ({})", resp.alias, resp.docker_name),
         );
         wait_for_container_running(&resp.docker_name, Duration::from_secs(15))?;
+        if launch_only {
+            println!("{}", resp.alias);
+            return Ok(0);
+        }
+        if let Some(editor) = open_editor {
+            crate::shell::open(&resp.alias, editor)?;
+            return Ok(0);
+        }
         // `mount_cwd` deliberately mounts a subdirectory as the mount root, so
         // relative-to-workspace translation is not safe for that legacy mode.
         let workdir = if matched.mount_cwd {
@@ -143,14 +166,20 @@ pub fn run(
         .and_then(|s| s.to_str())
         .unwrap_or("workspace");
     let workspace_name = dedupe_workspace_name(&config, base);
-    println!(
-        "no configured workspace matches {} — adding \"{}\" to {}",
-        pwd.display(),
-        workspace_name,
-        config_path.display()
+    status(
+        launch_only,
+        format!(
+            "no configured workspace matches {} — adding \"{}\" to {}",
+            pwd.display(),
+            workspace_name,
+            config_path.display()
+        ),
     );
     if crate::new_project::write_rules_if_missing(&pwd, crate::new_project::ProjectType::None)? {
-        println!("created {}", pwd.join("harness-rules.toml").display());
+        status(
+            launch_only,
+            format!("created {}", pwd.join("harness-rules.toml").display()),
+        );
     }
     crate::new_project::append_project_block(&config_path, &workspace_name, &pwd, None)?;
     config.workspaces.push(WorkspaceConfig {
@@ -160,7 +189,12 @@ pub fn run(
         template: None,
         mount_cwd: false,
     });
-    let template = choose_template(&config, pwd.as_path(), template_override.as_deref())?;
+    let template = choose_template(
+        &config,
+        pwd.as_path(),
+        template_override.as_deref(),
+        launch_only,
+    )?;
     save_workspace_template(&workspace_rules_path(&pwd), &template)?;
     let terminal_env = crate::shell::shell_exec_env_pairs_with_passthrough(
         env_passthrough_for_template(&config, &template),
@@ -174,12 +208,28 @@ pub fn run(
         None,
         terminal_env,
     )?;
-    println!(
-        "launched session {} ({}); attaching",
-        resp.alias, resp.docker_name
+    status(
+        launch_only,
+        format!("launched session {} ({})", resp.alias, resp.docker_name),
     );
     wait_for_container_running(&resp.docker_name, Duration::from_secs(15))?;
+    if launch_only {
+        println!("{}", resp.alias);
+        return Ok(0);
+    }
+    if let Some(editor) = open_editor {
+        crate::shell::open(&resp.alias, editor)?;
+        return Ok(0);
+    }
     attach_and_report(&resp.docker_name, &args, Some(&resp.mount_target))
+}
+
+fn status(launch_only: bool, message: String) {
+    if launch_only {
+        eprintln!("{message}");
+    } else {
+        println!("{message}");
+    }
 }
 
 /// Request the daemon's session-preserving backend refresh. This is not a
@@ -482,6 +532,7 @@ fn choose_template(
     config: &Config,
     workspace_path: &Path,
     override_name: Option<&str>,
+    launch_only: bool,
 ) -> Result<String> {
     let templates = crate::config::resolve_workspace_container_templates(
         workspace_path,
@@ -519,19 +570,29 @@ fn choose_template(
                 .join(", ")
         );
     }
-    prompt_for_template(&templates)
+    prompt_for_template(&templates, launch_only)
 }
 
-fn prompt_for_template(containers: &[ContainerDef]) -> Result<String> {
-    println!(
+fn prompt_for_template(containers: &[ContainerDef], launch_only: bool) -> Result<String> {
+    let mut prompt: Box<dyn Write> = if launch_only {
+        Box::new(io::stderr())
+    } else {
+        Box::new(io::stdout())
+    };
+    writeln!(
+        prompt,
         "There is no running session for this workspace.  Choose a container template to start one:"
-    );
+    )?;
     for (i, ctr) in containers.iter().enumerate() {
-        println!("  {}. {}", i + 1, ctr.name);
+        writeln!(prompt, "  {}. {}", i + 1, ctr.name)?;
     }
     loop {
-        print!("Select [1-{}] (or 'q' to cancel): ", containers.len());
-        io::stdout().flush().ok();
+        write!(
+            prompt,
+            "Select [1-{}] (or 'q' to cancel): ",
+            containers.len()
+        )?;
+        prompt.flush().ok();
         let mut input = String::new();
         io::stdin()
             .read_line(&mut input)
@@ -545,10 +606,11 @@ fn prompt_for_template(containers: &[ContainerDef]) -> Result<String> {
                 return Ok(containers[n - 1].name.clone());
             }
         }
-        println!(
+        writeln!(
+            prompt,
             "invalid selection; enter a number between 1 and {}",
             containers.len()
-        );
+        )?;
     }
 }
 
@@ -924,7 +986,7 @@ mod tests {
         };
         config.containers = vec![template];
         let legacy = crate::shell::Session {
-            alias: "0001".into(),
+            alias: "1".into(),
             container_id: String::new(),
             workspace: "proj".into(),
             template: "dev".into(),

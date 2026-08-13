@@ -165,7 +165,7 @@ pub(crate) fn render_session_detail(
     let project = session.workspace_name.clone();
     let container_name = session.container_name.clone();
     let mount_target = session.mount_target.clone();
-    let shell_command = session.shell_in_hint();
+    let shell_commands = session.shell_commands();
     let exited = session.is_exited();
     let terminal_detached = session.is_terminal_detached();
     let launched_secs = session.launched_at.elapsed().as_secs();
@@ -293,10 +293,18 @@ pub(crate) fn render_session_detail(
                 .fg(tone(Color::Cyan))
                 .add_modifier(Modifier::BOLD),
         )),
+        Line::from(Span::styled(
+            "  hht sh commands for this session:",
+            Style::default().fg(tone(Color::DarkGray)),
+        )),
+    ]);
+    lines.extend(shell_commands.into_iter().map(|command| {
         Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(shell_command, Style::default().fg(tone(Color::White))),
-        ]),
+            Span::styled("    ", Style::default()),
+            Span::styled(command, Style::default().fg(tone(Color::White))),
+        ])
+    }));
+    lines.extend([
         Line::from(""),
         Line::from(Span::styled(
             "  Mounts",

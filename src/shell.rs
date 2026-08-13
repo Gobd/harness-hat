@@ -1,4 +1,4 @@
-//! `hht shell` — open an interactive shell in a running session.
+//! `hht sh` — operate on a running session.
 //!
 //! This is a pure-Docker passthrough: it discovers sessions purely from the
 //! discovery labels stamped at launch (`harness-hat.alias` etc.) and attaches
@@ -8,7 +8,7 @@
 //! Sessions only exist while the manager is running. Each session container is
 //! launched as `docker run --rm -it` owned by the manager's PTY, so quitting
 //! the manager (or that session's terminal) tears the container down and
-//! `--rm` removes it. `hht shell` therefore only finds a session while the
+//! `--rm` removes it. `hht sh` therefore only finds a session while the
 //! manager that launched it is still running — run it from a second terminal
 //! alongside the live manager.
 
@@ -23,14 +23,14 @@ use crate::container::{
     SHELL_USER, parse_docker_label,
 };
 
-/// Entry point for the `shell` subcommand. With an id, attaches to that
+/// Entry point for the `sh` subcommand. With an id, attaches to that
 /// session, optionally running `args` as a command instead of bash; `kill`
 /// terminates the named session instead of attaching; without an id, prints
 /// running sessions.
 pub fn run(id: Option<String>, kill: bool, args: Vec<OsString>) -> Result<i32> {
     if which::which("docker").is_err() {
         bail!(
-            "docker not found in PATH — `{} shell` requires Docker",
+            "docker not found in PATH — `{} sh` requires Docker",
             crate::cli::COMMAND_NAME
         );
     }
@@ -40,9 +40,8 @@ pub fn run(id: Option<String>, kill: bool, args: Vec<OsString>) -> Result<i32> {
             Ok(0)
         }
         (None, true) => bail!(
-            "`{} shell --kill` requires a session ID, e.g. `{} shell 0042 --kill`",
+            "shell kill mode requires a session ID, e.g. `{} sh 42 --kill`",
             crate::cli::COMMAND_NAME,
-            crate::cli::COMMAND_NAME
         ),
         (Some(id), false) => attach(&id, &args),
         (None, false) => {
@@ -133,7 +132,7 @@ fn parse_running_sessions(output: &str) -> Vec<Session> {
             continue;
         };
         sessions.push(Session {
-            alias,
+            alias: normalize_id(&alias),
             container_id: container_id.trim().to_string(),
             workspace: parse_docker_label(labels, LABEL_WORKSPACE).unwrap_or_default(),
             template: parse_docker_label(labels, LABEL_TEMPLATE).unwrap_or_default(),
@@ -145,15 +144,14 @@ fn parse_running_sessions(output: &str) -> Vec<Session> {
     sessions
 }
 
-/// Normalize a user-supplied id to the stored form: numeric ids are
-/// zero-padded to the 4-digit width that's shown in the UI, so `hht shell 42`
-/// matches the displayed `0042`. Non-numeric or longer ids pass through.
+/// Normalize a user-supplied id to the stored form. Numeric ids are rendered
+/// without leading zeroes so legacy padded ids (for example `0042`) still
+/// resolve to the new integer id `42`. Non-numeric or overflowing ids pass
+/// through unchanged.
 fn normalize_id(id: &str) -> String {
-    if !id.is_empty() && id.len() < 4 && id.bytes().all(|b| b.is_ascii_digit()) {
-        format!("{id:0>4}")
-    } else {
-        id.to_string()
-    }
+    id.parse::<u64>()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|_| id.to_string())
 }
 
 fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
@@ -240,7 +238,7 @@ fn session_for_id(id: &str) -> Result<Session> {
 
     let session = match matches.len() {
         0 => bail!(
-            "no running session with id '{wanted}'. Run `{} shell` to list sessions. \
+            "no running session with id '{wanted}'. Run `{} sh` to list sessions. \
              (Sessions only exist while the manager is running — is it still open?)",
             crate::cli::COMMAND_NAME
         ),
@@ -278,7 +276,7 @@ fn read_container_label(container_name: &str, label: &str) -> Result<String> {
 }
 
 /// host-terminal cleanup the interactive shell flow needs. Reused by
-/// `hht workspace`.
+/// `hht ws`.
 ///
 /// Don't `exec()` into docker exec. If the manager exits while this shell is
 /// attached, the `docker run --rm` container dies and `docker exec` is ripped
@@ -455,11 +453,11 @@ fn restore_host_terminal_modes() {
 
 fn list() -> Result<()> {
     let mut sessions = running_sessions()?;
-    sessions.sort_by(|a, b| a.alias.cmp(&b.alias));
+    sessions.sort_by(|a, b| compare_ids(&a.alias, &b.alias));
     if sessions.is_empty() {
         println!(
             "No running harness-hat sessions. Sessions only exist while the manager is \
-             running — launch one in the manager, then run `{} shell` from another terminal.",
+             running — launch one in the manager, then run `{} sh` from another terminal.",
             crate::cli::COMMAND_NAME
         );
         return Ok(());
@@ -507,17 +505,26 @@ fn list() -> Result<()> {
         );
     }
     println!(
-        "\nAttach with: {} shell <ID>\nStop with: {} shell <ID> --kill",
+        "\nAttach with: {} sh <ID>\nStop with: {} sh <ID> --kill",
         crate::cli::COMMAND_NAME,
         crate::cli::COMMAND_NAME
     );
     Ok(())
 }
 
+fn compare_ids(left: &str, right: &str) -> std::cmp::Ordering {
+    match (left.parse::<u64>(), right.parse::<u64>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+        (Err(_), Err(_)) => left.cmp(right),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Session, attached_container_uri, docker_exec_args, hex_encode, normalize_id,
+        Session, attached_container_uri, compare_ids, docker_exec_args, hex_encode, normalize_id,
         parse_running_sessions,
     };
     use std::ffi::OsString;
@@ -530,7 +537,7 @@ mod tests {
     #[test]
     fn attached_container_uri_uses_hex_id_and_mount_target() {
         let session = Session {
-            alias: "0042".to_string(),
+            alias: "42".to_string(),
             container_id: "c84041fe7f9f".to_string(),
             workspace: "api".to_string(),
             template: "rust".to_string(),
@@ -546,7 +553,7 @@ mod tests {
     #[test]
     fn attached_container_uri_falls_back_to_workspace_root() {
         let session = Session {
-            alias: "0042".to_string(),
+            alias: "42".to_string(),
             container_id: "abc123".to_string(),
             workspace: "api".to_string(),
             template: "rust".to_string(),
@@ -560,10 +567,10 @@ mod tests {
     }
 
     #[test]
-    fn numeric_ids_are_zero_padded_to_width_four() {
-        assert_eq!(normalize_id("42"), "0042");
-        assert_eq!(normalize_id("7"), "0007");
-        assert_eq!(normalize_id("0042"), "0042");
+    fn numeric_ids_are_canonicalized_without_padding() {
+        assert_eq!(normalize_id("42"), "42");
+        assert_eq!(normalize_id("7"), "7");
+        assert_eq!(normalize_id("0042"), "42");
     }
 
     #[test]
@@ -574,13 +581,19 @@ mod tests {
     }
 
     #[test]
+    fn numeric_ids_sort_numerically() {
+        assert!(compare_ids("2", "10").is_lt());
+        assert!(compare_ids("10", "2").is_gt());
+    }
+
+    #[test]
     fn running_session_parser_includes_docker_container_id() {
         let sessions = parse_running_sessions(
             "a1b2c3d4e5f6\thh-session\tharness-hat.alias=0042,harness-hat.workspace=api,harness-hat.template=rust\n",
         );
 
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].alias, "0042");
+        assert_eq!(sessions[0].alias, "42");
         assert_eq!(sessions[0].container_id, "a1b2c3d4e5f6");
         assert_eq!(sessions[0].workspace, "api");
         assert_eq!(sessions[0].template, "rust");

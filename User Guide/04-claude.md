@@ -107,9 +107,9 @@ Run this in a **terminal** to enter the session:
 
 ```sh
 cd ~/my-awesome-project
-hht workspace claude
+hht ws claude
 # Or resume a Claude conversation:
-hht workspace claude --resume
+hht ws claude --resume
 ```
 
 > **Expected result:** Harness Hat opens the session and starts Claude. In the session, `/status` should show an authenticated Claude session rather than requesting a browser login.

@@ -32,13 +32,16 @@ pub enum Command {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
     },
-    /// Open an interactive shell in a running session. With no id, lists the
-    /// running sessions and their ids. Pass `ID --kill` to terminate a
-    /// session. Any args after the id are passed verbatim to `docker exec` as
-    /// the command to run instead of bash — e.g. `hht shell 0042 claude --resume`.
+    /// Operate on a running session, or launch one with `new --path DIRECTORY`.
+    /// With no id, lists sessions. Any args after an id are passed verbatim to
+    /// `docker exec`; use `ID open EDITOR` to launch an attached IDE.
+    #[command(name = "sh", visible_alias = "shell")]
     Shell {
         #[arg(value_name = "ID")]
         id: Option<String>,
+        /// Launch a fresh session for the reserved `new` action.
+        #[arg(long, value_name = "DIRECTORY", requires = "id")]
+        path: Option<PathBuf>,
         /// Terminate and remove the named session instead of attaching to it.
         #[arg(long, conflicts_with = "args")]
         kill: bool,
@@ -48,16 +51,9 @@ pub enum Command {
             allow_hyphen_values = true
         )]
         args: Vec<OsString>,
-    },
-    /// Open a running session's workspace in an external editor via its Dev
-    /// Containers "attached container" URI scheme — EDITOR is `vscode` or
-    /// `cursor`, and requires that editor's CLI (`code` or `cursor`
-    /// respectively) to be on PATH.
-    Open {
-        #[arg(value_name = "ID")]
-        id: String,
-        #[arg(value_name = "EDITOR")]
-        editor: OpenEditor,
+        /// Parsed from the trailing `open EDITOR` action.
+        #[arg(skip)]
+        open: Option<OpenEditor>,
     },
     /// Attach to (or start) a session for the current working directory.
     ///
@@ -68,11 +64,14 @@ pub enum Command {
     /// config file using the directory's basename as the workspace name.
     ///
     /// Any args after the subcommand are passed verbatim to `docker exec`
-    /// (same passthrough behavior as `hht shell ID …`).
-    #[command(visible_alias = "ws", alias = "wp")]
+    /// (same passthrough behavior as `hht sh ID …`).
+    #[command(name = "ws", visible_alias = "workspace", alias = "wp")]
     Workspace {
         /// List configured workspaces without starting or attaching to a session.
-        #[arg(long, conflicts_with_all = ["template", "name", "rebuild", "args"])]
+        #[arg(
+            long,
+            conflicts_with_all = ["template", "name", "rebuild", "new", "args"]
+        )]
         list: bool,
         /// Use a specific container template instead of prompting.
         #[arg(long, value_name = "NAME")]
@@ -85,12 +84,18 @@ pub enum Command {
         /// or to pick up a newer version of an installed tool (e.g. claude-code).
         #[arg(long)]
         rebuild: bool,
+        /// Always launch a fresh session instead of reusing a running one.
+        #[arg(long)]
+        new: bool,
         #[arg(
             value_name = "COMMAND",
             trailing_var_arg = true,
             allow_hyphen_values = true
         )]
         args: Vec<OsString>,
+        /// Parsed from the trailing `open EDITOR` action.
+        #[arg(skip)]
+        open: Option<OpenEditor>,
     },
     /// Rebuild the base image followed by selected templates, or every
     /// Dockerfile template in the configured docker_dir when none are named.
@@ -125,7 +130,7 @@ pub enum Command {
     Dialog(DialogCommand),
 }
 
-/// Editors `hht open` knows how to launch. Each maps to a CLI binary that
+/// Editors accepted by `sh ID open EDITOR` and `ws open EDITOR`. Each maps to a CLI binary that
 /// supports the Dev Containers `--folder-uri vscode-remote://attached-container+…`
 /// scheme.
 #[derive(Debug, Clone, clap::ValueEnum)]
@@ -142,7 +147,6 @@ impl OpenEditor {
             OpenEditor::Cursor => "cursor",
         }
     }
-  
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -227,11 +231,8 @@ pub fn parse() -> Result<Cli> {
 }
 
 pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
-    let usage = format!(
-        "Usage: {COMMAND_NAME} [init [PATH] | shell [ID] [COMMAND...] | shell ID --kill | open ID <vscode|cursor> | workspace (ws) [OPTIONS] [COMMAND...] | rebuild [OPTIONS] [TEMPLATE...] | restart | install [--headless] | uninstall | | approvals COMMAND]"
-    );
     if raw.is_empty() {
-        bail!("missing argv[0]. {usage}");
+        bail!("missing argv[0]");
     }
 
     // `Error::exit()` prints --help/--version to stdout and exits 0, and prints
@@ -244,9 +245,95 @@ pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
     if raw.get(1).is_some_and(|arg| arg == "wp") {
         eprintln!("warning: `hht wp` is deprecated; use `hht ws` instead");
     }
-    Ok(Cli {
-        command: options.command,
-    })
+    let command = normalize_actions(options.command)?;
+    Ok(Cli { command })
+}
+
+fn normalize_actions(command: Option<Command>) -> Result<Option<Command>> {
+    let Some(command) = command else {
+        return Ok(None);
+    };
+    match command {
+        Command::Shell {
+            id,
+            path,
+            kill,
+            mut args,
+            mut open,
+        } => {
+            if open.is_none() && args.first().is_some_and(|arg| arg == "open") {
+                anyhow::ensure!(
+                    args.len() == 2,
+                    "`open` requires an editor: use `sh ID open vscode` or `sh ID open cursor`"
+                );
+                open = Some(parse_editor(&args[1])?);
+                args.clear();
+            }
+            if id.as_deref() == Some("new") {
+                anyhow::ensure!(path.is_some(), "`sh new` requires `--path DIRECTORY`");
+                anyhow::ensure!(
+                    !kill && args.is_empty() && open.is_none(),
+                    "`sh new --path DIRECTORY` cannot be combined with a command, `--kill`, or `open`"
+                );
+            } else {
+                anyhow::ensure!(
+                    path.is_none(),
+                    "`--path` is only valid with `sh new --path DIRECTORY`"
+                );
+            }
+            Ok(Some(Command::Shell {
+                id,
+                path,
+                kill,
+                args,
+                open,
+            }))
+        }
+        Command::Workspace {
+            list,
+            template,
+            name,
+            rebuild,
+            new,
+            mut args,
+            mut open,
+        } => {
+            if open.is_none() && args.first().is_some_and(|arg| arg == "open") {
+                anyhow::ensure!(
+                    args.len() == 2,
+                    "`open` requires an editor: use `ws open vscode` or `ws open cursor`"
+                );
+                open = Some(parse_editor(&args[1])?);
+                args.clear();
+            }
+            anyhow::ensure!(
+                !list || (!new && args.is_empty() && open.is_none()),
+                "`ws --list` cannot be combined with `--new`, a command, or `open`"
+            );
+            anyhow::ensure!(
+                args.first().is_none_or(|arg| arg != "--path"),
+                "`ws` is cwd-based; use `sh new --path DIRECTORY` for an explicit directory"
+            );
+            Ok(Some(Command::Workspace {
+                list,
+                template,
+                name,
+                rebuild,
+                new,
+                args,
+                open,
+            }))
+        }
+        other => Ok(Some(other)),
+    }
+}
+
+fn parse_editor(value: &OsString) -> Result<OpenEditor> {
+    match value.to_string_lossy().to_ascii_lowercase().as_str() {
+        "vscode" => Ok(OpenEditor::Vscode),
+        "cursor" => Ok(OpenEditor::Cursor),
+        other => bail!("unknown editor {other:?}; choose `vscode` or `cursor`"),
+    }
 }
 
 #[cfg(test)]
@@ -281,40 +368,41 @@ mod tests {
         let cli = parse_from(argv(&["hht", "shell"])).expect("parse");
         assert!(matches!(
             cli.command,
-            Some(Command::Shell { id: None, kill: false, ref args }) if args.is_empty()
+            Some(Command::Shell { id: None, path: None, kill: false, ref args, open: None }) if args.is_empty()
         ));
 
-        let cli = parse_from(argv(&["hht", "shell", "0042"])).expect("parse");
+        let cli = parse_from(argv(&["hht", "shell", "42"])).expect("parse");
         assert!(matches!(
             cli.command,
-            Some(Command::Shell { id: Some(id), kill: false, ref args }) if id == "0042" && args.is_empty()
+            Some(Command::Shell { id: Some(id), path: None, kill: false, ref args, open: None }) if id == "42" && args.is_empty()
         ));
     }
 
     #[test]
-    fn open_subcommand_parses_id_and_editor() {
-        let cli = parse_from(argv(&["hht", "open", "0042", "cursor"])).expect("parse");
+    fn shell_open_action_parses_id_and_editor() {
+        let cli = parse_from(argv(&["hht", "sh", "42", "open", "cursor"])).expect("parse");
         assert!(matches!(
             cli.command,
-            Some(Command::Open { id, editor: OpenEditor::Cursor }) if id == "0042"
-        ));
-
-        let cli = parse_from(argv(&["hht", "open", "0042", "vscode"])).expect("parse");
-        assert!(matches!(
-            cli.command,
-            Some(Command::Open { id, editor: OpenEditor::Vscode }) if id == "0042"
+            Some(Command::Shell { id: Some(id), open: Some(OpenEditor::Cursor), ref args, .. })
+                if id == "42" && args.is_empty()
         ));
     }
 
     #[test]
-    fn open_subcommand_rejects_unknown_editor() {
-        assert!(CliOptions::try_parse_from(argv(&["hht", "open", "0042", "bogus"])).is_err());
+    fn nested_open_action_rejects_unknown_editor() {
+        assert!(parse_from(argv(&["hht", "sh", "42", "open", "bogus"])).is_err());
     }
 
     #[test]
     fn workspace_subcommand_parses_template_and_trailing_args() {
         let cli = parse_from(argv(&["hht", "workspace"])).expect("parse");
-        let Some(Command::Workspace { template, args, .. }) = cli.command else {
+        let Some(Command::Workspace {
+            template,
+            args,
+            open: None,
+            ..
+        }) = cli.command
+        else {
             panic!("expected Workspace");
         };
         assert!(template.is_none());
@@ -329,7 +417,13 @@ mod tests {
             "--resume",
         ]))
         .expect("parse");
-        let Some(Command::Workspace { template, args, .. }) = cli.command else {
+        let Some(Command::Workspace {
+            template,
+            args,
+            open: None,
+            ..
+        }) = cli.command
+        else {
             panic!("expected Workspace");
         };
         assert_eq!(template.as_deref(), Some("dev"));
@@ -344,7 +438,10 @@ mod tests {
     #[test]
     fn ws_alias_parses_as_workspace_and_preserves_trailing_args() {
         let cli = parse_from(argv(&["hht", "ws", ".."])).expect("parse");
-        let Some(Command::Workspace { args, .. }) = cli.command else {
+        let Some(Command::Workspace {
+            args, open: None, ..
+        }) = cli.command
+        else {
             panic!("expected Workspace subcommand");
         };
         assert_eq!(args, vec![OsString::from("..")]);
@@ -353,7 +450,10 @@ mod tests {
     #[test]
     fn wp_alias_remains_compatible_and_preserves_trailing_args() {
         let cli = parse_from(argv(&["hht", "wp", ".."])).expect("parse");
-        let Some(Command::Workspace { args, .. }) = cli.command else {
+        let Some(Command::Workspace {
+            args, open: None, ..
+        }) = cli.command
+        else {
             panic!("expected Workspace subcommand");
         };
         assert_eq!(args, vec![OsString::from("..")]);
@@ -361,7 +461,7 @@ mod tests {
 
     #[test]
     fn workspace_subcommand_parses_list() {
-        let cli = parse_from(argv(&["hht", "workspace", "--list"])).expect("parse");
+        let cli = parse_from(argv(&["hht", "ws", "--list"])).expect("parse");
         assert!(matches!(
             cli.command,
             Some(Command::Workspace { list: true, .. })
@@ -393,16 +493,18 @@ mod tests {
 
     #[test]
     fn shell_subcommand_collects_trailing_args_verbatim() {
-        let cli = parse_from(argv(&["hht", "shell", "0042", "claude", "--resume"])).expect("parse");
+        let cli = parse_from(argv(&["hht", "shell", "42", "claude", "--resume"])).expect("parse");
         let Some(Command::Shell {
             id,
+            path: None,
             kill: false,
             args,
+            open: None,
         }) = cli.command
         else {
             panic!("expected Shell subcommand");
         };
-        assert_eq!(id.as_deref(), Some("0042"));
+        assert_eq!(id.as_deref(), Some("42"));
         assert_eq!(
             args.iter()
                 .map(|a| a.to_string_lossy().into_owned())
@@ -416,8 +518,42 @@ mod tests {
         let cli = parse_from(argv(&["hht", "shell", "42", "--kill"])).expect("parse");
         assert!(matches!(
             cli.command,
-            Some(Command::Shell { id: Some(id), kill: true, args }) if id == "42" && args.is_empty()
+            Some(Command::Shell { id: Some(id), path: None, kill: true, args, open: None }) if id == "42" && args.is_empty()
         ));
+    }
+
+    #[test]
+    fn shell_new_requires_path_and_preserves_directory() {
+        let cli = parse_from(argv(&["hht", "sh", "new", "--path", "."])).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Shell {
+                id: Some(id),
+                path: Some(path),
+                kill: false,
+                open: None,
+                ref args,
+            }) if id == "new" && path == PathBuf::from(".") && args.is_empty()
+        ));
+        assert!(parse_from(argv(&["hht", "sh", "new"])).is_err());
+        assert!(parse_from(argv(&["hht", "sh", "new", "."])).is_err());
+        assert!(parse_from(argv(&["hht", "sh", "new", "--path", ".", "echo"])).is_err());
+        assert!(parse_from(argv(&["hht", "sh", "new", "--path", ".", "--kill"])).is_err());
+    }
+
+    #[test]
+    fn workspace_new_and_open_actions_parse() {
+        let cli = parse_from(argv(&["hht", "ws", "--new", "open", "vscode"])).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Workspace {
+                new: true,
+                open: Some(OpenEditor::Vscode),
+                ref args,
+                ..
+            }) if args.is_empty()
+        ));
+        assert!(parse_from(argv(&["hht", "ws", "--path", "."])).is_err());
     }
 
     #[test]
