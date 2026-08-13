@@ -32,7 +32,7 @@ impl App {
     /// Whether network-approval prompts are delegated to a native OS dialog
     /// rather than the in-TUI overlay.
     pub(crate) fn native_dialog_enabled(&self) -> bool {
-        cfg!(target_os = "macos") || self.service_mode
+        !self.headless_mode && (cfg!(target_os = "macos") || self.service_mode)
     }
 
     /// Drain results from finished native-dialog subprocesses and apply each to
@@ -50,6 +50,9 @@ impl App {
     /// is waiting, pop a dialog for the front pending item. Only one modal is
     /// shown at a time, so a burst of requests queues behind it.
     pub(crate) fn maybe_launch_native_dialog(&mut self) {
+        if self.headless_mode {
+            return;
+        }
         if self.native_dialog_inflight.is_some() {
             return;
         }
@@ -169,53 +172,25 @@ impl App {
                     }
                 }
             }
-            NativeDialogTarget::RulesChanged(path) => match outcome {
-                Outcome::Allow { .. } => {
-                    let Some(expected_contents) = self
-                        .base_rules_changed
-                        .as_ref()
-                        .filter(|state| state.path == path)
-                        .map(|state| state.expected_contents.as_deref())
-                    else {
-                        self.config.block_rules_file(&path);
-                        return;
-                    };
-                    match self
-                        .config
-                        .trust_rules_file_if_bytes(&path, expected_contents)
-                    {
-                        Ok(()) => {
-                            self.base_rules_changed = None;
-                            self.push_log(
-                                format!("trusted reviewed rules file: {}", path.display()),
-                                false,
-                            );
-                        }
-                        Err(error) => {
-                            self.config.block_rules_file(&path);
-                            if let Some(state) = self.base_rules_changed.as_mut()
-                                && state.path == path
-                            {
-                                state.dialog_dismissed = false;
-                            }
-                            self.push_log(
-                                format!(
-                                    "rules file changed before it could be trusted '{}': {error}",
-                                    path.display()
-                                ),
-                                true,
-                            );
-                        }
+            NativeDialogTarget::RulesChanged(path) => {
+                if self
+                    .base_rules_changed
+                    .as_ref()
+                    .is_none_or(|state| state.path != path)
+                {
+                    // The same approval may have been resolved through the
+                    // authenticated CLI while this native dialog was open.
+                    // Its stale result must not re-block an already trusted
+                    // file or affect a newer rules-change approval.
+                    return;
+                }
+                match outcome {
+                    Outcome::Allow { .. } => {
+                        let _ = self.trust_changed_rules();
                     }
+                    Outcome::Deny { .. } | Outcome::Cancelled => self.dismiss_changed_rules(),
                 }
-                Outcome::Deny { .. } | Outcome::Cancelled => {
-                    self.config.block_rules_file(&path);
-                    self.push_log(
-                        format!("rules remain blocked until reviewed: {}", path.display()),
-                        true,
-                    );
-                }
-            },
+            }
         }
     }
 }

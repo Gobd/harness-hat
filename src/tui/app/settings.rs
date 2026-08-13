@@ -1,6 +1,30 @@
 use super::*;
 
 impl App {
+    fn workspace_action_rows_for() -> Vec<WorkspaceActionRow> {
+        vec![
+            WorkspaceActionRow {
+                key: 'l',
+                label: "Launch workspace",
+                desc: "Start a new container in this workspace.",
+                action: WorkspaceAction::LaunchWorkspace,
+            },
+            WorkspaceActionRow {
+                key: 'r',
+                label: "Remove workspace",
+                desc: "Stop running containers and remove this workspace from config.",
+                action: WorkspaceAction::RemoveWorkspace,
+            },
+        ]
+    }
+
+    pub(crate) fn workspace_action_rows(&self, workspace_idx: usize) -> Vec<WorkspaceActionRow> {
+        if self.config.get().workspaces.get(workspace_idx).is_none() {
+            return Vec::new();
+        }
+        Self::workspace_action_rows_for()
+    }
+
     pub(crate) fn refresh_workspaces_cache(&mut self) {
         let cfg = self.config.get();
         self.workspaces = cfg
@@ -296,7 +320,7 @@ impl App {
         self.focus = Focus::ContainerPicker;
     }
 
-    fn open_template_picker_for_workspace(&mut self, workspace_idx: usize) -> bool {
+    pub(crate) fn open_template_picker_for_workspace(&mut self, workspace_idx: usize) -> bool {
         if workspace_idx >= self.config.get().workspaces.len() {
             return false;
         }

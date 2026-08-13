@@ -35,7 +35,7 @@ jobs:
         run: docker build -t harness-hat-base:local -f docker/harness-hat-base.dockerfile docker
       - name: Build every language image
         run: |
-          for template in default typescript python go rust kotlin php csharp; do
+          for template in default typescript python go rust kotlin android php csharp; do
             docker build -t "harness-hat-${template}:ci" -f "docker/${template}.dockerfile" docker
           done
       - name: Smoke-test the installed toolchains
@@ -46,3 +46,5 @@ jobs:
           docker run --rm --entrypoint go harness-hat-go:ci version
           docker run --rm --entrypoint rustc harness-hat-rust:ci --version
           docker run --rm --entrypoint kotlinc harness-hat-kotlin:ci -version
+          docker run --rm --entrypoint adb harness-hat-android:ci version
+          docker run --rm --entrypoint sdkmanager harness-hat-android:ci --version

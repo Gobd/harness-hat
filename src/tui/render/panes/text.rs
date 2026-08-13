@@ -93,6 +93,9 @@ pub(crate) fn status_bar_keys(app: &App) -> &'static str {
         Focus::Activity => " [drag]select  [⌘C/^⇧C]copy  [^C]cancel  [Esc/^B]sidebar  [^Q]quit",
         Focus::Network => " [↑↓/jk]select request  [^C]cancel selected  [Esc/^B]sidebar  [^Q]quit",
         Focus::Settings => " [↑↓/jk]navigate  [↵/l]select  [^B]back  [^C/^Q]quit",
+        Focus::WorkspaceActions => {
+            " [↑↓/jk]navigate  [↵/l]select  [r]remove  [Esc/^B]back  [^C/^Q]quit"
+        }
         Focus::ContainerPicker => " [↑↓/jk]navigate  [↵/l]launch  [^B]back  [^C/^Q]quit",
         Focus::ImageBuild => {
             if app.build_is_running() {

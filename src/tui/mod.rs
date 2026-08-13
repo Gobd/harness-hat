@@ -109,12 +109,26 @@ enum SettingsAction {
     RemoveWorkspace,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceAction {
+    LaunchWorkspace,
+    RemoveWorkspace,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SettingsActionRow {
     pub key: char,
     pub label: String,
     pub desc: &'static str,
     action: SettingsAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorkspaceActionRow {
+    key: char,
+    label: &'static str,
+    desc: &'static str,
+    action: WorkspaceAction,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +168,7 @@ pub enum Focus {
     Settings,
     ContainerPicker,
     ImageBuild,
+    WorkspaceActions,
     NewWorkspace,
 }
 
@@ -174,6 +189,7 @@ pub struct RemoveWorkspaceConfirmState {
 
 #[derive(Debug, Clone)]
 pub struct BaseRulesChangedState {
+    pub approval_id: String,
     pub path: PathBuf,
     pub expected_contents: Option<Vec<u8>>,
     pub dialog_dismissed: bool,
@@ -256,6 +272,8 @@ pub struct App {
     pub preview_session: Option<usize>,
     pub active_settings_workspace: Option<usize>,
     pub settings_cursor: usize,
+    pub workspace_action_workspace: Option<usize>,
+    pub workspace_action_cursor: usize,
 
     pub(crate) container_picker: Option<ContainerPickerState>,
     pub build_container_idx: Option<usize>,
@@ -269,11 +287,13 @@ pub struct App {
     pub new_workspace: Option<NewWorkspaceState>,
     pub remove_workspace_confirm: Option<RemoveWorkspaceConfirmState>,
     pub base_rules_changed: Option<BaseRulesChangedState>,
+    next_approval_id: u16,
 
     pub exec_pending_rx: mpsc::Receiver<PendingItem>,
     pub stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
     pub launch_pending_rx: mpsc::Receiver<WorkspaceLaunchItem>,
     pub restart_pending_rx: mpsc::Receiver<crate::server::DaemonRestartItem>,
+    pub approval_control_rx: mpsc::Receiver<crate::server::ApprovalControlItem>,
     pub(crate) workspace_launch_pending: Option<WorkspaceLaunchPending>,
     pub net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
     // Native OS approval dialog (macOS): results of finished `hht __dialog`
@@ -282,6 +302,7 @@ pub struct App {
     background_channels: BackgroundUiChannels,
     native_dialog_inflight: Option<app::native_dialog::NativeDialogTarget>,
     service_mode: bool,
+    headless_mode: bool,
     // Bounded (H12): a malicious in-container client streaming events at full
     // speed otherwise grows the backing Vec without limit. On full the
     // producers (proxy/server) `try_send` and drop the event with a debug log
@@ -524,8 +545,9 @@ pub async fn run(mut app: App) -> Result<()> {
     result
 }
 
-/// Run the manager state machine without a terminal renderer. The installed
-/// per-user agent uses this path and native dialogs for every approval.
+/// Run the manager state machine without a terminal renderer. Installed
+/// desktop agents use native dialogs; headless agents accept decisions from
+/// the authenticated CLI or an attached remote TUI.
 pub async fn run_service(
     mut app: App,
     mut tui_rx: mpsc::Receiver<crate::server::TuiFrameItem>,

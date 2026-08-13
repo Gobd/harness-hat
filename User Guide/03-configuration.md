@@ -24,12 +24,12 @@ host_port = 11434
 
 Inside a new session, `localhost:8081` reaches host port `11434`. Omitting `host_port` uses the same port. A rule with the same `container_port` overrides the selected template's forward; changes apply to newly launched sessions.
 
-Review remembered project-policy changes through normal version control. A changed global or project policy file blocks new network and host-command decisions until its current version is reviewed and trusted in the system dialog. Closing that dialog keeps requests blocked.
+Review remembered project-policy changes through normal version control. A changed global or project policy file blocks new network and host-command decisions until its current version is reviewed and trusted in the system dialog, the attached headless TUI, or `hht approvals trust ID`. Dismissing the review keeps requests blocked.
 
 ## Team-Managed Settings
 
-Organization-wide policy belongs in the global policy managed by the team, rather than in each developer's setup steps. This includes permanent network denials, host-command defaults, and the optional workspace-path mirroring policy.
+Organization-wide policy belongs in the global policy managed by the team, rather than in each developer's setup steps. This includes permanent network denials, host-command defaults, and the workspace-path mirroring policy.
 
-When a team enables path mirroring, a POSIX workspace such as `/home/user/my-project` is mounted at that same path in Linux sessions instead of `/workspace`. Windows paths continue to use the configured container location because they cannot be represented exactly in a Linux container.
+Path mirroring is enabled by default, so a POSIX workspace such as `/home/user/my-project` is mounted at that same path in Linux sessions instead of `/workspace`. Windows drive paths use a best-effort equivalent such as `/C/Users/you/my-project`. Set `mirror_cwd = false` to retain the configured container location.
 
 Continue with [Claude Code](04-claude.md) or [hostdo](05-hostdo.md).

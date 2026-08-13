@@ -39,10 +39,12 @@ pub struct ProjectRules {
     /// workspace template takes precedence when explicitly configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
-    /// Mount the workspace at its absolute POSIX host path instead of the
-    /// configured container mount target.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub mirror_cwd: bool,
+    /// Optional override for mounting the workspace at its mirrored host path
+    /// instead of the configured container mount target. Windows drive paths
+    /// use a best-effort `/C/Users/...` representation. When omitted,
+    /// mirroring defaults to enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_cwd: Option<bool>,
     /// Additional host-local TCP services exposed as localhost inside the
     /// workspace container. Entries with the same container port override
     /// the configured container/profile forward.
@@ -58,17 +60,13 @@ fn current_rules_version() -> u32 {
     CURRENT_RULES_VERSION
 }
 
-fn is_false(value: &bool) -> bool {
-    !value
-}
-
 impl Default for ProjectRules {
     fn default() -> Self {
         Self {
             version: CURRENT_RULES_VERSION,
             llm_instructions: None,
             template: None,
-            mirror_cwd: false,
+            mirror_cwd: Some(true),
             localhost_forwards: Vec::new(),
             hostdo: HostdoRules::default(),
             network: NetworkRules::default(),
@@ -112,6 +110,13 @@ pub struct HostdoCommand {
 
 fn default_hostdo_timeout_secs() -> u64 {
     60
+}
+
+/// Hard ceiling for every hostdo command, regardless of its request or rule.
+pub const MAX_HOSTDO_TIMEOUT_SECS: u64 = 5 * 60;
+
+pub(crate) fn clamp_hostdo_timeout_secs(timeout_secs: u64) -> u64 {
+    timeout_secs.clamp(1, MAX_HOSTDO_TIMEOUT_SECS)
 }
 
 impl Default for HostdoCommand {
@@ -163,8 +168,8 @@ pub struct NetworkRule {
 /// Global rules and all workspace-local rules are unioned together.
 #[derive(Debug, Clone, Default)]
 pub struct ComposedRules {
-    /// True when either the global or workspace rules opt into mirroring the
-    /// workspace path in the container.
+    /// Effective workspace-path mirroring setting after applying global and
+    /// workspace rules. The default is enabled.
     pub mirror_cwd: bool,
     pub hostdo: HostdoRules,
     pub network_rules: Vec<NetworkRule>,
@@ -183,11 +188,13 @@ impl ComposedRules {
         let mut network_allowlist = global.network.allowlist.clone();
         let mut network_denylist = global.network.denylist.clone();
         let mut hostdo_default = global.hostdo.default_policy;
-        let mut mirror_cwd = global.mirror_cwd;
+        let mut mirror_cwd = global.mirror_cwd.unwrap_or(true);
         let mut localhost_forwards = global.localhost_forwards.clone();
 
         for proj in projects {
-            mirror_cwd |= proj.mirror_cwd;
+            if let Some(value) = proj.mirror_cwd {
+                mirror_cwd = value;
+            }
             localhost_forwards =
                 merge_localhost_forwards(&localhost_forwards, &proj.localhost_forwards);
             hostdo_default = compose_hostdo_policies(hostdo_default, proj.hostdo.default_policy);
@@ -625,7 +632,7 @@ pub fn load(path: &Path) -> Result<ProjectRules> {
     }
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading harness-rules.toml: {}", path.display()))?;
-    let parsed: ProjectRules = toml::from_str(&raw)
+    let mut parsed: ProjectRules = toml::from_str(&raw)
         .with_context(|| format!("parsing harness-rules.toml: {}", path.display()))?;
     validate_rules_version(parsed.version, path)?;
     validate_template(parsed.template.as_deref(), path)?;
@@ -633,6 +640,9 @@ pub fn load(path: &Path) -> Result<ProjectRules> {
     validate_network_list("denylist", &parsed.network.denylist, path)?;
     validate_localhost_forwards(&parsed.localhost_forwards, path)?;
     validate_hostdo_rules(&parsed.hostdo.commands, path)?;
+    for entry in &mut parsed.hostdo.commands {
+        entry.timeout_secs = clamp_hostdo_timeout_secs(entry.timeout_secs);
+    }
     Ok(parsed)
 }
 
@@ -686,6 +696,12 @@ fn validate_hostdo_rules(entries: &[HostdoCommand], path: &Path) -> Result<()> {
             entry.argv.join(" "),
             path.display()
         );
+        anyhow::ensure!(
+            !hostdo_invokes_hht(&entry.argv),
+            "invalid [hostdo].commands entry '{}' in {}: invoking hht through hostdo is forbidden",
+            entry.argv.join(" "),
+            path.display()
+        );
         if let Some(allowlist) = &entry.env_allowlist {
             anyhow::ensure!(
                 entry.image.is_none(),
@@ -706,6 +722,21 @@ fn validate_hostdo_rules(entries: &[HostdoCommand], path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Return true when a hostdo argv directly targets the Harness Hat CLI.
+/// Accept both container/Unix and Windows path separators because rules may be
+/// shared across hosts, and compare case-insensitively for Windows parity.
+pub(crate) fn hostdo_invokes_hht(argv: &[String]) -> bool {
+    let Some(executable) = argv.first() else {
+        return false;
+    };
+    let basename = executable
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(executable)
+        .trim();
+    basename.eq_ignore_ascii_case("hht") || basename.eq_ignore_ascii_case("hht.exe")
+}
+
 /// Persist a host command approval for future requests.
 ///
 /// The command is deduplicated by `argv + image` and forced to
@@ -722,6 +753,11 @@ pub fn append_hostdo_auto_approval(
     if argv.is_empty() {
         return Ok(false);
     }
+    anyhow::ensure!(
+        !hostdo_invokes_hht(argv),
+        "invoking hht through hostdo is forbidden"
+    );
+    let timeout_secs = clamp_hostdo_timeout_secs(timeout_secs);
 
     let mut rules = load(path)?;
     let mut changed = false;
@@ -814,11 +850,11 @@ const RULES_FILE_HEADER: &str = "\
 # - Use `killme` only when the user explicitly asks you to end this container.
 # \"\"\"
 #
-# Workspace path mirroring (opt-in):
+# Workspace path mirroring (enabled by default):
 # mirror_cwd = true
 # Mounts an absolute POSIX workspace path at that same path in the Linux
-# container instead of `/workspace`. Native Windows paths keep the configured
-# container mount target because they cannot be represented exactly.
+# container instead of `/workspace`. Windows drive paths use a best-effort
+# container path such as `/C/Users/example/project`.
 #
 # Preferred session template (saved by `hht workspace` after the first choice):
 # template = \"rust\"
@@ -844,6 +880,7 @@ const RULES_FILE_HEADER: &str = "\
 #   argv = [\"cargo\", \"test\"] # run inside container with `hostdo run cargo test`
 #   cwd = \"$WORKSPACE\"         # execution cwd only, not part of approval matching
 #   timeout_secs = 60
+#   # Values above 300 seconds are capped at 300 seconds.
 #   # Optional context persisted for operator review; does not affect matching.
 #   reason = \"run package index refresh after dependency update\"
 #   approval_mode = \"auto\"

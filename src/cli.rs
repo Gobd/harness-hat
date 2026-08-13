@@ -4,6 +4,17 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub const COMMAND_NAME: &str = "hht";
+pub const HOSTDO_CHILD_ENV: &str = "HARNESS_HAT_HOSTDO_CHILD";
+
+/// Refuse to run the Harness Hat control CLI from a hostdo descendant. The
+/// exec endpoint also blocks direct hht argv, while this inherited marker
+/// catches ordinary shell/script wrappers before CLI parsing or side effects.
+pub fn ensure_not_hostdo_child() -> Result<()> {
+    if std::env::var_os(HOSTDO_CHILD_ENV).is_some_and(|value| value == "1") {
+        bail!("hht cannot be invoked through hostdo");
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = COMMAND_NAME, version, about = "Harness Hat — manager UI and daemon client")]
@@ -93,9 +104,18 @@ pub enum Command {
     },
     /// Reload the daemon configuration and refresh its caches without stopping sessions.
     Restart,
-    /// Install Harness Hat as a per-user background agent that starts when
-    /// the graphical desktop session starts.
-    Install,
+    /// Install Harness Hat as a per-user background agent.
+    Install {
+        /// On Linux, install without graphical-session dependencies and keep
+        /// the user service running across logout via systemd lingering.
+        #[arg(long)]
+        headless: bool,
+    },
+    /// List and decide approvals queued by the background daemon.
+    Approvals {
+        #[command(subcommand)]
+        command: ApprovalCommand,
+    },
     /// Remove the per-user Harness Hat background agent.
     Uninstall,
     /// Internal: pop a native system dialog and print the result to stdout.
@@ -122,6 +142,38 @@ impl OpenEditor {
             OpenEditor::Cursor => "cursor",
         }
     }
+  
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum ApprovalCommand {
+    /// List pending approvals.
+    List {
+        /// Emit stable machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Allow a pending network request or host command.
+    Allow {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// Persist the decision in the matching workspace rules.
+        #[arg(long)]
+        remember: bool,
+    },
+    /// Deny a pending network request or host command.
+    Deny {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// Persist the decision in the matching workspace rules.
+        #[arg(long)]
+        remember: bool,
+    },
+    /// Trust the unchanged contents of a blocked rules file.
+    Trust {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
 }
 
 /// Dialog kinds the `__dialog` subcommand can render. Each variant maps to
@@ -176,7 +228,7 @@ pub fn parse() -> Result<Cli> {
 
 pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
     let usage = format!(
-        "Usage: {COMMAND_NAME} [init [PATH] | shell [ID] [COMMAND...] | shell ID --kill | open ID <vscode|cursor> | workspace (ws) [OPTIONS] [COMMAND...] | rebuild [OPTIONS] [TEMPLATE...] | restart | install | uninstall]"
+        "Usage: {COMMAND_NAME} [init [PATH] | shell [ID] [COMMAND...] | shell ID --kill | open ID <vscode|cursor> | workspace (ws) [OPTIONS] [COMMAND...] | rebuild [OPTIONS] [TEMPLATE...] | restart | install [--headless] | uninstall | | approvals COMMAND]"
     );
     if raw.is_empty() {
         bail!("missing argv[0]. {usage}");
@@ -199,8 +251,7 @@ pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CliOptions, Command, DialogCommand, OpenEditor, parse_from};
-    use clap::Parser;
+    use super::{ApprovalCommand, Command, DialogCommand, OpenEditor, parse_from};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -390,11 +441,53 @@ mod tests {
     fn install_and_uninstall_parse_as_top_level_commands() {
         assert!(matches!(
             parse_from(argv(&["hht", "install"])).unwrap().command,
-            Some(Command::Install)
+            Some(Command::Install { headless: false })
+        ));
+        assert!(matches!(
+            parse_from(argv(&["hht", "install", "--headless"]))
+                .unwrap()
+                .command,
+            Some(Command::Install { headless: true })
         ));
         assert!(matches!(
             parse_from(argv(&["hht", "uninstall"])).unwrap().command,
             Some(Command::Uninstall)
+        ));
+    }
+
+    #[test]
+    fn approvals_subcommands_parse() {
+        assert!(matches!(
+            parse_from(argv(&["hht", "approvals", "list", "--json"]))
+                .unwrap()
+                .command,
+            Some(Command::Approvals {
+                command: ApprovalCommand::List { json: true }
+            })
+        ));
+        assert!(matches!(
+            parse_from(argv(&["hht", "approvals", "allow", "42", "--remember"]))
+                .unwrap()
+                .command,
+            Some(Command::Approvals {
+                command: ApprovalCommand::Allow { id, remember: true }
+            }) if id == "42"
+        ));
+        assert!(matches!(
+            parse_from(argv(&["hht", "approvals", "deny", "0042"]))
+                .unwrap()
+                .command,
+            Some(Command::Approvals {
+                command: ApprovalCommand::Deny { id, remember: false }
+            }) if id == "0042"
+        ));
+        assert!(matches!(
+            parse_from(argv(&["hht", "approvals", "trust", "7"]))
+                .unwrap()
+                .command,
+            Some(Command::Approvals {
+                command: ApprovalCommand::Trust { id }
+            }) if id == "7"
         ));
     }
 }

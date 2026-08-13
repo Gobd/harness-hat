@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 async fn main() -> Result<()> {
     use harness_hat::cli::Command;
 
+    harness_hat::cli::ensure_not_hostdo_child()?;
     let cli = harness_hat::cli::parse()?;
     match cli.command {
         Some(Command::Dialog(dialog_cmd)) => {
@@ -106,8 +107,13 @@ async fn main() -> Result<()> {
                 .await
                 .context("restart task panicked")??;
         }
-        Some(Command::Install) => {
-            harness_hat::service::install(None)?;
+        Some(Command::Install { headless }) => {
+            harness_hat::service::install(None, headless)?;
+        }
+        Some(Command::Approvals { command }) => {
+            tokio::task::spawn_blocking(move || harness_hat::approvals::run(command))
+                .await
+                .context("approvals task panicked")??;
         }
         Some(Command::Uninstall) => {
             harness_hat::service::uninstall()?;

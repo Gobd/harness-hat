@@ -47,6 +47,22 @@ impl App {
             return;
         }
 
+        if self.headless_rules_overlay_visible() {
+            match key.code {
+                KeyCode::Char('t')
+                | KeyCode::Char('T')
+                | KeyCode::Char('y')
+                | KeyCode::Char('Y') => {
+                    let _ = self.trust_changed_rules();
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.dismiss_changed_rules();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if matches!(self.focus, Focus::Activity | Focus::Network)
             && (key.code == KeyCode::Esc
                 || (key.code == KeyCode::Char('b')
@@ -122,6 +138,7 @@ impl App {
             Focus::ContainerPicker => self.handle_picker_key(key),
             Focus::ImageBuild => self.handle_build_key(key),
             Focus::NewWorkspace => self.handle_new_workspace_key(key),
+            Focus::WorkspaceActions => self.handle_workspace_action_key(key),
         }
     }
 
@@ -165,6 +182,11 @@ impl App {
             }
             Focus::NewWorkspace => {
                 self.new_workspace = None;
+                self.focus = Focus::Sidebar;
+            }
+            Focus::WorkspaceActions => {
+                self.workspace_action_workspace = None;
+                self.workspace_action_cursor = 0;
                 self.focus = Focus::Sidebar;
             }
         }
@@ -311,9 +333,15 @@ impl App {
                 self.focus = Focus::Settings;
             }
             Some(SidebarItem::Launch(_)) => {
+                self.workspace_action_workspace =
+                    items.get(self.sidebar_idx).and_then(|item| match item {
+                        SidebarItem::Launch(pi) => Some(*pi),
+                        _ => None,
+                    });
+                self.workspace_action_cursor = 0;
                 self.active_activity = None;
                 self.active_network_session = None;
-                self.open_picker();
+                self.focus = Focus::WorkspaceActions;
             }
             Some(SidebarItem::Build(_)) => {
                 self.active_session = None;
@@ -376,6 +404,80 @@ impl App {
             // Non-selectable; navigation never lands here.
             Some(SidebarItem::WorkspacesHeader) => {}
             None => {}
+        }
+    }
+
+    pub(crate) fn handle_workspace_action_key(&mut self, key: KeyEvent) {
+        let Some(pi) = self.workspace_action_workspace else {
+            self.focus = Focus::Sidebar;
+            return;
+        };
+
+        let actions = self.workspace_action_rows(pi);
+        if actions.is_empty() {
+            self.workspace_action_workspace = None;
+            self.focus = Focus::Sidebar;
+            return;
+        }
+
+        if self.workspace_action_cursor >= actions.len() {
+            self.workspace_action_cursor = actions.len().saturating_sub(1);
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('h') => {
+                self.workspace_action_workspace = None;
+                self.workspace_action_cursor = 0;
+                self.focus = Focus::Sidebar;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.workspace_action_cursor > 0 {
+                    self.workspace_action_cursor -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.workspace_action_cursor + 1 < actions.len() {
+                    self.workspace_action_cursor += 1;
+                }
+            }
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Char('L') => {
+                self.run_workspace_action(pi);
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                if let Some(position) = actions
+                    .iter()
+                    .position(|row| row.key == 'r' || row.key == 'R')
+                {
+                    self.workspace_action_cursor = position;
+                    self.run_workspace_action(pi);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn run_workspace_action(&mut self, workspace_idx: usize) {
+        let actions = self.workspace_action_rows(workspace_idx);
+        let Some(action) = actions.get(self.workspace_action_cursor).copied() else {
+            self.workspace_action_workspace = None;
+            self.workspace_action_cursor = 0;
+            self.focus = Focus::Sidebar;
+            return;
+        };
+
+        match action.action {
+            WorkspaceAction::LaunchWorkspace => {
+                if self.open_template_picker_for_workspace(workspace_idx) {
+                    self.workspace_action_workspace = None;
+                    self.workspace_action_cursor = 0;
+                }
+            }
+            WorkspaceAction::RemoveWorkspace => {
+                self.workspace_action_workspace = None;
+                self.workspace_action_cursor = 0;
+                self.focus = Focus::Sidebar;
+                self.prompt_remove_workspace(workspace_idx);
+            }
         }
     }
 

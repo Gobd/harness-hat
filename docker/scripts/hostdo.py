@@ -37,6 +37,7 @@ import urllib.parse
 
 # 6-minute timeout: 5-minute approval window + headroom for slow commands.
 _TIMEOUT = 360
+_MAX_COMMAND_TIMEOUT_SECS = 5 * 60
 _APPROVAL_WAIT_NOTICE_SECS = 10
 
 _HELP_TEXT = """hostdo — harness-hat container-side command bridge
@@ -97,8 +98,8 @@ Options:
       the host.
 
   --timeout <seconds>
-      Request a command timeout in seconds. The manager may cap or deny this
-      based on its configured limits and matching hostdo rules.
+      Request a command timeout in seconds. Values above 300 seconds are capped
+      at 300; a matching hostdo rule may impose a lower ceiling.
 
   --reason <text>
       Provide a short explanation for why this host command is needed.
@@ -269,6 +270,9 @@ def _parse_hostdo_args(argv: list[str]):
         _print_usage(sys.stderr)
         print("run `hostdo --help` for detailed usage and policy guidance", file=sys.stderr)
         sys.exit(1)
+
+    if timeout_secs is not None:
+        timeout_secs = min(timeout_secs, _MAX_COMMAND_TIMEOUT_SECS)
 
     return command_argv, image, timeout_secs, reason
 

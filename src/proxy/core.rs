@@ -40,6 +40,7 @@ const LIMITED_SOURCE_PROXY_CONNECTION_LIMIT: usize = 32;
 
 /// A network request waiting on the TUI for an allow/deny decision.
 pub struct PendingNetworkItem {
+    pub approval_id: String,
     pub activity_id: String,
     pub cancel_flag: Arc<std::sync::atomic::AtomicBool>,
     pub source_workspace: Option<String>,

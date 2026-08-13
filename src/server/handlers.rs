@@ -2,7 +2,7 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Query, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -115,7 +115,7 @@ impl TuiEventBroker {
 }
 
 /// Error payload returned by manager control endpoints.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
     pub reason: String,
@@ -165,6 +165,85 @@ pub struct PendingItem {
 pub enum ApprovalDecision {
     Approve { remember: bool },
     Deny,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PendingApprovalRecord {
+    Network {
+        id: String,
+        workspace: Option<String>,
+        method: String,
+        host: String,
+        port: Option<u16>,
+        path: String,
+    },
+    Hostdo {
+        id: String,
+        workspace: String,
+        argv: Vec<String>,
+        reason: Option<String>,
+        cwd: String,
+        image: Option<String>,
+        timeout_secs: u64,
+    },
+    RulesChange {
+        id: String,
+        path: String,
+    },
+}
+
+impl PendingApprovalRecord {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Network { id, .. } | Self::Hostdo { id, .. } | Self::RulesChange { id, .. } => id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingApprovalsResponse {
+    pub approvals: Vec<PendingApprovalRecord>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalAction {
+    AllowOnce,
+    AllowForever,
+    DenyOnce,
+    DenyForever,
+    Trust,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ApprovalActionRequest {
+    pub action: ApprovalAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApprovalActionResponse {
+    pub ok: bool,
+    pub id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApprovalControlError {
+    pub code: &'static str,
+    pub reason: String,
+}
+
+pub enum ApprovalControlItem {
+    List {
+        response_tx: oneshot::Sender<PendingApprovalsResponse>,
+    },
+    Decide {
+        id: String,
+        action: ApprovalAction,
+        response_tx:
+            oneshot::Sender<std::result::Result<ApprovalActionResponse, ApprovalControlError>>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -467,6 +546,7 @@ pub struct ServerState {
     pub stop_tx: mpsc::Sender<ContainerStopItem>,
     pub launch_tx: mpsc::Sender<WorkspaceLaunchItem>,
     pub restart_tx: mpsc::Sender<DaemonRestartItem>,
+    pub approval_tx: mpsc::Sender<ApprovalControlItem>,
     pub audit_tx: mpsc::Sender<AuditEntry>,
     pub token: String,
     pub sessions: SessionRegistry,
@@ -662,6 +742,8 @@ pub async fn run_with_listener(
         .route("/container/stop", post(stop_handler))
         .route("/workspace/launch", post(workspace_launch_handler))
         .route("/daemon/restart", post(daemon_restart_handler))
+        .route("/approvals", get(approvals_list_handler))
+        .route("/approvals/{id}", post(approval_action_handler))
         .route("/tui/frame", post(tui_frame_handler))
         .route("/tui/events", get(tui_events_handler))
         .route("/exec", post(crate::server::core::exec_handler))
@@ -691,6 +773,82 @@ pub async fn run_with_listener(
 
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+async fn approvals_list_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = require_bearer(&state, &headers) {
+        return response;
+    }
+    let (response_tx, response_rx) = oneshot::channel();
+    if state
+        .approval_tx
+        .send(ApprovalControlItem::List { response_tx })
+        .await
+        .is_err()
+    {
+        return manager_unavailable_response();
+    }
+    match tokio::time::timeout(CONTROL_HANDLER_TIMEOUT, response_rx).await {
+        Ok(Ok(response)) => Json(response).into_response(),
+        _ => manager_unavailable_response(),
+    }
+}
+
+async fn approval_action_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<ApprovalActionRequest>,
+) -> Response {
+    if let Err(response) = require_bearer(&state, &headers) {
+        return response;
+    }
+    let (response_tx, response_rx) = oneshot::channel();
+    if state
+        .approval_tx
+        .send(ApprovalControlItem::Decide {
+            id,
+            action: request.action,
+            response_tx,
+        })
+        .await
+        .is_err()
+    {
+        return manager_unavailable_response();
+    }
+    match tokio::time::timeout(CONTROL_HANDLER_TIMEOUT, response_rx).await {
+        Ok(Ok(Ok(response))) => Json(response).into_response(),
+        Ok(Ok(Err(error))) => {
+            let status = match error.code {
+                "invalid_id" => StatusCode::BAD_REQUEST,
+                "not_found" => StatusCode::NOT_FOUND,
+                _ => StatusCode::CONFLICT,
+            };
+            (
+                status,
+                Json(ErrorResponse {
+                    error: error.code.to_string(),
+                    reason: error.reason,
+                }),
+            )
+                .into_response()
+        }
+        _ => manager_unavailable_response(),
+    }
+}
+
+fn manager_unavailable_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse {
+            error: "manager_unavailable".into(),
+            reason: "manager is shutting down or did not answer in time".into(),
+        }),
+    )
+        .into_response()
 }
 
 /// Liveness probe used by `hht workspace` to fail fast with a clear message
@@ -1248,6 +1406,7 @@ mod tests {
         let (stop_tx, _stop_rx) = mpsc::channel(1);
         let (launch_tx, _launch_rx) = mpsc::channel(1);
         let (restart_tx, _restart_rx) = mpsc::channel(1);
+        let (approval_tx, _approval_rx) = mpsc::channel(1);
         let (audit_tx, _audit_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
         let (tui_tx, _tui_rx) = mpsc::channel(1);
@@ -1261,6 +1420,7 @@ mod tests {
             stop_tx,
             launch_tx,
             restart_tx,
+            approval_tx,
             audit_tx,
             token: "token".to_string(),
             sessions: registry,
@@ -1325,6 +1485,17 @@ mod tests {
         let response = events.since(0);
         assert!(response.reset_required);
         assert!(response.events.is_empty());
+    }
+
+    #[test]
+    fn pending_approval_json_uses_stable_tag_and_four_digit_id() {
+        let value = serde_json::to_value(PendingApprovalRecord::RulesChange {
+            id: "0042".to_string(),
+            path: "/tmp/harness-rules.toml".to_string(),
+        })
+        .expect("serialize approval");
+        assert_eq!(value["kind"], "rules_change");
+        assert_eq!(value["id"], "0042");
     }
 
     #[test]
@@ -1408,6 +1579,82 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn approvals_list_requires_auth_and_forwards_to_app() {
+        let mut state = test_server_state(SessionRegistry::default(), ExecJobRegistry::default());
+        let (approval_tx, mut approval_rx) = mpsc::channel(1);
+        state.approval_tx = approval_tx;
+        let responder = tokio::spawn(async move {
+            let Some(ApprovalControlItem::List { response_tx }) = approval_rx.recv().await else {
+                panic!("expected approval list request");
+            };
+            response_tx
+                .send(PendingApprovalsResponse {
+                    approvals: vec![PendingApprovalRecord::RulesChange {
+                        id: "0042".to_string(),
+                        path: "/tmp/harness-rules.toml".to_string(),
+                    }],
+                })
+                .expect("send approval list");
+        });
+
+        let unauthorized =
+            approvals_list_handler(State(Arc::new(state.clone())), HeaderMap::new()).await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = approvals_list_handler(
+            State(Arc::new(state)),
+            HeaderMap::from_iter([(
+                axum::http::header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer token"),
+            )]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        responder.await.expect("approval responder");
+    }
+
+    #[tokio::test]
+    async fn approval_action_forwards_id_and_action() {
+        let mut state = test_server_state(SessionRegistry::default(), ExecJobRegistry::default());
+        let (approval_tx, mut approval_rx) = mpsc::channel(1);
+        state.approval_tx = approval_tx;
+        let responder = tokio::spawn(async move {
+            let Some(ApprovalControlItem::Decide {
+                id,
+                action,
+                response_tx,
+            }) = approval_rx.recv().await
+            else {
+                panic!("expected approval decision request");
+            };
+            assert_eq!(id, "42");
+            assert_eq!(action, ApprovalAction::AllowForever);
+            response_tx
+                .send(Ok(ApprovalActionResponse {
+                    ok: true,
+                    id: "0042".to_string(),
+                    message: "approval allowed and remembered".to_string(),
+                }))
+                .expect("send approval result");
+        });
+
+        let response = approval_action_handler(
+            State(Arc::new(state)),
+            HeaderMap::from_iter([(
+                axum::http::header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer token"),
+            )]),
+            AxumPath("42".to_string()),
+            Json(ApprovalActionRequest {
+                action: ApprovalAction::AllowForever,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        responder.await.expect("approval responder");
     }
 
     #[tokio::test]

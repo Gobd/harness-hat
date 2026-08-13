@@ -85,5 +85,17 @@ hht install
 
 > **Expected result:** the first run reports that it created the default global config at `~/.config/harness-hat/harness-hat.toml`, then reports that the background agent was installed for the current desktop user. Later runs keep the existing config and reinstall the agent. If installation fails, first confirm `docker version` and `hht --version` work in the same terminal; then restart the terminal and retry.
 
+### Headless Linux hosts
+
+For a Linux machine reached through SSH with no graphical session, install the per-user service with:
+
+```sh
+hht install --headless
+```
+
+Run this as the normal Docker-enabled user, not with `sudo`. Harness Hat uses `loginctl enable-linger` for that user, allowing the `systemd --user` service to start at boot and remain active after logout. If lingering cannot be enabled, installation stops with an error instead of installing a service that silently disappears after the SSH session ends. `hht uninstall` does not disable lingering because other user services may depend on it.
+
+Headless installs never attempt to display native dialogs. Use `hht approvals` over SSH or attach the normal `hht` TUI to handle queued requests.
+
 
 Continue with [Workspaces](02-workspaces.md).

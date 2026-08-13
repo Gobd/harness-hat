@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::activity::{Activity, ActivityEvent, ActivityKind, ActivityState};
 use crate::config::{MountMode, container_path_string, join_container_path};
 use crate::container::docker_bind_mount_args;
-use crate::rules::NetworkPolicy;
+use crate::rules::{MAX_HOSTDO_TIMEOUT_SECS, NetworkPolicy};
 use crate::server::{
     ApprovalDecision, ErrorResponse, ExecJobKillResponse, ExecJobListResponse, ExecJobOutputQuery,
     ExecJobOutputResponse, ExecJobPhase, ExecJobProgress, ExecJobSendRequest, ExecJobSendResponse,
@@ -36,7 +36,14 @@ const EXEC_JOB_STDIN_QUEUE_CAPACITY: usize = 32;
 const ACTIVITY_LINE_BUFFER_BYTES: usize = 64 * 1024;
 /// Absolute ceiling on a hostdo command's wall-clock time. A container-supplied
 /// `timeout_secs` cannot exceed this or the matched rule's own value (M4).
-const MAX_TIMEOUT_SECS: u64 = 6 * 60 * 60;
+const MAX_TIMEOUT_SECS: u64 = MAX_HOSTDO_TIMEOUT_SECS;
+
+fn effective_hostdo_timeout_secs(requested: Option<u64>, rule_ceiling: u64) -> u64 {
+    requested
+        .map(|requested| requested.min(rule_ceiling))
+        .unwrap_or(rule_ceiling)
+        .clamp(1, MAX_TIMEOUT_SECS)
+}
 
 /// 503 returned when the exec-job registry is at its active-job ceiling (H3).
 fn job_capacity_exceeded_response() -> Response {
@@ -83,6 +90,16 @@ pub(super) async fn exec_handler(
             }),
         )
             .into_response();
+    }
+    if crate::rules::hostdo_invokes_hht(&req.argv) {
+        return deny_with_audit(
+            &state,
+            &identity.workspace_name,
+            &req.argv,
+            &req.cwd,
+            "invoking hht through hostdo is forbidden",
+        )
+        .await;
     }
     if req.cwd.trim().is_empty() {
         return (
@@ -196,11 +213,7 @@ pub(super) async fn exec_handler(
     let rule_ceiling = matched_rule
         .map(|entry| entry.timeout_secs)
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
-    let timeout_secs = req
-        .timeout_secs
-        .map(|requested| requested.min(rule_ceiling))
-        .unwrap_or(rule_ceiling)
-        .clamp(1, MAX_TIMEOUT_SECS);
+    let timeout_secs = effective_hostdo_timeout_secs(req.timeout_secs, rule_ceiling);
     let runner_mount_target = container_path_string(Path::new(&identity.mount_target));
     let runner_cwd = resolve_runner_container_cwd(
         &req.cwd,
@@ -262,7 +275,7 @@ pub(super) async fn exec_handler(
 
     let (response_tx, response_rx) = oneshot::channel::<ApprovalDecision>();
     let pending = PendingItem {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: String::new(),
         activity_id: run.activity_id.clone(),
         cancel_flag,
         workspace_name: identity.workspace_name.clone(),
@@ -1182,6 +1195,10 @@ fn build_command(run: &CommandRun) -> Result<TokioCommand, ExecFailure> {
         cmd.env_clear();
         cmd.envs(vars);
     }
+    // Mark the entire process tree as originating from hostdo. A directly
+    // requested hht executable is rejected before policy matching; this
+    // inherited marker also makes hht refuse ordinary shell/script wrappers.
+    cmd.env(crate::cli::HOSTDO_CHILD_ENV, "1");
     // Place each spawned process in its own process group so kill_child_and_group
     // can reach all descendants, not just the direct child.
     #[cfg(unix)]
@@ -1585,8 +1602,9 @@ fn tail_lines(text: &str, count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        EXEC_JOB_CAPTURE_BYTES, append_captured_bytes, floor_char_boundary, hostdo_child_env,
-        resolve_host_cwd_in_workspace, resolve_runner_container_cwd,
+        EXEC_JOB_CAPTURE_BYTES, append_captured_bytes, effective_hostdo_timeout_secs,
+        floor_char_boundary, hostdo_child_env, resolve_host_cwd_in_workspace,
+        resolve_runner_container_cwd,
     };
 
     fn host_env(name: &str) -> Option<String> {
@@ -1632,6 +1650,16 @@ mod tests {
         // Unset host vars are skipped, duplicates of the base set deduped.
         assert!(!names.contains(&"MISSING_VAR"));
         assert_eq!(names.iter().filter(|n| **n == "PATH").count(), 1);
+    }
+
+    #[test]
+    fn hostdo_timeout_is_capped_at_five_minutes() {
+        assert_eq!(effective_hostdo_timeout_secs(None, 900), 300);
+        assert_eq!(effective_hostdo_timeout_secs(Some(900), 900), 300);
+        assert_eq!(effective_hostdo_timeout_secs(Some(300), 900), 300);
+        assert_eq!(effective_hostdo_timeout_secs(Some(240), 900), 240);
+        assert_eq!(effective_hostdo_timeout_secs(Some(240), 120), 120);
+        assert_eq!(effective_hostdo_timeout_secs(Some(0), 900), 1);
     }
 
     #[test]

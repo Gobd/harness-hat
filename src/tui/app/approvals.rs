@@ -375,6 +375,7 @@ impl App {
         reason: Option<&str>,
         approval_mode: NetworkPolicy,
     ) -> Result<()> {
+        let timeout_secs = crate::rules::clamp_hostdo_timeout_secs(timeout_secs);
         let mut rules = crate::rules::load(rules_path)
             .with_context(|| format!("loading rules file '{}'", rules_path.display()))?;
         let mut changed = false;

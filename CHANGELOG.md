@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.7 Future
+
+### Added
+
+- Added an `android` Docker template with Kotlin, Gradle, Android SDK command-line tools, API 36, Build Tools 36.0.0, platform-tools, and `adb` for Android builds.
+- Added `hht install --headless` for Linux servers without a graphical session. The installer creates a `systemd --user` service, enables lingering so it can run across logout and at boot, and keeps installation scoped to the normal Docker-enabled user.
+- Added headless approval management through `hht approvals list [--json]`, `allow ID [--remember]`, `deny ID [--remember]`, and `trust ID`. Pending requests use short four-digit IDs, remain fail-closed while waiting, and can also be decided from an attached TUI.
+
+### Changed
+
+- Workspace path mirroring is now enabled by default. Absolute POSIX paths are preserved, and Windows drive paths use a best-effort container equivalent such as `/C/Users/example/project`. Set `mirror_cwd = false` to retain the configured mount target.
+- `hostdo` now rejects direct invocation of `hht` or `hht.exe` before policy matching, marks hostdo process trees so wrapped `hht` calls also refuse to run, and rejects rules files containing direct Harness Hat control commands.
+- The maximum hostdo command timeout is now five minutes; larger requested or configured values are capped at 300 seconds.
+
 ## 0.8.6 Aug 12, 2026
 
 ### Added

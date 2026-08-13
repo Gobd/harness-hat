@@ -1,9 +1,9 @@
-//! Per-user desktop-agent installation.
+//! Per-user background-agent installation.
 //!
 //! The installed process is deliberately a *user-session* agent, not a system
-//! daemon: Harness Hat needs access to Docker Desktop/the user's Docker socket
-//! and must be able to display approval dialogs. The generated definitions
-//! therefore start at graphical login on every supported platform.
+//! daemon, so it uses the current user's Docker access. Desktop installs show
+//! native approval dialogs; Linux headless installs use CLI or attached-TUI
+//! approvals and systemd lingering.
 
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -18,8 +18,11 @@ const SYSTEMD_UNIT: &str = "harness-hat.service";
 #[cfg(target_os = "windows")]
 const WINDOWS_TASK: &str = "Harness Hat";
 
-pub fn install(explicit_config: Option<PathBuf>) -> Result<()> {
-    ensure_desktop_user()?;
+pub fn install(explicit_config: Option<PathBuf>, headless: bool) -> Result<()> {
+    ensure_normal_user()?;
+    if headless && !cfg!(target_os = "linux") {
+        bail!("hht install --headless is supported on Linux only");
+    }
     let (config_path, created_config) = resolve_config_path(explicit_config)?;
     if created_config {
         println!("Created default global config: {}", config_path.display());
@@ -36,19 +39,23 @@ pub fn install(explicit_config: Option<PathBuf>) -> Result<()> {
     #[cfg(target_os = "macos")]
     install_macos(&service_executable, &config_path)?;
     #[cfg(target_os = "linux")]
-    install_linux(&service_executable, &config_path)?;
+    install_linux(&service_executable, &config_path, headless)?;
     #[cfg(target_os = "windows")]
     install_windows(&service_executable, &config_path)?;
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     bail!("hht install supports macOS, Linux with systemd, and Windows only");
 
-    println!("Harness Hat background agent installed for this desktop user.");
+    if headless {
+        println!("Harness Hat headless background agent installed for this user.");
+    } else {
+        println!("Harness Hat background agent installed for this desktop user.");
+    }
     println!("Config: {}", config_path.display());
     Ok(())
 }
 
 pub fn uninstall() -> Result<()> {
-    ensure_desktop_user()?;
+    ensure_normal_user()?;
     #[cfg(target_os = "macos")]
     uninstall_macos()?;
     #[cfg(target_os = "linux")]
@@ -58,14 +65,14 @@ pub fn uninstall() -> Result<()> {
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     bail!("hht uninstall supports macOS, Linux with systemd, and Windows only");
 
-    println!("Harness Hat background agent removed for this desktop user.");
+    println!("Harness Hat background agent removed for this user.");
     Ok(())
 }
 
-fn ensure_desktop_user() -> Result<()> {
+fn ensure_normal_user() -> Result<()> {
     #[cfg(unix)]
     if unsafe { libc::geteuid() } == 0 {
-        bail!("hht install/uninstall must run as the signed-in desktop user; do not use sudo");
+        bail!("hht install/uninstall must run as a normal user; do not use sudo");
     }
     Ok(())
 }
@@ -204,23 +211,35 @@ fn systemd_unit_path() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn install_linux(executable: &Path, config_path: &Path) -> Result<()> {
+fn install_linux(executable: &Path, config_path: &Path, headless: bool) -> Result<()> {
     let path = systemd_unit_path()?;
-    write_definition(&path, &render_systemd_unit(executable, config_path))?;
+    if headless {
+        command_status(
+            "loginctl",
+            &["enable-linger".into()],
+            "enabling systemd lingering for the current user",
+        )?;
+    }
+    write_definition(
+        &path,
+        &render_systemd_unit(executable, config_path, headless),
+    )?;
     // A user manager commonly inherits these at desktop login. Import them at
     // install time as well so native approval dialogs can reach the current
     // graphical session immediately; service startup remains fail-closed if a
     // desktop session is not available.
-    let _ = Command::new("systemctl")
-        .args([
-            "--user",
-            "import-environment",
-            "DISPLAY",
-            "WAYLAND_DISPLAY",
-            "XDG_RUNTIME_DIR",
-            "DBUS_SESSION_BUS_ADDRESS",
-        ])
-        .status();
+    if !headless {
+        let _ = Command::new("systemctl")
+            .args([
+                "--user",
+                "import-environment",
+                "DISPLAY",
+                "WAYLAND_DISPLAY",
+                "XDG_RUNTIME_DIR",
+                "DBUS_SESSION_BUS_ADDRESS",
+            ])
+            .status();
+    }
     command_status(
         "systemctl",
         &["--user".into(), "daemon-reload".into()],
@@ -328,9 +347,15 @@ fn run_windows_quietly(program: &str, args: &[&str]) {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn render_systemd_unit(executable: &Path, config_path: &Path) -> String {
+fn render_systemd_unit(executable: &Path, config_path: &Path, headless: bool) -> String {
+    let after = if headless {
+        ""
+    } else {
+        "After=graphical-session.target\n"
+    };
+    let headless_arg = if headless { " --headless" } else { "" };
     format!(
-        "[Unit]\nDescription=Harness Hat background agent\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart={} --config {}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=Harness Hat background agent\n{after}\n[Service]\nType=simple\nExecStart={} --config {}{headless_arg}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
         systemd_escape(executable),
         systemd_escape(config_path),
     )
@@ -400,6 +425,7 @@ mod tests {
         let unit = render_systemd_unit(
             Path::new("/home/me/.cargo/bin/hht"),
             Path::new("/home/me/My Config/harness-hat.toml"),
+            false,
         );
         assert!(unit.contains(
             "ExecStart=\"/home/me/.cargo/bin/hht\" --config \"/home/me/My Config/harness-hat.toml\""
@@ -409,8 +435,21 @@ mod tests {
 
     #[test]
     fn systemd_unit_escapes_specifier_characters() {
-        let unit = render_systemd_unit(Path::new("/home/me/hht%stable"), Path::new("/tmp/x"));
+        let unit =
+            render_systemd_unit(Path::new("/home/me/hht%stable"), Path::new("/tmp/x"), false);
         assert!(unit.contains("hht%%stable"));
+    }
+
+    #[test]
+    fn headless_systemd_unit_has_no_graphical_dependency() {
+        let unit = render_systemd_unit(
+            Path::new("/home/me/.cargo/bin/hht-daemon"),
+            Path::new("/home/me/.config/harness-hat/harness-hat.toml"),
+            true,
+        );
+        assert!(unit.contains(" --headless\n"));
+        assert!(!unit.contains("graphical-session.target"));
+        assert!(unit.contains("WantedBy=default.target"));
     }
 
     #[test]

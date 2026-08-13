@@ -29,15 +29,15 @@ pub async fn run() -> Result<()> {
         Some(path) => path,
         None => return Ok(()),
     };
-    run_inner(config_path, false).await
+    run_inner(config_path, false, false).await
 }
 
 /// Run the terminal-free background agent installed by `hht install`.
-pub async fn run_service(config_path: PathBuf) -> Result<()> {
-    run_inner(config_path, true).await
+pub async fn run_service(config_path: PathBuf, headless_mode: bool) -> Result<()> {
+    run_inner(config_path, true, headless_mode).await
 }
 
-async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
+async fn run_inner(config_path: PathBuf, service_mode: bool, headless_mode: bool) -> Result<()> {
     let config = crate::config::load(&config_path)?;
     let docker_status = crate::container::DockerStatus::new();
     let docker_available = docker_status.refresh();
@@ -64,6 +64,7 @@ async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
         mpsc::channel::<crate::server::WorkspaceLaunchItem>(16);
     let (restart_pending_tx, restart_pending_rx) =
         mpsc::channel::<crate::server::DaemonRestartItem>(4);
+    let (approval_tx, approval_rx) = mpsc::channel::<crate::server::ApprovalControlItem>(32);
     let (exec_pending_tx, exec_pending_rx) = mpsc::channel::<crate::server::PendingItem>(64);
     let (net_pending_tx, net_pending_rx) = mpsc::channel::<crate::proxy::PendingNetworkItem>(64);
     // Bounded (H12): see comments in tui::App and ProxyState/ServerState.
@@ -98,6 +99,7 @@ async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
         stop_tx: stop_pending_tx,
         launch_tx: launch_pending_tx,
         restart_tx: restart_pending_tx,
+        approval_tx,
         audit_tx,
         token: token.clone(),
         sessions: session_registry.clone(),
@@ -182,12 +184,14 @@ async fn run_inner(config_path: PathBuf, service_mode: bool) -> Result<()> {
                 stop_pending_rx,
                 launch_pending_rx,
                 restart_pending_rx,
+                approval_rx,
                 net_pending_rx,
                 activity_rx,
                 audit_rx,
                 state,
                 proxy_state,
                 service_mode,
+                headless_mode,
             )?;
             if service_mode {
                 crate::tui::run_service(app, tui_rx, tui_events).await

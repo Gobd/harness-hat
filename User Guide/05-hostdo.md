@@ -44,6 +44,8 @@ Use `hostdo output` by default. Use `hostdo run` for a job that needs later stat
 
 `hostdo` checks the global and project `[hostdo]` sections. An unknown command follows `default_policy`, normally `prompt`. A prompt is an approval request, not an automatic permission grant. Review the command, working directory, image, and timeout before allowing it.
 
+Every hostdo command has a hard five-minute execution timeout. Requests and `timeout_secs` rule values above 300 seconds are capped at 300 seconds; a matching rule can still impose a lower ceiling.
+
 Agents can optionally pass `--reason "<text>"` to `hostdo output`/`run` when requesting approval. The reason is persisted in `harness-rules.toml` for review context, but it is intentionally not part of matching: persisted hostdo matching is still exact `argv + image` only.
 
 Choose a remembered decision only after reviewing the command, working directory, image, and timeout. Harness Hat writes the resulting narrow project rule automatically. Team-managed policy can further restrict the environment inherited by direct host commands; image-runner commands already start from a clean environment.

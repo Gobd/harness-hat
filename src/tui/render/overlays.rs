@@ -1,5 +1,62 @@
 use super::*;
 
+pub(crate) fn render_rules_change_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(item) = app.base_rules_changed.as_ref() else {
+        return;
+    };
+    let popup_area = centered_rect(82, 42, 10, area);
+    frame.render_widget(Clear, popup_area);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  RULES FILE CHANGED",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ID   : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(item.approval_id.clone(), Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Path : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                item.path.display().to_string(),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(""),
+        Line::from("  Review the file before trusting its current contents."),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "T ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Trust  ", Style::default().fg(Color::White)),
+            Span::styled(
+                "N/Esc ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Dismiss (remain blocked)",
+                Style::default().fg(Color::White),
+            ),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" Rules Review Required ")
+                .title_alignment(Alignment::Center)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red)),
+        ),
+        popup_area,
+    );
+}
+
 pub(crate) fn render_exec_approval_overlay(
     frame: &mut Frame,
     app: &App,
