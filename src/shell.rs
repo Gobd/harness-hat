@@ -51,23 +51,36 @@ pub fn run(id: Option<String>, kill: bool, args: Vec<OsString>) -> Result<i32> {
     }
 }
 
-/// Open a running session's workspace in an external editor (VS Code or
-/// Cursor) via the Dev Containers "attached container" URI scheme:
+/// Open a running session's workspace in an external editor via the Dev
+/// Containers "attached container" URI scheme:
 /// `vscode-remote://attached-container+<hex container id>/<path>`.
+///
+/// The editor is an executable name, not a shell command. It must resolve on
+/// PATH and is invoked with exactly `--folder-uri <URI>`.
 pub fn open(id: &str, editor: crate::cli::OpenEditor) -> Result<()> {
     let session = session_for_id(id)?;
     let uri = attached_container_uri(&session);
 
-    let binary = editor.binary();
-    let status = Command::new(binary)
+    let display = editor.display();
+    let resolved = resolve_editor(&editor)?;
+    let mut command = Command::new(&resolved);
+    crate::process_util::hide_console_window(&mut command);
+    let status = command
         .args(["--folder-uri", &uri])
         .status()
-        .with_context(|| format!("launching `{binary}` — is it installed and on PATH?"))?;
+        .with_context(|| format!("launching `{display}` from {}", resolved.display()))?;
     if !status.success() {
-        bail!("`{binary} --folder-uri {uri}` exited with {status}");
+        bail!("`{display} --folder-uri {uri}` exited with {status}");
     }
-    println!("Opened session {} in {binary}.", normalize_id(id));
+    println!("Opened session {} in {display}.", normalize_id(id));
     Ok(())
+}
+
+fn resolve_editor(editor: &crate::cli::OpenEditor) -> Result<std::path::PathBuf> {
+    let display = editor.display();
+    which::which(editor.binary()).with_context(|| {
+        format!("editor `{display}` was not found on PATH — install it or provide a PATH wrapper")
+    })
 }
 
 fn attached_container_uri(session: &Session) -> String {
@@ -525,8 +538,9 @@ fn compare_ids(left: &str, right: &str) -> std::cmp::Ordering {
 mod tests {
     use super::{
         Session, attached_container_uri, compare_ids, docker_exec_args, hex_encode, normalize_id,
-        parse_running_sessions,
+        parse_running_sessions, resolve_editor,
     };
+    use crate::cli::OpenEditor;
     use std::ffi::OsString;
 
     #[test]
@@ -584,6 +598,16 @@ mod tests {
     fn numeric_ids_sort_numerically() {
         assert!(compare_ids("2", "10").is_lt());
         assert!(compare_ids("10", "2").is_gt());
+    }
+
+    #[test]
+    fn missing_editor_reports_path_error() {
+        let editor = OpenEditor::new(OsString::from(
+            "hht-editor-does-not-exist-for-path-resolution-test",
+        ))
+        .expect("editor name");
+        let error = resolve_editor(&editor).expect_err("missing editor should fail");
+        assert!(error.to_string().contains("not found on PATH"));
     }
 
     #[test]

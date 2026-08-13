@@ -269,11 +269,11 @@ hht ws                 # start or attach to the workspace for the current direct
 hht ws codex           # run Codex in that workspace
 hht ws claude --resume # resume Claude in that workspace
 hht ws --new            # force a fresh session for the current directory
-hht ws open vscode      # open the current workspace session in VS Code
+hht ws open codium      # open the current workspace session in a PATH editor
 hht sh                 # list active sessions
 hht sh 42              # attach to a session
 hht sh 42 --kill       # stop and remove a session
-hht sh 42 open vscode  # open the session in VS Code
+hht sh 42 open codium  # open the session in a PATH editor
 hht sh new --path .    # launch a fresh session and print its integer ID
 hht rebuild rust       # rebuild the base and Rust images
 hht restart            # reload config and policy without stopping sessions

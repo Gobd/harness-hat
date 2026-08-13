@@ -17,7 +17,7 @@ hht ws
 
 > **Expected result:** Harness Hat opens or attaches to a session for the project. Leave the session running while you use the editor.
 
-For a running session whose integer ID is known, `hht sh <ID> open vscode` (or `hht sh <ID> open cursor`) launches the editor directly through its Dev Containers integration. To create a fresh session for an explicit directory without attaching, use `hht sh new --path DIRECTORY`.
+To create a fresh session for an explicit directory without attaching, use `hht sh new --path DIRECTORY`.
 
 ## Step 2: Install The Container Integration
 
@@ -33,7 +33,29 @@ Windsurf has built-in Development Containers support. Open the Command Palette a
 
 Open the Extensions view or the IDE’s extension marketplace and install or enable its Development Containers integration. The required command is **Dev Containers: Attach to Running Container**. Extension availability varies by IDE and marketplace; use the IDE’s equivalent integration when it provides the same command.
 
-## Step 3: Attach To The Harness Hat Container
+## Step 3 (Option A): Open A Session From The Command Line
+
+After the Dev Containers integration is installed, choose either this
+command-line flow or the manual editor attachment in Step 4. A running
+session can be opened directly with:
+
+```sh
+hht ws open codium          # use the current directory's session
+hht sh <ID> open codium     # use a session by integer ID
+```
+
+Replace `codium` with any one executable name available on your `PATH`, such
+as `code`, `code-insiders`, `cursor`, or a wrapper command you provide.
+Harness Hat invokes it with `--folder-uri <attached-container-uri>` and does
+not parse additional shell arguments. The command only verifies that the
+executable exists on `PATH`; there is no universal capability probe for
+`--folder-uri`. The selected editor must understand VS Code's Dev Containers
+attached-container URI.
+
+## Step 3 (Option B): Attach To The Harness Hat Container
+
+Use this manual editor flow instead of Step 3A when you prefer to select the
+container from the editor's interface.
 
 In the editor:
 

@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 pub const COMMAND_NAME: &str = "hht";
@@ -34,7 +34,8 @@ pub enum Command {
     },
     /// Operate on a running session, or launch one with `new --path DIRECTORY`.
     /// With no id, lists sessions. Any args after an id are passed verbatim to
-    /// `docker exec`; use `ID open EDITOR` to launch an attached IDE.
+    /// `docker exec`; use `ID open EDITOR` to launch an attached IDE. EDITOR
+    /// must be one executable name available on PATH.
     #[command(name = "sh", visible_alias = "shell")]
     Shell {
         #[arg(value_name = "ID")]
@@ -130,22 +131,33 @@ pub enum Command {
     Dialog(DialogCommand),
 }
 
-/// Editors accepted by `sh ID open EDITOR` and `ws open EDITOR`. Each maps to a CLI binary that
-/// supports the Dev Containers `--folder-uri vscode-remote://attached-container+…`
-/// scheme.
-#[derive(Debug, Clone, clap::ValueEnum)]
-pub enum OpenEditor {
-    Vscode,
-    Cursor,
-}
+/// An executable name accepted by `sh ID open EDITOR` and `ws open EDITOR`.
+///
+/// The executable is deliberately kept as one argv token. Harness Hat does
+/// not parse shell syntax or accept editor flags here; callers that need
+/// custom arguments can put a small wrapper executable on PATH instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenEditor(OsString);
 
 impl OpenEditor {
-    /// The CLI binary to invoke for this editor.
-    pub fn binary(&self) -> &'static str {
-        match self {
-            OpenEditor::Vscode => "code",
-            OpenEditor::Cursor => "cursor",
-        }
+    pub fn new(binary: OsString) -> Result<Self> {
+        anyhow::ensure!(!binary.is_empty(), "editor executable name cannot be empty");
+        let display = binary.to_string_lossy();
+        anyhow::ensure!(
+            !display.contains('/') && !display.contains('\\'),
+            "editor must be a single executable name on PATH, not a path"
+        );
+        Ok(Self(binary))
+    }
+
+    /// The executable name to resolve and invoke.
+    pub fn binary(&self) -> &OsStr {
+        &self.0
+    }
+
+    /// A lossy display form suitable for diagnostics.
+    pub fn display(&self) -> String {
+        self.0.to_string_lossy().into_owned()
     }
 }
 
@@ -264,7 +276,7 @@ fn normalize_actions(command: Option<Command>) -> Result<Option<Command>> {
             if open.is_none() && args.first().is_some_and(|arg| arg == "open") {
                 anyhow::ensure!(
                     args.len() == 2,
-                    "`open` requires an editor: use `sh ID open vscode` or `sh ID open cursor`"
+                    "`open` requires one editor executable name: use `sh ID open EDITOR`"
                 );
                 open = Some(parse_editor(&args[1])?);
                 args.clear();
@@ -301,7 +313,7 @@ fn normalize_actions(command: Option<Command>) -> Result<Option<Command>> {
             if open.is_none() && args.first().is_some_and(|arg| arg == "open") {
                 anyhow::ensure!(
                     args.len() == 2,
-                    "`open` requires an editor: use `ws open vscode` or `ws open cursor`"
+                    "`open` requires one editor executable name: use `ws open EDITOR`"
                 );
                 open = Some(parse_editor(&args[1])?);
                 args.clear();
@@ -329,17 +341,13 @@ fn normalize_actions(command: Option<Command>) -> Result<Option<Command>> {
 }
 
 fn parse_editor(value: &OsString) -> Result<OpenEditor> {
-    match value.to_string_lossy().to_ascii_lowercase().as_str() {
-        "vscode" => Ok(OpenEditor::Vscode),
-        "cursor" => Ok(OpenEditor::Cursor),
-        other => bail!("unknown editor {other:?}; choose `vscode` or `cursor`"),
-    }
+    OpenEditor::new(value.clone())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ApprovalCommand, Command, DialogCommand, OpenEditor, parse_from};
-    use std::ffi::OsString;
+    use super::{ApprovalCommand, Command, DialogCommand, parse_from};
+    use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
 
     fn argv(parts: &[&str]) -> Vec<OsString> {
@@ -380,17 +388,31 @@ mod tests {
 
     #[test]
     fn shell_open_action_parses_id_and_editor() {
-        let cli = parse_from(argv(&["hht", "sh", "42", "open", "cursor"])).expect("parse");
-        assert!(matches!(
-            cli.command,
-            Some(Command::Shell { id: Some(id), open: Some(OpenEditor::Cursor), ref args, .. })
-                if id == "42" && args.is_empty()
-        ));
+        let cli = parse_from(argv(&["hht", "sh", "42", "open", "codium"])).expect("parse");
+        let Some(Command::Shell {
+            id: Some(id),
+            open: Some(editor),
+            args,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected shell open action");
+        };
+        assert_eq!(id, "42");
+        assert_eq!(editor.binary(), OsStr::new("codium"));
+        assert!(args.is_empty());
     }
 
     #[test]
-    fn nested_open_action_rejects_unknown_editor() {
-        assert!(parse_from(argv(&["hht", "sh", "42", "open", "bogus"])).is_err());
+    fn nested_open_action_accepts_any_single_executable_name() {
+        assert!(parse_from(argv(&["hht", "sh", "42", "open", "notepad"])).is_ok());
+        assert!(parse_from(argv(&["hht", "sh", "42", "open", "my-editor"])).is_ok());
+    }
+
+    #[test]
+    fn nested_open_action_rejects_paths_and_extra_arguments() {
+        assert!(parse_from(argv(&["hht", "sh", "42", "open", "./editor"])).is_err());
+        assert!(parse_from(argv(&["hht", "sh", "42", "open", "editor", "--wait"])).is_err());
     }
 
     #[test]
@@ -548,10 +570,10 @@ mod tests {
             cli.command,
             Some(Command::Workspace {
                 new: true,
-                open: Some(OpenEditor::Vscode),
+                open: Some(ref editor),
                 ref args,
                 ..
-            }) if args.is_empty()
+            }) if args.is_empty() && editor.binary() == OsStr::new("vscode")
         ));
         assert!(parse_from(argv(&["hht", "ws", "--path", "."])).is_err());
     }

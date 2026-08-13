@@ -13,16 +13,20 @@ hht ws                           # attach or launch a session for the current di
 hht ws --name my-project         # choose a configured workspace
 hht ws --list                    # list configured workspaces
 hht ws --new                     # force a fresh session for the current directory
-hht ws open vscode               # open the current workspace session in VS Code
+hht ws open codium               # open the current workspace session in a PATH editor
 hht sh                           # list active sessions
 hht sh <ID>                      # attach to a session
 hht sh <ID> --kill               # stop and remove a session
-hht sh <ID> open vscode          # open the session in VS Code
+hht sh <ID> open codium          # open the session in a PATH editor
 hht sh new --path .              # launch a fresh session and print its ID
 hht rebuild rust                  # rebuild the base image and Rust template
 ```
 
 > **Expected result:** `hht` opens the Harness Hat TUI attached to the installed `hht-daemon`; `ws` attaches to a session or starts one, `ws --list` prints each configured workspace name, path, and saved template, `sh` lists or attaches to existing sessions with both its Harness Hat session ID and Docker container ID, and `rebuild` prints Docker build output followed by a successful build result.
+
+The `open` commands require a compatible editor with its Dev Containers
+integration installed and enabled. See [Use VS Code-Based Editors](07-vscode-editors.md)
+for setup and attachment instructions.
 
 ### Global sessions: `hht sh` and `hht ws`
 

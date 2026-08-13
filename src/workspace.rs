@@ -688,13 +688,15 @@ fn post_launch(
     cwd: Option<&str>,
     terminal_env: Vec<(String, String)>,
 ) -> Result<LaunchResponse> {
-    // No total-request timeout: a long build (cold image pull + multi-stage)
-    // can legitimately take many minutes, and a `timeout` here would abort
-    // the stream mid-build. Connect timeout still defends against a fully
-    // wedged manager. If the manager hangs after the initial response, the
-    // user can ctrl-C.
+    // No total-request or body-read timeout: a long or temporarily quiet build
+    // (cold image pull + multi-stage) can legitimately take many minutes, and
+    // reqwest's default timeout would abort the NDJSON stream while the TUI
+    // continues building. Connect timeout still defends against a fully
+    // unreachable manager. If the manager hangs after the initial response,
+    // the user can ctrl-C.
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(5))
+        .timeout(None)
         .build()
         .context("building http client")?;
     let mut body = serde_json::json!({
