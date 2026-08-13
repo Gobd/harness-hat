@@ -101,7 +101,7 @@ Workspace `*.dockerfiles` are scanned for launchable images. Any Dockerfile that
 
 ## Common failures
 
-- **Manager is not reachable:** verify the required desktop agent is installed with `hht install`, then verify the configured control host and port are loopback values.
+- **Manager is not reachable:** verify the background agent is installed with `hht install` (or `hht install --headless` on a Linux server), then verify the configured control host and port are loopback values.
 - **Docker is unavailable:** start Docker Desktop or the Docker daemon, then confirm `docker version` works in the same user session.
 - **A project is not found:** run `hht workspace` from its directory to add it, or create it from **New Workspace...** in the TUI.
 - **A request remains blocked:** check global and project rules, then inspect any rules-file-change dialog. Fail-closed behavior is intentional.

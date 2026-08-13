@@ -11,11 +11,11 @@
 # - Use `killme` only when the user explicitly asks you to end this container.
 # """
 #
-# Workspace path mirroring (opt-in):
+# Workspace path mirroring (enabled by default):
 # mirror_cwd = true
 # Mounts an absolute POSIX workspace path at that same path in the Linux
-# container instead of `/workspace`. Native Windows paths keep the configured
-# container mount target because they cannot be represented exactly.
+# container instead of `/workspace`. Windows drive paths use a best-effort
+# container path such as `/C/Users/example/project`.
 #
 # Preferred session template (saved by `hht workspace` after the first choice):
 # template = "rust"
@@ -41,6 +41,7 @@
 #   argv = ["cargo", "test"] # run inside container with `hostdo run cargo test`
 #   cwd = "$WORKSPACE"         # execution cwd only, not part of approval matching
 #   timeout_secs = 60
+#   # Values above 300 seconds are capped at 300 seconds.
 #   # Optional context persisted for operator review; does not affect matching.
 #   reason = "run package index refresh after dependency update"
 #   approval_mode = "auto"

@@ -9,10 +9,13 @@ struct Args {
     /// Path to the global Harness Hat configuration.
     #[arg(long)]
     config: PathBuf,
+    /// Run without native graphical approval dialogs.
+    #[arg(long)]
+    headless: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    harness_hat::manager::run_service(args.config).await
+    harness_hat::manager::run_service(args.config, args.headless).await
 }

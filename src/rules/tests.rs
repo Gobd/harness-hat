@@ -1,6 +1,6 @@
 use super::{
     ComposedRules, NetworkPolicy, NetworkRules, ProjectRules, append_hostdo_auto_approval,
-    host_matches, load,
+    host_matches, hostdo_invokes_hht, load,
 };
 use super::{HostdoCommand, HostdoRules};
 
@@ -22,7 +22,7 @@ denylist = ["domain=blocked.example.com"]
     .expect("write rules");
 
     let rules = load(&path).expect("load rules");
-    assert!(rules.mirror_cwd);
+    assert_eq!(rules.mirror_cwd, Some(true));
     assert_eq!(rules.network.allowlist.len(), 2);
     assert_eq!(rules.network.denylist.len(), 1);
 }
@@ -188,19 +188,26 @@ fn compose_merges_network_rules_and_denies_win() {
 }
 
 #[test]
-fn compose_enables_mirror_cwd_when_global_or_workspace_rules_opt_in() {
+fn compose_defaults_to_mirroring_and_honors_explicit_overrides() {
+    assert!(ComposedRules::compose(&ProjectRules::default(), &[]).mirror_cwd);
+
     let global = ProjectRules {
-        mirror_cwd: true,
+        mirror_cwd: Some(false),
         ..ProjectRules::default()
     };
-    assert!(ComposedRules::compose(&global, &[]).mirror_cwd);
+    assert!(!ComposedRules::compose(&global, &[]).mirror_cwd);
 
     let workspace = ProjectRules {
-        mirror_cwd: true,
+        mirror_cwd: Some(true),
         ..ProjectRules::default()
     };
-    assert!(ComposedRules::compose(&ProjectRules::default(), &[workspace]).mirror_cwd);
-    assert!(!ComposedRules::compose(&ProjectRules::default(), &[]).mirror_cwd);
+    assert!(ComposedRules::compose(&global, &[workspace]).mirror_cwd);
+
+    let workspace = ProjectRules {
+        mirror_cwd: Some(false),
+        ..ProjectRules::default()
+    };
+    assert!(!ComposedRules::compose(&ProjectRules::default(), &[workspace]).mirror_cwd);
 }
 
 #[test]
@@ -238,6 +245,25 @@ allowlist = ["domain=example.com"]
     assert_eq!(rules.hostdo.commands[0].argv, vec!["cargo", "build"]);
     assert_eq!(rules.hostdo.commands[0].image, None);
     assert_eq!(rules.hostdo.commands[0].timeout_secs, 60);
+}
+
+#[test]
+fn load_caps_hostdo_timeout_at_five_minutes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("harness-rules.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+
+[hostdo]
+commands = [{ argv = ["cargo", "test"], timeout_secs = 3600 }]
+"#,
+    )
+    .expect("write rules");
+
+    let rules = load(&path).expect("load rules");
+    assert_eq!(rules.hostdo.commands[0].timeout_secs, 300);
 }
 
 #[test]
@@ -421,6 +447,71 @@ commands = [{ argv = ["npm", "test"], image = "node:20", env_allowlist = ["CI"] 
     assert!(
         err.to_string().contains("image rules"),
         "error should explain the image restriction: {err}"
+    );
+}
+
+#[test]
+fn identifies_hht_executables_in_hostdo_argv() {
+    for executable in [
+        "hht",
+        "HHT",
+        "hht.exe",
+        "/usr/local/bin/hht",
+        r"C:\Users\dev\.cargo\bin\hht.exe",
+        "./hht",
+    ] {
+        assert!(
+            hostdo_invokes_hht(&[executable.to_string(), "install".to_string()]),
+            "expected {executable:?} to be blocked"
+        );
+    }
+    assert!(!hostdo_invokes_hht(&[
+        "cargo".to_string(),
+        "test".to_string()
+    ]));
+    assert!(!hostdo_invokes_hht(&[]));
+}
+
+#[test]
+fn load_rejects_hht_hostdo_rules() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("harness-rules.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+
+[hostdo]
+commands = [{ argv = ["/usr/local/bin/hht", "install"], approval_mode = "auto" }]
+"#,
+    )
+    .expect("write rules");
+
+    let err = load(&path).expect_err("hht hostdo rule must be rejected");
+    assert!(
+        err.to_string()
+            .contains("invoking hht through hostdo is forbidden"),
+        "error should explain the restriction: {err}"
+    );
+}
+
+#[test]
+fn remembered_approval_rejects_hht_hostdo_commands() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("harness-rules.toml");
+    std::fs::write(&path, "version = 1\n").expect("write rules");
+
+    let err = append_hostdo_auto_approval(
+        &path,
+        &["hht.exe".to_string(), "restart".to_string()],
+        None,
+        60,
+        None,
+    )
+    .expect_err("hht approval persistence must be rejected");
+    assert!(
+        err.to_string()
+            .contains("invoking hht through hostdo is forbidden")
     );
 }
 

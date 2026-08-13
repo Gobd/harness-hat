@@ -13,6 +13,7 @@ const GO_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/go.dockerfile");
 const RUST_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/rust.dockerfile");
 const PYTHON_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/python.dockerfile");
 const KOTLIN_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/kotlin.dockerfile");
+const ANDROID_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/android.dockerfile");
 const CSHARP_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/csharp.dockerfile");
 const PHP_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/php.dockerfile");
 
@@ -28,6 +29,7 @@ const BUILTIN_DOCKERFILES: &[(&str, &str)] = &[
     ("rust.dockerfile", RUST_DOCKERFILE_TEMPLATE),
     ("python.dockerfile", PYTHON_DOCKERFILE_TEMPLATE),
     ("kotlin.dockerfile", KOTLIN_DOCKERFILE_TEMPLATE),
+    ("android.dockerfile", ANDROID_DOCKERFILE_TEMPLATE),
     ("csharp.dockerfile", CSHARP_DOCKERFILE_TEMPLATE),
     ("php.dockerfile", PHP_DOCKERFILE_TEMPLATE),
 ];
@@ -140,6 +142,11 @@ pub fn ensure_language_dockerfiles(docker_dir: &Path) -> Result<()> {
     ensure_template_dockerfile(docker_dir, "rust.dockerfile", RUST_DOCKERFILE_TEMPLATE)?;
     ensure_template_dockerfile(docker_dir, "python.dockerfile", PYTHON_DOCKERFILE_TEMPLATE)?;
     ensure_template_dockerfile(docker_dir, "kotlin.dockerfile", KOTLIN_DOCKERFILE_TEMPLATE)?;
+    ensure_template_dockerfile(
+        docker_dir,
+        "android.dockerfile",
+        ANDROID_DOCKERFILE_TEMPLATE,
+    )?;
     ensure_template_dockerfile(docker_dir, "csharp.dockerfile", CSHARP_DOCKERFILE_TEMPLATE)?;
     ensure_template_dockerfile(docker_dir, "php.dockerfile", PHP_DOCKERFILE_TEMPLATE)?;
     Ok(())
@@ -270,6 +277,19 @@ mod tests {
         assert_eq!(large.memory.as_deref(), Some("8g"));
         assert_eq!(large.cpus.as_deref(), Some("4"));
         assert_eq!(large.shm_size.as_deref(), Some("2g"));
+
+        let android = parsed
+            .container_profiles
+            .get("android")
+            .expect("android profile");
+        assert_eq!(android.image.as_deref(), Some("android"));
+        assert_eq!(android.memory.as_deref(), Some("8g"));
+        assert!(
+            android
+                .starter_network_allowlist
+                .iter()
+                .any(|host| host == "domain=dl.google.com")
+        );
     }
 
     #[test]
@@ -303,6 +323,7 @@ mod tests {
         assert!(paths.contains(&"rust.dockerfile"));
         assert!(paths.contains(&"python.dockerfile"));
         assert!(paths.contains(&"kotlin.dockerfile"));
+        assert!(paths.contains(&"android.dockerfile"));
         assert!(paths.contains(&"csharp.dockerfile"));
         assert!(paths.contains(&"php.dockerfile"));
     }
@@ -397,6 +418,7 @@ mod tests {
             ("rust.dockerfile", "Rust image"),
             ("python.dockerfile", "harness-hat Python / uv image"),
             ("kotlin.dockerfile", "harness-hat Kotlin / JVM image"),
+            ("android.dockerfile", "harness-hat Kotlin / Android image"),
             ("csharp.dockerfile", "harness-hat C# / .NET image"),
             ("php.dockerfile", "PHP image"),
         ] {

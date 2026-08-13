@@ -60,6 +60,15 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    if app.focus == Focus::WorkspaceActions {
+        let pi = app
+            .workspace_action_workspace
+            .or_else(|| app.selected_workspace_idx())
+            .unwrap_or(0);
+        render_workspace_actions(frame, app, area, pi, false);
+        return;
+    }
+
     if app.focus == Focus::ContainerPicker {
         render_container_picker(frame, app, area, false);
         return;
@@ -115,7 +124,9 @@ pub(crate) fn render_right_pane(frame: &mut Frame, app: &mut App, area: Rect) {
 pub(crate) fn render_terminal_overlays(frame: &mut Frame, app: &mut App, area: Rect) {
     // Service-mode and macOS approvals are native dialogs, so the TUI overlay
     // is suppressed to avoid a confusing double prompt.
-    if app.active_exec_modal_idx().is_some() && !app.native_dialog_enabled() {
+    if app.headless_rules_overlay_visible() {
+        render_rules_change_overlay(frame, app, area);
+    } else if app.active_exec_modal_idx().is_some() && !app.native_dialog_enabled() {
         render_exec_approval_overlay(frame, app, area, 0);
     } else if !app.pending_net.is_empty() && !app.native_dialog_enabled() {
         render_net_approval_overlay(frame, app, area);
@@ -389,6 +400,105 @@ fn network_group_title(app: &App, session_idx: usize, count: usize, width: u16) 
     truncate_middle(&raw, width.saturating_sub(2) as usize)
 }
 
+pub(crate) fn render_workspace_actions(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    workspace_idx: usize,
+    dimmed: bool,
+) {
+    let cfg = app.config.get();
+    let Some(proj) = cfg.workspaces.get(workspace_idx) else {
+        render_idle(frame, area);
+        return;
+    };
+
+    let tone = |c| maybe_dim(c, dimmed);
+    let focused = app.focus == Focus::WorkspaceActions;
+    let block = Block::default()
+        .title(format!(" {} Workspace Actions ", proj.name))
+        .title_style(
+            Style::default()
+                .fg(tone(Color::Yellow))
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(if focused {
+            Style::default().fg(tone(Color::Cyan))
+        } else {
+            Style::default().fg(tone(Color::DarkGray))
+        });
+
+    let actions = app.workspace_action_rows(workspace_idx);
+    let cursor = if actions.is_empty() {
+        0
+    } else {
+        app.workspace_action_cursor
+            .min(actions.len().saturating_sub(1))
+    };
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "  Canonical repo: ",
+                Style::default().fg(tone(Color::DarkGray)),
+            ),
+            Span::styled(
+                proj.canonical_path.display().to_string(),
+                Style::default().fg(tone(Color::White)),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Actions",
+            Style::default()
+                .fg(tone(Color::Cyan))
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+
+    for (i, action) in actions.iter().enumerate() {
+        let selected = focused && i == cursor;
+        let marker = if selected { "▶ " } else { "  " };
+        let name_style = if selected {
+            Style::default()
+                .fg(tone(Color::White))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(tone(Color::White))
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {marker}"),
+                Style::default().fg(tone(Color::Cyan)),
+            ),
+            Span::styled(format!("[{}] {}", action.key, action.label), name_style),
+        ]));
+        lines.push(Line::from(Span::styled(
+            format!("      {}", action.desc),
+            Style::default().fg(tone(Color::DarkGray)),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        if actions.is_empty() {
+            "  This workspace is no longer available."
+        } else {
+            "  [↑↓/jk] navigate  [↵/l] select  [r] remove  [Esc/^B] back"
+        },
+        Style::default().fg(tone(Color::DarkGray)),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 fn append_activity_summary_lines(
     lines: &mut Vec<Line>,
     activity: &crate::activity::Activity,
@@ -639,7 +749,7 @@ pub(crate) fn render_idle(frame: &mut Frame, area: Rect) {
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "  Select a workspace and press [↵] to launch a container.",
+            "  Select a workspace and press [↵] for launch/remove actions.",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),

@@ -1,5 +1,6 @@
 use super::*;
 
+mod approval_control;
 pub(crate) mod approvals;
 mod build;
 mod core;

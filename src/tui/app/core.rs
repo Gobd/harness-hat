@@ -118,12 +118,14 @@ impl App {
         stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
         launch_pending_rx: mpsc::Receiver<WorkspaceLaunchItem>,
         restart_pending_rx: mpsc::Receiver<crate::server::DaemonRestartItem>,
+        approval_control_rx: mpsc::Receiver<crate::server::ApprovalControlItem>,
         net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
         activity_rx: mpsc::Receiver<ActivityEvent>,
         audit_rx: mpsc::Receiver<AuditEntry>,
         state: StateManager,
         proxy_state: ProxyState,
         service_mode: bool,
+        headless_mode: bool,
     ) -> Result<Self> {
         let cfg = config.get();
         let watched_rules_stamps = Self::watched_rules_paths(&cfg)
@@ -205,6 +207,8 @@ impl App {
             preview_session: None,
             active_settings_workspace: None,
             settings_cursor: 0,
+            workspace_action_workspace: None,
+            workspace_action_cursor: 0,
             container_picker: None,
             build_container_idx: None,
             build_workspace_idx: None,
@@ -217,10 +221,12 @@ impl App {
             new_workspace: None,
             remove_workspace_confirm: None,
             base_rules_changed: None,
+            next_approval_id: 0,
             exec_pending_rx,
             stop_pending_rx,
             launch_pending_rx,
             restart_pending_rx,
+            approval_control_rx,
             workspace_launch_pending: None,
             net_pending_rx,
             background_channels: BackgroundUiChannels {
@@ -233,6 +239,7 @@ impl App {
             },
             native_dialog_inflight: None,
             service_mode,
+            headless_mode,
             activity_rx,
             audit_rx,
             build_event_rx,
@@ -394,7 +401,18 @@ impl App {
             }
 
             self.config.block_rules_file(&path);
+            let Some(approval_id) = self.allocate_approval_id() else {
+                self.push_log(
+                    format!(
+                        "SECURITY ALERT: rules file changed but approval ID space is exhausted: {}",
+                        path.display()
+                    ),
+                    true,
+                );
+                continue;
+            };
             self.base_rules_changed = Some(BaseRulesChangedState {
+                approval_id,
                 path: path.clone(),
                 expected_contents: std::fs::read(&path).ok(),
                 dialog_dismissed: false,
@@ -929,7 +947,16 @@ impl App {
     pub(crate) fn has_pending_approval_modal(&self) -> bool {
         !self.pending_exec.is_empty()
             || !self.pending_net.is_empty()
+            || self.headless_rules_overlay_visible()
             || self.native_dialog_inflight.is_some()
+    }
+
+    pub(crate) fn headless_rules_overlay_visible(&self) -> bool {
+        self.headless_mode
+            && self
+                .base_rules_changed
+                .as_ref()
+                .is_some_and(|state| !state.dialog_dismissed)
     }
 
     pub(crate) fn active_exec_modal_idx(&self) -> Option<usize> {

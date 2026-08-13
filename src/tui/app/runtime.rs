@@ -24,7 +24,16 @@ impl App {
 
         for _ in 0..32 {
             match self.exec_pending_rx.try_recv() {
-                Ok(item) => {
+                Ok(mut item) => {
+                    let Some(id) = self.allocate_approval_id() else {
+                        if let Some(response_tx) = item.response_tx.take() {
+                            let _ = response_tx.send(crate::server::ApprovalDecision::Deny);
+                        }
+                        self.push_log("approval ID space exhausted; denied host command", true);
+                        changed = true;
+                        continue;
+                    };
+                    item.id = id;
                     self.pending_exec.push(item);
                     changed = true;
                 }
@@ -73,6 +82,7 @@ impl App {
                 Err(_) => break,
             }
         }
+        changed |= self.drain_approval_control();
         // Rules-file changes always use a system dialog. Network and hostdo
         // approvals use one in service mode and on macOS; interactive Windows
         // and Linux sessions retain the TUI fallback.
@@ -458,7 +468,7 @@ impl App {
         changed
     }
 
-    pub(crate) fn enqueue_pending_network(&mut self, item: crate::proxy::PendingNetworkItem) {
+    pub(crate) fn enqueue_pending_network(&mut self, mut item: crate::proxy::PendingNetworkItem) {
         if let Some(existing) = self
             .pending_net
             .iter_mut()
@@ -487,6 +497,10 @@ impl App {
         }
 
         if self.pending_net.len() < Self::MAX_PENDING_NETWORK_APPROVALS {
+            let Some(id) = self.allocate_approval_id() else {
+                return self.reject_pending_network_overflow(item, "approval ID space exhausted");
+            };
+            item.approval_id = id;
             self.pending_net.push(item);
             return;
         }

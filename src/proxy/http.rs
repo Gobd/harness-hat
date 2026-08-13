@@ -237,6 +237,7 @@ pub(crate) async fn prompt_network(
             )
         });
     let item = PendingNetworkItem {
+        approval_id: String::new(),
         activity_id,
         cancel_flag,
         source_workspace,

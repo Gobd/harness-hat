@@ -62,17 +62,17 @@ hht ws claude --resume
 
 ## What The Agent Sees
 
-By default, the selected directory appears at `/workspace` in the session. Its files are read-write, so agents can change source code, configuration, and Git metadata in that directory. Review changes before running them on the host.
+By default, an absolute POSIX workspace path is mirrored at the same path inside the Linux session. Windows drive paths use a best-effort equivalent, so `C:\Users\you\project` appears at `/C/Users/you/project`. Files are read-write, so agents can change source code, configuration, and Git metadata in that directory. Review changes before running them on the host.
 
-## Mirror The Workspace Path
+## Control The Workspace Path
 
-Path mirroring is an advanced per-workspace option. First create the workspace through either path above. Then edit the `harness-rules.toml` file that Harness Hat created in the workspace root on the **host filesystem** and add:
+Path mirroring is enabled by default. To make that choice explicit, edit the `harness-rules.toml` file in the workspace root on the **host filesystem** and add:
 
 ```toml
 mirror_cwd = true
 ```
 
-Start a new session after saving the change. When enabled, an absolute POSIX workspace path such as `/home/user/my-project` appears at `/home/user/my-project` inside Linux sessions instead of `/workspace`. Native Windows paths continue to use the configured container location.
+Start a new session after saving the change. An absolute POSIX workspace path such as `/home/user/my-project` appears at `/home/user/my-project` inside Linux sessions. On Windows, a drive path such as `C:\Users\you\my-project` appears at the best-effort container path `/C/Users/you/my-project`. Set `mirror_cwd = false` to use the configured container location (normally `/workspace`) instead.
 
 ## Choose A Template Or Rebuild
 

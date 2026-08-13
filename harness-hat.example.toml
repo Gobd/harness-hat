@@ -241,6 +241,30 @@ starter_network_allowlist = [
   "domain=api.foojay.io",
 ]
 
+[container_profiles.android]
+image = "android"
+memory = "8g"
+cpus = "4"
+shm_size = "2g"
+starter_network_allowlist = [
+  "domain=github.com",
+  "domain=api.github.com",
+  "domain=raw.githubusercontent.com",
+  "domain=objects.githubusercontent.com",
+  # Gradle plugin portal, wrapper, and Maven Central
+  "domain=plugins.gradle.org",
+  "domain=services.gradle.org",
+  "domain=downloads.gradle.org",
+  "domain=repo.maven.apache.org",
+  "domain=repo1.maven.org",
+  "domain=jcenter.bintray.com",
+  # Android SDK and Google Maven repository
+  "domain=dl.google.com",
+  "domain=maven.google.com",
+  # Foojay toolchain resolver — auto-downloads the right JDK for the project
+  "domain=api.foojay.io",
+]
+
 [container_profiles.csharp]
 image = "csharp"
 memory = "4g"

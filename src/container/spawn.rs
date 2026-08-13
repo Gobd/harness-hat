@@ -38,14 +38,28 @@ const CODEX_HOME_CONTAINER_PATH: &str = "/home/coder/.codex";
 const CODEX_SEED_CONTAINER_PATH: &str = "/run/harness-hat/codex-seed";
 const CODEX_SEED_ENV: &str = "HARNESS_HAT_CODEX_SEED";
 
-/// Return a Linux-container mount target that matches an absolute POSIX host
-/// workspace path. Native Windows paths cannot be represented exactly inside
-/// a Linux container, so callers retain their configured target in that case.
+/// Return a Linux-container mount target that mirrors the host workspace path
+/// as closely as possible. Absolute POSIX paths are preserved, while Windows
+/// drive paths such as `C:\Users\me\repo` become `/C/Users/me/repo`.
 pub(crate) fn mirrored_workspace_mount_target(workspace_path: &Path) -> Option<std::path::PathBuf> {
-    let target = container_path_string(workspace_path);
-    target
-        .starts_with('/')
-        .then(|| std::path::PathBuf::from(target))
+    let host_path = crate::fs_util::normalize_windows_extended_path(
+        &workspace_path.as_os_str().to_string_lossy(),
+    );
+    let target = host_path.replace('\\', "/");
+
+    let bytes = target.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/' {
+        let drive = (bytes[0] as char).to_ascii_uppercase();
+        let suffix = target[3..].trim_start_matches('/');
+        let target = if suffix.is_empty() {
+            format!("/{drive}")
+        } else {
+            format!("/{drive}/{suffix}")
+        };
+        return Some(std::path::PathBuf::from(target));
+    }
+
+    (target.starts_with('/') && !target.starts_with("//")).then(|| std::path::PathBuf::from(target))
 }
 
 /// Launch `docker run` for a container definition and wire it to a PTY-backed
@@ -1137,13 +1151,37 @@ mod tests {
     }
 
     #[test]
-    fn mirrored_workspace_target_uses_absolute_posix_path_only() {
+    fn mirrored_workspace_target_preserves_absolute_posix_path() {
         assert_eq!(
             mirrored_workspace_mount_target(std::path::Path::new("/home/user/my-project")),
             Some(PathBuf::from("/home/user/my-project"))
         );
+    }
+
+    #[test]
+    fn mirrored_workspace_target_approximates_windows_drive_path() {
         assert_eq!(
             mirrored_workspace_mount_target(std::path::Path::new(r"C:\Users\user\my-project")),
+            Some(PathBuf::from("/C/Users/user/my-project"))
+        );
+        assert_eq!(
+            mirrored_workspace_mount_target(std::path::Path::new(r"\\?\c:\Users\user\my-project")),
+            Some(PathBuf::from("/C/Users/user/my-project"))
+        );
+        assert_eq!(
+            mirrored_workspace_mount_target(std::path::Path::new(r"D:\")),
+            Some(PathBuf::from("/D"))
+        );
+    }
+
+    #[test]
+    fn mirrored_workspace_target_rejects_relative_and_unc_paths() {
+        assert_eq!(
+            mirrored_workspace_mount_target(std::path::Path::new("relative/path")),
+            None
+        );
+        assert_eq!(
+            mirrored_workspace_mount_target(std::path::Path::new(r"\\server\share\repo")),
             None
         );
     }
