@@ -787,6 +787,7 @@ fn shared_session_mount(
         // Unset: the `.claude.json` mount picks up the seed-by-default heuristic
         // in container::spawn; the directory mounts (.claude, .codex, …) don't.
         seed: None,
+        add_to_path: false,
     }))
 }
 
@@ -808,6 +809,7 @@ fn shared_container_keyring_mount() -> Result<ContainerMount> {
         container: PathBuf::from("/home/coder/.local/share/keyrings"),
         mode: Default::default(),
         seed: None,
+        add_to_path: false,
     })
 }
 

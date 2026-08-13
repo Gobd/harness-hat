@@ -260,6 +260,14 @@ pub struct ContainerMount {
     /// force the shared live bind mount. Only applies to regular files.
     #[serde(default)]
     pub seed: Option<bool>,
+    /// Prepend this mount's container path onto `PATH` at launch, so binaries
+    /// placed in it (e.g. a host `~/go/bin`) are found by every template
+    /// regardless of that image's own baked-in `PATH` — including in
+    /// non-interactive `docker exec` passthrough commands, which never source
+    /// `.zshrc`. The image's actual `PATH` is read via `docker image inspect`
+    /// at launch and this directory is added in front of it.
+    #[serde(default)]
+    pub add_to_path: bool,
 }
 
 impl ContainerMount {
@@ -271,6 +279,7 @@ impl ContainerMount {
             container: PathBuf::from(container),
             mode: MountMode::Ro,
             seed: None,
+            add_to_path: false,
         }
     }
 

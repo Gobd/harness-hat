@@ -139,6 +139,20 @@ host = "~/.omp"
 container = "/home/coder/.omp"
 mode = "rw"
 
+# Mount a directory of host binaries (e.g. `go install`'s ~/go/bin) and add it
+# to PATH in every template, regardless of that template's own baked-in PATH.
+# harness-hat computes the real override at launch via `docker image inspect`
+# rather than a static config value, since `docker run --env-file`/`-e` sets a
+# literal PATH with no `$PATH` expansion. Without add_to_path, a mounted
+# directory not already on the image's PATH only resolves in an interactive
+# shell whose rc file happens to export it — never in `hht shell`/`hht ws`
+# passthrough commands, which docker-exec directly with no shell in between.
+# [[defaults.containers.mounts]]
+# host = "~/go/bin"
+# container = "/home/coder/go/bin"
+# mode = "rw"
+# add_to_path = true
+
 # Optional defaults applied to every template.
 # mount_target = "/workspace"
 # memory = "16g"

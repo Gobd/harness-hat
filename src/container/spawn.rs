@@ -252,6 +252,11 @@ pub fn spawn(
     {
         write_env_file_entry(&mut env_file, "HOME", CODER_HOME)?;
     }
+    if !ctr.env.contains_key("PATH") && !extra_env.iter().any(|(key, _)| key == "PATH") {
+        if let Some(path) = compute_path_override(&ctr.image, &ctr.mounts)? {
+            write_env_file_entry(&mut env_file, "PATH", &path)?;
+        }
+    }
 
     write_env_file_entry(&mut env_file, "HARNESS_HAT_TOKEN", token)?;
     write_env_file_entry(&mut env_file, "HARNESS_HAT_SESSION_TOKEN", session_token)?;
@@ -426,6 +431,7 @@ pub fn spawn(
             container: std::path::PathBuf::from("/home/coder/.claude/settings.json"),
             mode: crate::config::MountMode::Rw,
             seed: Some(true),
+            add_to_path: false,
         });
     let mut all_mounts: Vec<crate::config::ContainerMount> = ctr.mounts.clone();
     if let Some(m) = claude_settings_mount {
@@ -845,6 +851,62 @@ fn should_inject_coder_home(mounts: &[crate::config::ContainerMount]) -> bool {
         .any(|mount| mount.container.starts_with(CODER_HOME))
 }
 
+/// Read `image`'s baked-in `PATH` via `docker image inspect` and prepend the
+/// container path of every mount flagged `add_to_path = true`.
+///
+/// This exists because `docker run --env-file`/`-e` sets a literal value with
+/// no shell expansion — there is no way to write `PATH=/x:$PATH` in config and
+/// have `$PATH` resolve to the image's existing value. Each template's own
+/// Dockerfile bakes a different `PATH` (cargo/bin, go/bin, …), so a static
+/// config value can't safely cover every template without hardcoding all of
+/// them. Reading the real value at launch keeps `add_to_path` mounts working
+/// uniformly across every current and future template, including in
+/// non-interactive `docker exec` passthrough commands, which never source
+/// `.zshrc` and therefore never see rc-file PATH exports.
+///
+/// Returns `None` when no mount requests `add_to_path`, so callers can skip
+/// writing a `PATH` override entirely (the image's own `PATH` already applies).
+fn compute_path_override(
+    image: &str,
+    mounts: &[crate::config::ContainerMount],
+) -> Result<Option<String>> {
+    let extra_dirs: Vec<String> = mounts
+        .iter()
+        .filter(|m| m.add_to_path)
+        .map(|m| container_path_string(&m.container))
+        .collect();
+    if extra_dirs.is_empty() {
+        return Ok(None);
+    }
+
+    let output = std::process::Command::new("docker")
+        .args([
+            "image",
+            "inspect",
+            image,
+            "--format",
+            "{{range .Config.Env}}{{println .}}{{end}}",
+        ])
+        .output()
+        .with_context(|| format!("running docker image inspect for {image}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "docker image inspect {image} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let existing_path = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("PATH="))
+        .unwrap_or("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+
+    let mut path = extra_dirs.join(":");
+    path.push(':');
+    path.push_str(existing_path);
+    Ok(Some(path))
+}
+
 fn should_seed_codex_directory(mount: &crate::config::ContainerMount) -> bool {
     cfg!(target_os = "windows")
         && container_path_string(&mount.container) == CODEX_HOME_CONTAINER_PATH
@@ -1165,6 +1227,7 @@ mod tests {
             container: PathBuf::from(container),
             mode: MountMode::Rw,
             seed,
+            add_to_path: false,
         }
     }
 
