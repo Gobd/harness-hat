@@ -387,12 +387,14 @@ fn merge_mounts_collapses_duplicate_container_destinations() {
         container: dest.clone(),
         mode: MountMode::Rw,
         seed: None,
+        add_to_path: false,
     };
     let code_mount = ContainerMount {
         host: PathBuf::from("/Users/me/Library/Application Support/harness-hat/container-keyrings"),
         container: dest.clone(),
         mode: MountMode::Rw,
         seed: None,
+        add_to_path: false,
     };
 
     let merged = super::merge_mounts(
@@ -438,12 +440,14 @@ fn merge_mounts_lets_later_layers_override_same_destination() {
         container: dest.clone(),
         mode: MountMode::Ro,
         seed: None,
+        add_to_path: false,
     };
     let override_mount = ContainerMount {
         host: PathBuf::from("/host/override/tool"),
         container: dest.clone(),
         mode: MountMode::Rw,
         seed: None,
+        add_to_path: false,
     };
 
     let merged = super::merge_mounts(
