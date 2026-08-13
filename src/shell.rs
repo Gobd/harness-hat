@@ -24,9 +24,10 @@ use crate::container::{
 };
 
 /// Entry point for the `shell` subcommand. With an id, attaches to that
-/// session, optionally running `args` as a command instead of bash; `--kill`
-/// terminates the named session; without an id, prints running sessions.
-pub fn run(id: Option<String>, kill: Option<String>, args: Vec<OsString>) -> Result<i32> {
+/// session, optionally running `args` as a command instead of bash; `kill`
+/// terminates the named session instead of attaching; without an id, prints
+/// running sessions.
+pub fn run(id: Option<String>, kill: bool, args: Vec<OsString>) -> Result<i32> {
     if which::which("docker").is_err() {
         bail!(
             "docker not found in PATH — `{} shell` requires Docker",
@@ -34,19 +35,54 @@ pub fn run(id: Option<String>, kill: Option<String>, args: Vec<OsString>) -> Res
         );
     }
     match (id, kill) {
-        (_, Some(id)) => {
+        (Some(id), true) => {
             terminate(&id)?;
             Ok(0)
         }
-        (Some(id), None) => attach(&id, &args),
-        (None, None) => {
+        (None, true) => bail!(
+            "`{} shell --kill` requires a session ID, e.g. `{} shell 0042 --kill`",
+            crate::cli::COMMAND_NAME,
+            crate::cli::COMMAND_NAME
+        ),
+        (Some(id), false) => attach(&id, &args),
+        (None, false) => {
             list()?;
             Ok(0)
         }
     }
 }
 
+/// Open a running session's workspace in an external editor (VS Code or
+/// Cursor) via the Dev Containers "attached container" URI scheme:
+/// `vscode-remote://attached-container+<hex container id>/<path>`.
+pub fn open(id: &str, editor: crate::cli::OpenEditor) -> Result<()> {
+    let session = session_for_id(id)?;
+    let uri = attached_container_uri(&session);
+
+    let binary = editor.binary();
+    let status = Command::new(binary)
+        .args(["--folder-uri", &uri])
+        .status()
+        .with_context(|| format!("launching `{binary}` — is it installed and on PATH?"))?;
+    if !status.success() {
+        bail!("`{binary} --folder-uri {uri}` exited with {status}");
+    }
+    println!("Opened session {} in {binary}.", normalize_id(id));
+    Ok(())
+}
+
+fn attached_container_uri(session: &Session) -> String {
+    let mount_target = session.mount_target.as_deref().unwrap_or("/workspace");
+    let hex_id = hex_encode(session.container_id.as_bytes());
+    format!("vscode-remote://attached-container+{hex_id}{mount_target}")
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// A running harness-hat session, as seen through docker labels.
+#[derive(Clone)]
 pub(crate) struct Session {
     pub(crate) alias: String,
     pub(crate) container_id: String,
@@ -121,8 +157,8 @@ fn normalize_id(id: &str) -> String {
 }
 
 fn attach(id: &str, extra_args: &[OsString]) -> Result<i32> {
-    let name = session_name_for_id(id)?;
-    exec_into_container(&name, extra_args)
+    let session = session_for_id(id)?;
+    exec_into_container(&session.name, extra_args)
 }
 
 fn shell_exec_env_vars() -> Vec<String> {
@@ -179,11 +215,12 @@ pub(crate) fn shell_exec_env_pairs_with_passthrough(
 
 fn terminate(id: &str) -> Result<()> {
     let wanted = normalize_id(id);
-    let name = session_name_for_id(id)?;
+    let session = session_for_id(id)?;
+    let name = &session.name;
     let mut command = Command::new("docker");
     crate::process_util::hide_console_window(&mut command);
     let output = command
-        .args(["rm", "-f", &name])
+        .args(["rm", "-f", name])
         .output()
         .context("terminating session container with docker rm -f")?;
     if !output.status.success() {
@@ -196,30 +233,27 @@ fn terminate(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn session_name_for_id(id: &str) -> Result<String> {
+fn session_for_id(id: &str) -> Result<Session> {
     let wanted = normalize_id(id);
     let sessions = running_sessions()?;
-    let matches: Vec<&Session> = sessions.iter().filter(|s| s.alias == wanted).collect();
+    let mut matches: Vec<Session> = sessions.into_iter().filter(|s| s.alias == wanted).collect();
 
-    let name = match matches.as_slice() {
-        [] => bail!(
+    let session = match matches.len() {
+        0 => bail!(
             "no running session with id '{wanted}'. Run `{} shell` to list sessions. \
              (Sessions only exist while the manager is running — is it still open?)",
             crate::cli::COMMAND_NAME
         ),
-        [session] => session.name.clone(),
+        1 => matches.remove(0),
         many => {
             // Aliases are deduped at launch, so this should not happen; pick the
             // first deterministically rather than failing the user outright.
-            eprintln!(
-                "warning: {} running sessions share id '{wanted}'; using the first",
-                many.len()
-            );
-            many[0].name.clone()
+            eprintln!("warning: {many} running sessions share id '{wanted}'; using the first");
+            matches.remove(0)
         }
     };
 
-    Ok(name)
+    Ok(session)
 }
 
 /// Run `docker exec` against a container with optional trailing argv (or
@@ -473,7 +507,7 @@ fn list() -> Result<()> {
         );
     }
     println!(
-        "\nAttach with: {} shell <ID>\nStop with: {} shell --kill <ID>",
+        "\nAttach with: {} shell <ID>\nStop with: {} shell <ID> --kill",
         crate::cli::COMMAND_NAME,
         crate::cli::COMMAND_NAME
     );
@@ -482,8 +516,48 @@ fn list() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{docker_exec_args, normalize_id, parse_running_sessions};
+    use super::{
+        Session, attached_container_uri, docker_exec_args, hex_encode, normalize_id,
+        parse_running_sessions,
+    };
     use std::ffi::OsString;
+
+    #[test]
+    fn hex_encode_matches_known_container_id() {
+        assert_eq!(hex_encode(b"c84041fe7f9f"), "633834303431666537663966");
+    }
+
+    #[test]
+    fn attached_container_uri_uses_hex_id_and_mount_target() {
+        let session = Session {
+            alias: "0042".to_string(),
+            container_id: "c84041fe7f9f".to_string(),
+            workspace: "api".to_string(),
+            template: "rust".to_string(),
+            name: "hh-session".to_string(),
+            mount_target: Some("/workspace".to_string()),
+        };
+        assert_eq!(
+            attached_container_uri(&session),
+            "vscode-remote://attached-container+633834303431666537663966/workspace"
+        );
+    }
+
+    #[test]
+    fn attached_container_uri_falls_back_to_workspace_root() {
+        let session = Session {
+            alias: "0042".to_string(),
+            container_id: "abc123".to_string(),
+            workspace: "api".to_string(),
+            template: "rust".to_string(),
+            name: "hh-session".to_string(),
+            mount_target: None,
+        };
+        assert_eq!(
+            attached_container_uri(&session),
+            "vscode-remote://attached-container+616263313233/workspace"
+        );
+    }
 
     #[test]
     fn numeric_ids_are_zero_padded_to_width_four() {

@@ -33,21 +33,31 @@ pub enum Command {
         path: Option<PathBuf>,
     },
     /// Open an interactive shell in a running session. With no id, lists the
-    /// running sessions and their ids. Pass `--kill ID` to terminate a
+    /// running sessions and their ids. Pass `ID --kill` to terminate a
     /// session. Any args after the id are passed verbatim to `docker exec` as
     /// the command to run instead of bash — e.g. `hht shell 0042 claude --resume`.
     Shell {
         #[arg(value_name = "ID")]
         id: Option<String>,
-        /// Terminate and remove a running session by ID.
-        #[arg(long, value_name = "ID", conflicts_with_all = ["id", "args"])]
-        kill: Option<String>,
+        /// Terminate and remove the named session instead of attaching to it.
+        #[arg(long, conflicts_with = "args")]
+        kill: bool,
         #[arg(
             value_name = "COMMAND",
             trailing_var_arg = true,
             allow_hyphen_values = true
         )]
         args: Vec<OsString>,
+    },
+    /// Open a running session's workspace in an external editor via its Dev
+    /// Containers "attached container" URI scheme — EDITOR is `vscode` or
+    /// `cursor`, and requires that editor's CLI (`code` or `cursor`
+    /// respectively) to be on PATH.
+    Open {
+        #[arg(value_name = "ID")]
+        id: String,
+        #[arg(value_name = "EDITOR")]
+        editor: OpenEditor,
     },
     /// Attach to (or start) a session for the current working directory.
     ///
@@ -113,6 +123,26 @@ pub enum Command {
     /// main thread / event loop; not intended for direct end-user use.
     #[command(name = "__dialog", hide = true, subcommand)]
     Dialog(DialogCommand),
+}
+
+/// Editors `hht open` knows how to launch. Each maps to a CLI binary that
+/// supports the Dev Containers `--folder-uri vscode-remote://attached-container+…`
+/// scheme.
+#[derive(Debug, Clone, clap::ValueEnum)]
+pub enum OpenEditor {
+    Vscode,
+    Cursor,
+}
+
+impl OpenEditor {
+    /// The CLI binary to invoke for this editor.
+    pub fn binary(&self) -> &'static str {
+        match self {
+            OpenEditor::Vscode => "code",
+            OpenEditor::Cursor => "cursor",
+        }
+    }
+  
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -198,7 +228,7 @@ pub fn parse() -> Result<Cli> {
 
 pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
     let usage = format!(
-        "Usage: {COMMAND_NAME} [init [PATH] | shell [ID] [COMMAND...] | workspace (ws) [OPTIONS] [COMMAND...] | shell --kill ID | rebuild [OPTIONS] [TEMPLATE...] | restart | install [--headless] | approvals COMMAND | uninstall]"
+        "Usage: {COMMAND_NAME} [init [PATH] | shell [ID] [COMMAND...] | shell ID --kill | open ID <vscode|cursor> | workspace (ws) [OPTIONS] [COMMAND...] | rebuild [OPTIONS] [TEMPLATE...] | restart | install [--headless] | uninstall | | approvals COMMAND]"
     );
     if raw.is_empty() {
         bail!("missing argv[0]. {usage}");
@@ -221,7 +251,7 @@ pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApprovalCommand, Command, DialogCommand, parse_from};
+    use super::{ApprovalCommand, Command, DialogCommand, OpenEditor, parse_from};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -251,14 +281,34 @@ mod tests {
         let cli = parse_from(argv(&["hht", "shell"])).expect("parse");
         assert!(matches!(
             cli.command,
-            Some(Command::Shell { id: None, kill: None, ref args }) if args.is_empty()
+            Some(Command::Shell { id: None, kill: false, ref args }) if args.is_empty()
         ));
 
         let cli = parse_from(argv(&["hht", "shell", "0042"])).expect("parse");
         assert!(matches!(
             cli.command,
-            Some(Command::Shell { id: Some(id), kill: None, ref args }) if id == "0042" && args.is_empty()
+            Some(Command::Shell { id: Some(id), kill: false, ref args }) if id == "0042" && args.is_empty()
         ));
+    }
+
+    #[test]
+    fn open_subcommand_parses_id_and_editor() {
+        let cli = parse_from(argv(&["hht", "open", "0042", "cursor"])).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Open { id, editor: OpenEditor::Cursor }) if id == "0042"
+        ));
+
+        let cli = parse_from(argv(&["hht", "open", "0042", "vscode"])).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Open { id, editor: OpenEditor::Vscode }) if id == "0042"
+        ));
+    }
+
+    #[test]
+    fn open_subcommand_rejects_unknown_editor() {
+        assert!(CliOptions::try_parse_from(argv(&["hht", "open", "0042", "bogus"])).is_err());
     }
 
     #[test]
@@ -346,7 +396,7 @@ mod tests {
         let cli = parse_from(argv(&["hht", "shell", "0042", "claude", "--resume"])).expect("parse");
         let Some(Command::Shell {
             id,
-            kill: None,
+            kill: false,
             args,
         }) = cli.command
         else {
@@ -362,11 +412,11 @@ mod tests {
     }
 
     #[test]
-    fn shell_subcommand_parses_kill_id() {
-        let cli = parse_from(argv(&["hht", "shell", "--kill", "42"])).expect("parse");
+    fn shell_subcommand_parses_kill_flag() {
+        let cli = parse_from(argv(&["hht", "shell", "42", "--kill"])).expect("parse");
         assert!(matches!(
             cli.command,
-            Some(Command::Shell { id: None, kill: Some(id), args }) if id == "42" && args.is_empty()
+            Some(Command::Shell { id: Some(id), kill: true, args }) if id == "42" && args.is_empty()
         ));
     }
 
