@@ -12,7 +12,7 @@ pub struct WorkspaceConfig {
     #[serde(default)]
     pub sidebar_hotkey: Option<String>,
     /// Optional primary-config override for the workspace container template.
-    /// Without this, `hht ws` remembers its selection in the
+    /// Without this, `hat ws` remembers its selection in the
     /// workspace's harness-rules.toml.
     #[serde(default)]
     pub template: Option<String>,

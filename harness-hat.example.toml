@@ -145,7 +145,7 @@ mode = "rw"
 # rather than a static config value, since `docker run --env-file`/`-e` sets a
 # literal PATH with no `$PATH` expansion. Without add_to_path, a mounted
 # directory not already on the image's PATH only resolves in an interactive
-# shell whose rc file happens to export it — never in `hht shell`/`hht ws`
+# shell whose rc file happens to export it — never in `hat shell`/`hat ws`
 # passthrough commands, which docker-exec directly with no shell in between.
 # [[defaults.containers.mounts]]
 # host = "~/go/bin"

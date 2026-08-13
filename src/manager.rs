@@ -8,9 +8,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-/// Run the interactive workspace manager (the default `hht` action).
+/// Run the interactive workspace manager (the default `hat` action).
 pub async fn run() -> Result<()> {
-    // A per-user daemon owns the control port after `hht install`. In that
+    // A per-user daemon owns the control port after `hat install`. In that
     // case the foreground command is an authenticated client of that daemon,
     // not a second manager competing to bind the same listener. `install`
     // always uses the global config, so favor it for an unqualified command
@@ -32,7 +32,7 @@ pub async fn run() -> Result<()> {
     run_inner(config_path, false, false).await
 }
 
-/// Run the terminal-free background agent installed by `hht install`.
+/// Run the terminal-free background agent installed by `hat install`.
 pub async fn run_service(config_path: PathBuf, headless_mode: bool) -> Result<()> {
     run_inner(config_path, true, headless_mode).await
 }

@@ -558,7 +558,7 @@ pub struct ServerState {
     pub docker_status: crate::container::DockerStatus,
 }
 
-/// A frame request from the foreground `hht` terminal. The daemon owns the
+/// A frame request from the foreground `hat` terminal. The daemon owns the
 /// real App; the client only supplies terminal input and displays its frames.
 pub struct TuiFrameItem {
     pub width: u16,
@@ -851,7 +851,7 @@ fn manager_unavailable_response() -> Response {
         .into_response()
 }
 
-/// Liveness probe used by `hht ws` to fail fast with a clear message
+/// Liveness probe used by `hat ws` to fail fast with a clear message
 /// when the manager isn't running. Intentionally no auth — the response
 /// contains nothing sensitive, and requiring the token would force every CLI
 /// caller to load and parse it just to print "manager not running."

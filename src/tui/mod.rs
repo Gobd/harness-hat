@@ -296,7 +296,7 @@ pub struct App {
     pub approval_control_rx: mpsc::Receiver<crate::server::ApprovalControlItem>,
     pub(crate) workspace_launch_pending: Option<WorkspaceLaunchPending>,
     pub net_pending_rx: mpsc::Receiver<PendingNetworkItem>,
-    // Native OS approval dialog (macOS): results of finished `hht __dialog`
+    // Native OS approval dialog (macOS): results of finished `hat __dialog`
     // subprocesses come back here; `inflight` holds the activity id of the one
     // dialog currently on screen so we never pop two at once.
     background_channels: BackgroundUiChannels,
@@ -788,7 +788,7 @@ fn push_color(frame: &mut Vec<u8>, color: Color, foreground: bool) {
 }
 
 fn render_relay_error(error: &str) -> Vec<u8> {
-    format!("\x1b[2J\x1b[H\x1b[31mHarness Hat could not render the attached TUI:\x1b[0m\r\n{error}\r\n\r\nCheck the Harness Hat daemon log and restart the service with `hht install`.\r\n")
+    format!("\x1b[2J\x1b[H\x1b[31mHarness Hat could not render the attached TUI:\x1b[0m\r\n{error}\r\n\r\nCheck the Harness Hat daemon log and restart the service with `hat install`.\r\n")
         .into_bytes()
 }
 

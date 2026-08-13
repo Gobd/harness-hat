@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # harness-hat base image — shared foundation for all language images.
-# After modifying this file, rebuild with: hht rebuild
+# After modifying this file, rebuild with: hat rebuild
 # (This also rebuilds every configured Dockerfile template that extends it.)
 
 FROM rust:1.88-slim-bookworm AS tun2proxy-build

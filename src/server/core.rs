@@ -91,13 +91,13 @@ pub(super) async fn exec_handler(
         )
             .into_response();
     }
-    if crate::rules::hostdo_invokes_hht(&req.argv) {
+    if crate::rules::hostdo_invokes_hat(&req.argv) {
         return deny_with_audit(
             &state,
             &identity.workspace_name,
             &req.argv,
             &req.cwd,
-            "invoking hht through hostdo is forbidden",
+            "invoking hat through hostdo is forbidden",
         )
         .await;
     }
@@ -1196,8 +1196,8 @@ fn build_command(run: &CommandRun) -> Result<TokioCommand, ExecFailure> {
         cmd.envs(vars);
     }
     // Mark the entire process tree as originating from hostdo. A directly
-    // requested hht executable is rejected before policy matching; this
-    // inherited marker also makes hht refuse ordinary shell/script wrappers.
+    // requested hat executable is rejected before policy matching; this
+    // inherited marker also makes hat refuse ordinary shell/script wrappers.
     cmd.env(crate::cli::HOSTDO_CHILD_ENV, "1");
     // Place each spawned process in its own process group so kill_child_and_group
     // can reach all descendants, not just the direct child.

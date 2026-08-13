@@ -160,7 +160,7 @@ impl App {
             if action != ApprovalAction::Trust {
                 return Err(incompatible(
                     &id,
-                    "rules changes require `hht approvals trust ID`",
+                    "rules changes require `hat approvals trust ID`",
                 ));
             }
             self.trust_changed_rules()?;

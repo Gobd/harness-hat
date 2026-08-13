@@ -26,7 +26,7 @@ pub(crate) fn hide_tokio_console_window(command: &mut tokio::process::Command) {
 /// uninstall), so task deletion alone is not sufficient. Enumerating by image
 /// name also catches daemons started by an older task definition.
 #[cfg(windows)]
-pub(crate) fn terminate_hht_daemons() -> std::io::Result<()> {
+pub(crate) fn terminate_hat_daemons() -> std::io::Result<()> {
     use std::mem::size_of;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -81,7 +81,10 @@ pub(crate) fn terminate_hht_daemons() -> std::io::Result<()> {
             .position(|&value| value == 0)
             .unwrap_or(entry.szExeFile.len());
         let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
-        if !name.eq_ignore_ascii_case("hht-daemon.exe") {
+        if !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "hat-daemon.exe" | "hht-daemon.exe"
+        ) {
             return Ok(());
         }
         let mut process_session_id = 0;

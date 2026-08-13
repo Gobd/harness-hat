@@ -21,7 +21,7 @@ const WINDOWS_TASK: &str = "Harness Hat";
 pub fn install(explicit_config: Option<PathBuf>, headless: bool) -> Result<()> {
     ensure_normal_user()?;
     if headless && !cfg!(target_os = "linux") {
-        bail!("hht install --headless is supported on Linux only");
+        bail!("hat install --headless is supported on Linux only");
     }
     let (config_path, created_config) = resolve_config_path(explicit_config)?;
     if created_config {
@@ -31,9 +31,9 @@ pub fn install(explicit_config: Option<PathBuf>, headless: bool) -> Result<()> {
     // catches an invalid Docker directory rather than creating a restart loop.
     crate::config::load(&config_path)?;
     let executable = std::env::current_exe()
-        .context("locating the current hht executable")?
+        .context("locating the current hat executable")?
         .canonicalize()
-        .context("canonicalizing the current hht executable")?;
+        .context("canonicalizing the current hat executable")?;
     let service_executable = daemon_executable(&executable)?;
 
     #[cfg(target_os = "macos")]
@@ -43,7 +43,7 @@ pub fn install(explicit_config: Option<PathBuf>, headless: bool) -> Result<()> {
     #[cfg(target_os = "windows")]
     install_windows(&service_executable, &config_path)?;
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    bail!("hht install supports macOS, Linux with systemd, and Windows only");
+    bail!("hat install supports macOS, Linux with systemd, and Windows only");
 
     if headless {
         println!("Harness Hat headless background agent installed for this user.");
@@ -63,7 +63,7 @@ pub fn uninstall() -> Result<()> {
     #[cfg(target_os = "windows")]
     uninstall_windows()?;
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    bail!("hht uninstall supports macOS, Linux with systemd, and Windows only");
+    bail!("hat uninstall supports macOS, Linux with systemd, and Windows only");
 
     println!("Harness Hat background agent removed for this user.");
     Ok(())
@@ -72,26 +72,26 @@ pub fn uninstall() -> Result<()> {
 fn ensure_normal_user() -> Result<()> {
     #[cfg(unix)]
     if unsafe { libc::geteuid() } == 0 {
-        bail!("hht install/uninstall must run as a normal user; do not use sudo");
+        bail!("hat install/uninstall must run as a normal user; do not use sudo");
     }
     Ok(())
 }
 
 fn daemon_executable(current: &Path) -> Result<PathBuf> {
     let Some(parent) = current.parent() else {
-        bail!("cannot locate hht-daemon next to {}", current.display());
+        bail!("cannot locate hat-daemon next to {}", current.display());
     };
     let daemon_name = if cfg!(target_os = "windows") {
-        "hht-daemon.exe"
+        "hat-daemon.exe"
     } else {
-        "hht-daemon"
+        "hat-daemon"
     };
     let candidate = parent.join(daemon_name);
     if candidate.is_file() {
         Ok(candidate)
     } else {
         bail!(
-            "hht-daemon was not found next to {}; reinstall Harness Hat so the background service binary is available",
+            "hat-daemon was not found next to {}; reinstall Harness Hat so the background service binary is available",
             current.display()
         )
     }
@@ -330,7 +330,7 @@ fn uninstall_windows() -> Result<()> {
     // installation whose task definition has already disappeared.
     run_windows_quietly("schtasks", &["/End", "/TN", WINDOWS_TASK]);
     run_windows_quietly("schtasks", &["/Delete", "/TN", WINDOWS_TASK, "/F"]);
-    crate::process_util::terminate_hht_daemons()
+    crate::process_util::terminate_hat_daemons()
         .context("terminating running Harness Hat daemon processes")?;
     Ok(())
 }
@@ -423,12 +423,12 @@ mod tests {
     #[test]
     fn systemd_unit_quotes_paths_and_uses_internal_service_mode() {
         let unit = render_systemd_unit(
-            Path::new("/home/me/.cargo/bin/hht"),
+            Path::new("/home/me/.cargo/bin/hat"),
             Path::new("/home/me/My Config/harness-hat.toml"),
             false,
         );
         assert!(unit.contains(
-            "ExecStart=\"/home/me/.cargo/bin/hht\" --config \"/home/me/My Config/harness-hat.toml\""
+            "ExecStart=\"/home/me/.cargo/bin/hat\" --config \"/home/me/My Config/harness-hat.toml\""
         ));
         assert!(unit.contains("Restart=on-failure"));
     }
@@ -436,14 +436,14 @@ mod tests {
     #[test]
     fn systemd_unit_escapes_specifier_characters() {
         let unit =
-            render_systemd_unit(Path::new("/home/me/hht%stable"), Path::new("/tmp/x"), false);
-        assert!(unit.contains("hht%%stable"));
+            render_systemd_unit(Path::new("/home/me/hat%stable"), Path::new("/tmp/x"), false);
+        assert!(unit.contains("hat%%stable"));
     }
 
     #[test]
     fn headless_systemd_unit_has_no_graphical_dependency() {
         let unit = render_systemd_unit(
-            Path::new("/home/me/.cargo/bin/hht-daemon"),
+            Path::new("/home/me/.cargo/bin/hat-daemon"),
             Path::new("/home/me/.config/harness-hat/harness-hat.toml"),
             true,
         );
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn launchd_plist_escapes_arguments() {
         let plist = render_launchd_plist(
-            Path::new("/Applications/Harness & Hat/hht"),
+            Path::new("/Applications/Harness & Hat/hat"),
             Path::new("/Users/me/rules & config.toml"),
         );
         assert!(plist.contains("Harness &amp; Hat"));
@@ -469,11 +469,11 @@ mod tests {
     #[test]
     fn daemon_executable_uses_sibling_when_present() {
         let dir = tempfile::tempdir().unwrap();
-        let current = dir.path().join("hht");
+        let current = dir.path().join("hat");
         let daemon = dir.path().join(if cfg!(target_os = "windows") {
-            "hht-daemon.exe"
+            "hat-daemon.exe"
         } else {
-            "hht-daemon"
+            "hat-daemon"
         });
         std::fs::write(&daemon, b"daemon").unwrap();
         assert_eq!(daemon_executable(&current).unwrap(), daemon);

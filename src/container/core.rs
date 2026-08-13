@@ -30,7 +30,7 @@ const INPUT_ECHO_GRACE: Duration = Duration::from_millis(350);
 pub const TERMINAL_SCROLLBACK_LINES: usize = 10_000;
 
 /// Docker label keys stamped on every harness-hat container so that other
-/// processes (e.g. `hht sh`) can discover and identify running sessions
+/// processes (e.g. `hat sh`) can discover and identify running sessions
 /// without depending on the manager being alive.
 pub const LABEL_ALIAS: &str = "harness-hat.alias";
 pub const LABEL_WORKSPACE: &str = "harness-hat.workspace";
@@ -70,7 +70,7 @@ pub struct ContainerSession {
     pub container_name: String,
     pub container_id: String,
     pub docker_name: String,
-    /// Monotonically increasing integer id used by `hht sh <alias>`.
+    /// Monotonically increasing integer id used by `hat sh <alias>`.
     pub alias: String,
     pub workspace_name: String,
     pub session_token: String,
@@ -295,7 +295,7 @@ impl ContainerSession {
         format!("{} sh {}", crate::cli::COMMAND_NAME, self.alias)
     }
 
-    /// Every useful `hht sh` form for this session. Keep this list next to the
+    /// Every useful `hat sh` form for this session. Keep this list next to the
     /// session identity so the TUI and reconnect messages use the same ID.
     pub fn shell_commands(&self) -> [String; 4] {
         let base = self.shell_in_hint();

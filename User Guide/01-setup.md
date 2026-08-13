@@ -14,7 +14,7 @@ Install a current Docker engine or Docker Desktop for your host:
 
 On Windows, switch Docker Desktop to **Linux containers**. Harness Hat does not support Windows containers.
 
-Start Docker, then verify that the same user who will run `hht` can use it:
+Start Docker, then verify that the same user who will run `hat` can use it:
 
 Run the following commands in a **terminal**.
 
@@ -46,10 +46,10 @@ In a **terminal**, install Harness Hat with Cargo:
 
 ```sh
 cargo install harness-hat
-hht --version
+hat --version
 ```
 
-> **Expected result:** Cargo finishes without an error and `hht --version` prints a Harness Hat version. If `hht` is not found, open a new terminal and run `hht --version` again before retrying the install.
+> **Expected result:** Cargo finishes without an error and `hat --version` prints a Harness Hat version. If `hat` is not found, open a new terminal and run `hat --version` again before retrying the install.
 
 
 ## Step 4: Install Claude Code Locally
@@ -77,25 +77,25 @@ This guide uses one global configuration file for every developer:
 ~/.config/harness-hat/harness-hat.toml
 ```
 
-Run `hht install` as your normal signed-in desktop user. Do not prefix it with `sudo`: the agent is per-user so it can access your Docker Desktop session and display approval dialogs. On its first run, it creates that default global config and its Docker assets, then installs the required per-user graphical background agent:
+Run `hat install` as your normal signed-in desktop user. Do not prefix it with `sudo`: the agent is per-user so it can access your Docker Desktop session and display approval dialogs. On its first run, it creates that default global config and its Docker assets, then installs the required per-user graphical background agent:
 
 ```sh
-hht install
+hat install
 ```
 
-> **Expected result:** the first run reports that it created the default global config at `~/.config/harness-hat/harness-hat.toml`, then reports that the background agent was installed for the current desktop user. Later runs keep the existing config and reinstall the agent. If installation fails, first confirm `docker version` and `hht --version` work in the same terminal; then restart the terminal and retry.
+> **Expected result:** the first run reports that it created the default global config at `~/.config/harness-hat/harness-hat.toml`, then reports that the background agent was installed for the current desktop user. Later runs keep the existing config and reinstall the agent. If installation fails, first confirm `docker version` and `hat --version` work in the same terminal; then restart the terminal and retry.
 
 ### Headless Linux hosts
 
 For a Linux machine reached through SSH with no graphical session, install the per-user service with:
 
 ```sh
-hht install --headless
+hat install --headless
 ```
 
-Run this as the normal Docker-enabled user, not with `sudo`. Harness Hat uses `loginctl enable-linger` for that user, allowing the `systemd --user` service to start at boot and remain active after logout. If lingering cannot be enabled, installation stops with an error instead of installing a service that silently disappears after the SSH session ends. `hht uninstall` does not disable lingering because other user services may depend on it.
+Run this as the normal Docker-enabled user, not with `sudo`. Harness Hat uses `loginctl enable-linger` for that user, allowing the `systemd --user` service to start at boot and remain active after logout. If lingering cannot be enabled, installation stops with an error instead of installing a service that silently disappears after the SSH session ends. `hat uninstall` does not disable lingering because other user services may depend on it.
 
-Headless installs never attempt to display native dialogs. Use `hht approvals` over SSH or attach the normal `hht` TUI to handle queued requests.
+Headless installs never attempt to display native dialogs. Use `hat approvals` over SSH or attach the normal `hat` TUI to handle queued requests.
 
 
 Continue with [Workspaces](02-workspaces.md).

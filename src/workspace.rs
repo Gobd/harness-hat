@@ -1,6 +1,6 @@
-//! `hht ws` — attach to (or start) a session for `$PWD`.
+//! `hat ws` — attach to (or start) a session for `$PWD`.
 //!
-//! This subcommand needs a running manager (the `hht` default action) to do
+//! This subcommand needs a running manager (the `hat` default action) to do
 //! anything useful: it discovers the manager via the same config file the
 //! manager itself loaded, then either docker-execs into an existing session
 //! for the matched workspace or asks the manager (via `POST /workspace/launch`)
@@ -235,7 +235,7 @@ fn status(launch_only: bool, message: String) {
 /// Request the daemon's session-preserving backend refresh. This is not a
 /// service/binary restart: running `docker run --rm -it` sessions remain live.
 pub fn restart() -> Result<()> {
-    // Match normal `hht` daemon attachment: the installed service owns the
+    // Match normal `hat` daemon attachment: the installed service owns the
     // global config even if the caller happens to be inside a project with a
     // local config. Fall back to ordinary discovery for standalone managers.
     let config_path = crate::manager::default_home_config_path()

@@ -697,8 +697,8 @@ fn validate_hostdo_rules(entries: &[HostdoCommand], path: &Path) -> Result<()> {
             path.display()
         );
         anyhow::ensure!(
-            !hostdo_invokes_hht(&entry.argv),
-            "invalid [hostdo].commands entry '{}' in {}: invoking hht through hostdo is forbidden",
+            !hostdo_invokes_hat(&entry.argv),
+            "invalid [hostdo].commands entry '{}' in {}: invoking hat through hostdo is forbidden",
             entry.argv.join(" "),
             path.display()
         );
@@ -725,7 +725,9 @@ fn validate_hostdo_rules(entries: &[HostdoCommand], path: &Path) -> Result<()> {
 /// Return true when a hostdo argv directly targets the Harness Hat CLI.
 /// Accept both container/Unix and Windows path separators because rules may be
 /// shared across hosts, and compare case-insensitively for Windows parity.
-pub(crate) fn hostdo_invokes_hht(argv: &[String]) -> bool {
+/// Legacy `hht` names remain blocked so an older installed binary cannot bypass
+/// the hostdo restriction during the CLI rename.
+pub(crate) fn hostdo_invokes_hat(argv: &[String]) -> bool {
     let Some(executable) = argv.first() else {
         return false;
     };
@@ -734,7 +736,10 @@ pub(crate) fn hostdo_invokes_hht(argv: &[String]) -> bool {
         .next()
         .unwrap_or(executable)
         .trim();
-    basename.eq_ignore_ascii_case("hht") || basename.eq_ignore_ascii_case("hht.exe")
+    matches!(
+        basename.to_ascii_lowercase().as_str(),
+        "hat" | "hat.exe" | "hht" | "hht.exe"
+    )
 }
 
 /// Persist a host command approval for future requests.
@@ -754,8 +759,8 @@ pub fn append_hostdo_auto_approval(
         return Ok(false);
     }
     anyhow::ensure!(
-        !hostdo_invokes_hht(argv),
-        "invoking hht through hostdo is forbidden"
+        !hostdo_invokes_hat(argv),
+        "invoking hat through hostdo is forbidden"
     );
     let timeout_secs = clamp_hostdo_timeout_secs(timeout_secs);
 
@@ -856,7 +861,7 @@ const RULES_FILE_HEADER: &str = "\
 # container instead of `/workspace`. Windows drive paths use a best-effort
 # container path such as `/C/Users/example/project`.
 #
-# Preferred session template (saved by `hht ws` after the first choice):
+# Preferred session template (saved by `hat ws` after the first choice):
 # template = \"rust\"
 # A `template` value in the matching `[[workspaces]]` entry in
 # harness-hat.toml overrides this value.

@@ -15,7 +15,7 @@ Choose exactly one method for Harness Hat sessions:
 - **Recommended: `CLAUDE_CODE_OAUTH_TOKEN`.** Create it with `claude setup-token`; it stays tied to the user's Claude account and is the standard path for this guide.
 - **Alternative: `ANTHROPIC_API_KEY`.** Use this when the developer or organization provides an Anthropic API key instead.
 
-The default configuration created by `hht install` passes either variable into new sessions. Set only one.
+The default configuration created by `hat install` passes either variable into new sessions. Set only one.
 
 ## Recommended: Claude Setup Token
 
@@ -41,7 +41,7 @@ export ANTHROPIC_API_KEY="sk-ant-api03-..."
 
 ## Keep Authentication After Restarting The Terminal
 
-Save only the method you chose in the startup profile for the **terminal** you use to run `hht`. Use `CLAUDE_CODE_OAUTH_TOKEN` unless you deliberately chose the API-key alternative.
+Save only the method you chose in the startup profile for the **terminal** you use to run `hat`. Use `CLAUDE_CODE_OAUTH_TOKEN` unless you deliberately chose the API-key alternative.
 
 First, identify the shell used by the current **terminal**:
 
@@ -107,9 +107,9 @@ Run this in a **terminal** to enter the session:
 
 ```sh
 cd ~/my-awesome-project
-hht ws claude
+hat ws claude
 # Or resume a Claude conversation:
-hht ws claude --resume
+hat ws claude --resume
 ```
 
 > **Expected result:** Harness Hat opens the session and starts Claude. In the session, `/status` should show an authenticated Claude session rather than requesting a browser login.

@@ -214,7 +214,7 @@ fn write_text_file(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    // These files execute inside Linux containers even when `hht init` runs on
+    // These files execute inside Linux containers even when `hat init` runs on
     // Windows. Keep their shebangs and Dockerfile heredocs free of CRLF.
     fs::write(path, contents.replace("\r\n", "\n"))?;
     Ok(())

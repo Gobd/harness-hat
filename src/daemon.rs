@@ -4,7 +4,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "hht-daemon", about = "Harness Hat background service")]
+#[command(name = "hat-daemon", about = "Harness Hat background service")]
 struct Args {
     /// Path to the global Harness Hat configuration.
     #[arg(long)]

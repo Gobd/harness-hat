@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
             let path = path.unwrap_or_else(|| std::path::PathBuf::from("harness-hat.toml"));
             harness_hat::init::write_sample_config(&path)?;
             println!("config written to: {}", path.display());
-            println!("Run `hht install` to create and start the default background service.");
+            println!("Run `hat install` to create and start the default background service.");
         }
         Some(Command::Shell {
             id,

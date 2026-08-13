@@ -3,15 +3,15 @@ use clap::{Parser, Subcommand};
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-pub const COMMAND_NAME: &str = "hht";
+pub const COMMAND_NAME: &str = "hat";
 pub const HOSTDO_CHILD_ENV: &str = "HARNESS_HAT_HOSTDO_CHILD";
 
 /// Refuse to run the Harness Hat control CLI from a hostdo descendant. The
-/// exec endpoint also blocks direct hht argv, while this inherited marker
+/// exec endpoint also blocks direct hat argv, while this inherited marker
 /// catches ordinary shell/script wrappers before CLI parsing or side effects.
 pub fn ensure_not_hostdo_child() -> Result<()> {
     if std::env::var_os(HOSTDO_CHILD_ENV).is_some_and(|value| value == "1") {
-        bail!("hht cannot be invoked through hostdo");
+        bail!("hat cannot be invoked through hostdo");
     }
     Ok(())
 }
@@ -23,7 +23,7 @@ struct CliOptions {
     command: Option<Command>,
 }
 
-/// Subcommands. When none is given, `hht` launches the interactive manager or
+/// Subcommands. When none is given, `hat` launches the interactive manager or
 /// attaches to an installed background daemon.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
@@ -65,7 +65,7 @@ pub enum Command {
     /// config file using the directory's basename as the workspace name.
     ///
     /// Any args after the subcommand are passed verbatim to `docker exec`
-    /// (same passthrough behavior as `hht sh ID …`).
+    /// (same passthrough behavior as `hat sh ID …`).
     #[command(name = "ws", visible_alias = "workspace", alias = "wp")]
     Workspace {
         /// List configured workspaces without starting or attaching to a session.
@@ -255,7 +255,7 @@ pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
         Err(err) => err.exit(),
     };
     if raw.get(1).is_some_and(|arg| arg == "wp") {
-        eprintln!("warning: `hht wp` is deprecated; use `hht ws` instead");
+        eprintln!("warning: `hat wp` is deprecated; use `hat ws` instead");
     }
     let command = normalize_actions(options.command)?;
     Ok(Cli { command })
@@ -356,16 +356,16 @@ mod tests {
 
     #[test]
     fn bare_invocation_has_no_subcommand() {
-        let cli = parse_from(argv(&["hht"])).expect("parse");
+        let cli = parse_from(argv(&["hat"])).expect("parse");
         assert!(cli.command.is_none());
     }
 
     #[test]
     fn init_subcommand_takes_optional_path() {
-        let cli = parse_from(argv(&["hht", "init"])).expect("parse");
+        let cli = parse_from(argv(&["hat", "init"])).expect("parse");
         assert!(matches!(cli.command, Some(Command::Init { path: None })));
 
-        let cli = parse_from(argv(&["hht", "init", "custom.toml"])).expect("parse");
+        let cli = parse_from(argv(&["hat", "init", "custom.toml"])).expect("parse");
         assert!(
             matches!(cli.command, Some(Command::Init { path: Some(p) }) if p == PathBuf::from("custom.toml"))
         );
@@ -373,13 +373,13 @@ mod tests {
 
     #[test]
     fn shell_subcommand_takes_optional_id() {
-        let cli = parse_from(argv(&["hht", "shell"])).expect("parse");
+        let cli = parse_from(argv(&["hat", "shell"])).expect("parse");
         assert!(matches!(
             cli.command,
             Some(Command::Shell { id: None, path: None, kill: false, ref args, open: None }) if args.is_empty()
         ));
 
-        let cli = parse_from(argv(&["hht", "shell", "42"])).expect("parse");
+        let cli = parse_from(argv(&["hat", "shell", "42"])).expect("parse");
         assert!(matches!(
             cli.command,
             Some(Command::Shell { id: Some(id), path: None, kill: false, ref args, open: None }) if id == "42" && args.is_empty()
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn shell_open_action_parses_id_and_editor() {
-        let cli = parse_from(argv(&["hht", "sh", "42", "open", "codium"])).expect("parse");
+        let cli = parse_from(argv(&["hat", "sh", "42", "open", "codium"])).expect("parse");
         let Some(Command::Shell {
             id: Some(id),
             open: Some(editor),
@@ -405,19 +405,19 @@ mod tests {
 
     #[test]
     fn nested_open_action_accepts_any_single_executable_name() {
-        assert!(parse_from(argv(&["hht", "sh", "42", "open", "notepad"])).is_ok());
-        assert!(parse_from(argv(&["hht", "sh", "42", "open", "my-editor"])).is_ok());
+        assert!(parse_from(argv(&["hat", "sh", "42", "open", "notepad"])).is_ok());
+        assert!(parse_from(argv(&["hat", "sh", "42", "open", "my-editor"])).is_ok());
     }
 
     #[test]
     fn nested_open_action_rejects_paths_and_extra_arguments() {
-        assert!(parse_from(argv(&["hht", "sh", "42", "open", "./editor"])).is_err());
-        assert!(parse_from(argv(&["hht", "sh", "42", "open", "editor", "--wait"])).is_err());
+        assert!(parse_from(argv(&["hat", "sh", "42", "open", "./editor"])).is_err());
+        assert!(parse_from(argv(&["hat", "sh", "42", "open", "editor", "--wait"])).is_err());
     }
 
     #[test]
     fn workspace_subcommand_parses_template_and_trailing_args() {
-        let cli = parse_from(argv(&["hht", "workspace"])).expect("parse");
+        let cli = parse_from(argv(&["hat", "workspace"])).expect("parse");
         let Some(Command::Workspace {
             template,
             args,
@@ -431,7 +431,7 @@ mod tests {
         assert!(args.is_empty());
 
         let cli = parse_from(argv(&[
-            "hht",
+            "hat",
             "workspace",
             "--template",
             "dev",
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn ws_alias_parses_as_workspace_and_preserves_trailing_args() {
-        let cli = parse_from(argv(&["hht", "ws", ".."])).expect("parse");
+        let cli = parse_from(argv(&["hat", "ws", ".."])).expect("parse");
         let Some(Command::Workspace {
             args, open: None, ..
         }) = cli.command
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn wp_alias_remains_compatible_and_preserves_trailing_args() {
-        let cli = parse_from(argv(&["hht", "wp", ".."])).expect("parse");
+        let cli = parse_from(argv(&["hat", "wp", ".."])).expect("parse");
         let Some(Command::Workspace {
             args, open: None, ..
         }) = cli.command
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn workspace_subcommand_parses_list() {
-        let cli = parse_from(argv(&["hht", "ws", "--list"])).expect("parse");
+        let cli = parse_from(argv(&["hat", "ws", "--list"])).expect("parse");
         assert!(matches!(
             cli.command,
             Some(Command::Workspace { list: true, .. })
@@ -493,7 +493,7 @@ mod tests {
     #[test]
     fn rebuild_subcommand_parses_cache_and_template_options() {
         let cli =
-            parse_from(argv(&["hht", "rebuild", "--no-cache", "go", "python"])).expect("parse");
+            parse_from(argv(&["hat", "rebuild", "--no-cache", "go", "python"])).expect("parse");
         let Some(Command::Rebuild {
             no_cache,
             templates,
@@ -508,14 +508,14 @@ mod tests {
     #[test]
     fn restart_parses_as_a_top_level_command() {
         assert!(matches!(
-            parse_from(argv(&["hht", "restart"])).unwrap().command,
+            parse_from(argv(&["hat", "restart"])).unwrap().command,
             Some(Command::Restart)
         ));
     }
 
     #[test]
     fn shell_subcommand_collects_trailing_args_verbatim() {
-        let cli = parse_from(argv(&["hht", "shell", "42", "claude", "--resume"])).expect("parse");
+        let cli = parse_from(argv(&["hat", "shell", "42", "claude", "--resume"])).expect("parse");
         let Some(Command::Shell {
             id,
             path: None,
@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn shell_subcommand_parses_kill_flag() {
-        let cli = parse_from(argv(&["hht", "shell", "42", "--kill"])).expect("parse");
+        let cli = parse_from(argv(&["hat", "shell", "42", "--kill"])).expect("parse");
         assert!(matches!(
             cli.command,
             Some(Command::Shell { id: Some(id), path: None, kill: true, args, open: None }) if id == "42" && args.is_empty()
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn shell_new_requires_path_and_preserves_directory() {
-        let cli = parse_from(argv(&["hht", "sh", "new", "--path", "."])).expect("parse");
+        let cli = parse_from(argv(&["hat", "sh", "new", "--path", "."])).expect("parse");
         assert!(matches!(
             cli.command,
             Some(Command::Shell {
@@ -557,15 +557,15 @@ mod tests {
                 ref args,
             }) if id == "new" && path == PathBuf::from(".") && args.is_empty()
         ));
-        assert!(parse_from(argv(&["hht", "sh", "new"])).is_err());
-        assert!(parse_from(argv(&["hht", "sh", "new", "."])).is_err());
-        assert!(parse_from(argv(&["hht", "sh", "new", "--path", ".", "echo"])).is_err());
-        assert!(parse_from(argv(&["hht", "sh", "new", "--path", ".", "--kill"])).is_err());
+        assert!(parse_from(argv(&["hat", "sh", "new"])).is_err());
+        assert!(parse_from(argv(&["hat", "sh", "new", "."])).is_err());
+        assert!(parse_from(argv(&["hat", "sh", "new", "--path", ".", "echo"])).is_err());
+        assert!(parse_from(argv(&["hat", "sh", "new", "--path", ".", "--kill"])).is_err());
     }
 
     #[test]
     fn workspace_new_and_open_actions_parse() {
-        let cli = parse_from(argv(&["hht", "ws", "--new", "open", "vscode"])).expect("parse");
+        let cli = parse_from(argv(&["hat", "ws", "--new", "open", "vscode"])).expect("parse");
         assert!(matches!(
             cli.command,
             Some(Command::Workspace {
@@ -575,13 +575,13 @@ mod tests {
                 ..
             }) if args.is_empty() && editor.binary() == OsStr::new("vscode")
         ));
-        assert!(parse_from(argv(&["hht", "ws", "--path", "."])).is_err());
+        assert!(parse_from(argv(&["hat", "ws", "--path", "."])).is_err());
     }
 
     #[test]
     fn rules_changed_dialog_parses_its_file_path() {
         let cli = parse_from(argv(&[
-            "hht",
+            "hat",
             "__dialog",
             "rules-changed",
             "--path",
@@ -598,17 +598,17 @@ mod tests {
     #[test]
     fn install_and_uninstall_parse_as_top_level_commands() {
         assert!(matches!(
-            parse_from(argv(&["hht", "install"])).unwrap().command,
+            parse_from(argv(&["hat", "install"])).unwrap().command,
             Some(Command::Install { headless: false })
         ));
         assert!(matches!(
-            parse_from(argv(&["hht", "install", "--headless"]))
+            parse_from(argv(&["hat", "install", "--headless"]))
                 .unwrap()
                 .command,
             Some(Command::Install { headless: true })
         ));
         assert!(matches!(
-            parse_from(argv(&["hht", "uninstall"])).unwrap().command,
+            parse_from(argv(&["hat", "uninstall"])).unwrap().command,
             Some(Command::Uninstall)
         ));
     }
@@ -616,7 +616,7 @@ mod tests {
     #[test]
     fn approvals_subcommands_parse() {
         assert!(matches!(
-            parse_from(argv(&["hht", "approvals", "list", "--json"]))
+            parse_from(argv(&["hat", "approvals", "list", "--json"]))
                 .unwrap()
                 .command,
             Some(Command::Approvals {
@@ -624,7 +624,7 @@ mod tests {
             })
         ));
         assert!(matches!(
-            parse_from(argv(&["hht", "approvals", "allow", "42", "--remember"]))
+            parse_from(argv(&["hat", "approvals", "allow", "42", "--remember"]))
                 .unwrap()
                 .command,
             Some(Command::Approvals {
@@ -632,7 +632,7 @@ mod tests {
             }) if id == "42"
         ));
         assert!(matches!(
-            parse_from(argv(&["hht", "approvals", "deny", "0042"]))
+            parse_from(argv(&["hat", "approvals", "deny", "0042"]))
                 .unwrap()
                 .command,
             Some(Command::Approvals {
@@ -640,7 +640,7 @@ mod tests {
             }) if id == "0042"
         ));
         assert!(matches!(
-            parse_from(argv(&["hht", "approvals", "trust", "7"]))
+            parse_from(argv(&["hat", "approvals", "trust", "7"]))
                 .unwrap()
                 .command,
             Some(Command::Approvals {

@@ -1,4 +1,4 @@
-//! `hht rebuild` — rebuild the base image and configured Dockerfile templates.
+//! `hat rebuild` — rebuild the base image and configured Dockerfile templates.
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;

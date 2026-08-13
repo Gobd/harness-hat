@@ -1,4 +1,4 @@
-//! `hht sh` — operate on a running session.
+//! `hat sh` — operate on a running session.
 //!
 //! This is a pure-Docker passthrough: it discovers sessions purely from the
 //! discovery labels stamped at launch (`harness-hat.alias` etc.) and attaches
@@ -8,7 +8,7 @@
 //! Sessions only exist while the manager is running. Each session container is
 //! launched as `docker run --rm -it` owned by the manager's PTY, so quitting
 //! the manager (or that session's terminal) tears the container down and
-//! `--rm` removes it. `hht sh` therefore only finds a session while the
+//! `--rm` removes it. `hat sh` therefore only finds a session while the
 //! manager that launched it is still running — run it from a second terminal
 //! alongside the live manager.
 
@@ -289,7 +289,7 @@ fn read_container_label(container_name: &str, label: &str) -> Result<String> {
 }
 
 /// host-terminal cleanup the interactive shell flow needs. Reused by
-/// `hht ws`.
+/// `hat ws`.
 ///
 /// Don't `exec()` into docker exec. If the manager exits while this shell is
 /// attached, the `docker run --rm` container dies and `docker exec` is ripped
@@ -603,7 +603,7 @@ mod tests {
     #[test]
     fn missing_editor_reports_path_error() {
         let editor = OpenEditor::new(OsString::from(
-            "hht-editor-does-not-exist-for-path-resolution-test",
+            "hat-editor-does-not-exist-for-path-resolution-test",
         ))
         .expect("editor name");
         let error = resolve_editor(&editor).expect_err("missing editor should fail");

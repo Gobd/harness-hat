@@ -3,7 +3,7 @@
 //!
 //! The manager process owns the OS main thread (current-thread tokio + the
 //! TUI), so it can't host an AppKit/Win32 modal directly. Instead it spawns a
-//! short-lived `hht __dialog network-approval ...` subprocess that has its own
+//! short-lived `hat __dialog network-approval ...` subprocess that has its own
 //! main thread, shows the dialog, and prints a single result line. This module
 //! launches that subprocess for the front pending item, collects its result,
 //! and feeds the decision back through the existing approve/deny paths.
@@ -346,8 +346,8 @@ async fn run_native_rules_changed_dialog_subprocess(req: &RulesChangedRequest) -
     Outcome::decode(line).unwrap_or(Outcome::Cancelled)
 }
 
-/// Native dialog subcommands belong to the user-facing `hht` binary, not the
-/// `hht-daemon` service binary. The daemon is deliberately a narrow process
+/// Native dialog subcommands belong to the user-facing `hat` binary, not the
+/// `hat-daemon` service binary. The daemon is deliberately a narrow process
 /// that accepts only its service configuration, so using `current_exe()` here
 /// would turn every prompt into an unknown-argument failure and fail closed.
 fn dialog_executable() -> Result<std::path::PathBuf, String> {
@@ -359,21 +359,21 @@ fn dialog_executable() -> Result<std::path::PathBuf, String> {
 fn dialog_executable_next_to(current: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let parent = current.parent().ok_or_else(|| {
         format!(
-            "cannot locate hht next to current executable {}",
+            "cannot locate hat next to current executable {}",
             current.display()
         )
     })?;
     let name = if cfg!(target_os = "windows") {
-        "hht.exe"
+        "hat.exe"
     } else {
-        "hht"
+        "hat"
     };
     let candidate = parent.join(name);
     if candidate.is_file() {
         Ok(candidate)
     } else {
         Err(format!(
-            "hht dialog executable was not found next to {}; reinstall Harness Hat so hht and hht-daemon are installed together",
+            "hat dialog executable was not found next to {}; reinstall Harness Hat so hat and hat-daemon are installed together",
             current.display()
         ))
     }
@@ -384,28 +384,28 @@ mod tests {
     use super::dialog_executable_next_to;
 
     #[test]
-    fn dialog_executable_uses_sibling_hht_binary() {
+    fn dialog_executable_uses_sibling_hat_binary() {
         let temp = tempfile::tempdir().expect("temp dir");
         let daemon = temp.path().join(if cfg!(target_os = "windows") {
-            "hht-daemon.exe"
+            "hat-daemon.exe"
         } else {
-            "hht-daemon"
+            "hat-daemon"
         });
-        let hht = temp.path().join(if cfg!(target_os = "windows") {
-            "hht.exe"
+        let hat = temp.path().join(if cfg!(target_os = "windows") {
+            "hat.exe"
         } else {
-            "hht"
+            "hat"
         });
         std::fs::write(&daemon, "daemon").expect("daemon binary placeholder");
-        std::fs::write(&hht, "hht").expect("hht binary placeholder");
+        std::fs::write(&hat, "hat").expect("hat binary placeholder");
 
-        assert_eq!(dialog_executable_next_to(&daemon).unwrap(), hht);
+        assert_eq!(dialog_executable_next_to(&daemon).unwrap(), hat);
     }
 
     #[test]
-    fn dialog_executable_requires_sibling_hht_binary() {
+    fn dialog_executable_requires_sibling_hat_binary() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let daemon = temp.path().join("hht-daemon");
+        let daemon = temp.path().join("hat-daemon");
         std::fs::write(&daemon, "daemon").expect("daemon binary placeholder");
 
         assert!(dialog_executable_next_to(&daemon).is_err());

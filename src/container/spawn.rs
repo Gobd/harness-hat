@@ -123,7 +123,7 @@ pub fn spawn(
         cidfile.display().to_string(),
     ];
 
-    // Discovery labels so `hht sh` can find and identify this session
+    // Discovery labels so `hat sh` can find and identify this session
     // without the manager process being alive.
     //
     // `docker ps --format '{{.Labels}}'` serializes labels as a single
@@ -715,7 +715,7 @@ fn next_session_alias(used: &std::collections::HashSet<String>, previous: u64) -
 ///
 /// Returns `Err` when `docker ps` fails — silently returning an empty set
 /// would let `allocate_session_alias` happily mint an alias that collides with
-/// a live container, breaking `hht sh <alias>` (ambiguous lookup).
+/// a live container, breaking `hat sh <alias>` (ambiguous lookup).
 fn running_session_aliases() -> Result<std::collections::HashSet<String>> {
     let mut command = std::process::Command::new("docker");
     crate::process_util::hide_console_window(&mut command);

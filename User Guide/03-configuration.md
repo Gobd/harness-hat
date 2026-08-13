@@ -2,11 +2,11 @@
 
 [Previous: Workspaces](02-workspaces.md) | [Guide index](README.md) | [Next: Claude Code](04-claude.md)
 
-Harness Hat manages its configuration and policy files for normal developer workflows. `hht install` creates the global configuration at `~/.config/harness-hat/harness-hat.toml`; creating a workspace through the TUI or `hht ws` records the workspace automatically.
+Harness Hat manages its configuration and policy files for normal developer workflows. `hat install` creates the global configuration at `~/.config/harness-hat/harness-hat.toml`; creating a workspace through the TUI or `hat ws` records the workspace automatically.
 
 ## Global Configuration
 
-The global configuration controls the local manager, Docker templates, networking defaults, and the registered workspace list. The default created by `hht install` is the standard setup for this guide.
+The global configuration controls the local manager, Docker templates, networking defaults, and the registered workspace list. The default created by `hat install` is the standard setup for this guide.
 
 The default also passes `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` from the **host terminal** environment into new sessions, so the Claude authentication steps in the next page work without additional configuration.
 
@@ -24,7 +24,7 @@ host_port = 11434
 
 Inside a new session, `localhost:8081` reaches host port `11434`. Omitting `host_port` uses the same port. A rule with the same `container_port` overrides the selected template's forward; changes apply to newly launched sessions.
 
-Review remembered project-policy changes through normal version control. A changed global or project policy file blocks new network and host-command decisions until its current version is reviewed and trusted in the system dialog, the attached headless TUI, or `hht approvals trust ID`. Dismissing the review keeps requests blocked.
+Review remembered project-policy changes through normal version control. A changed global or project policy file blocks new network and host-command decisions until its current version is reviewed and trusted in the system dialog, the attached headless TUI, or `hat approvals trust ID`. Dismissing the review keeps requests blocked.
 
 ## Team-Managed Settings
 

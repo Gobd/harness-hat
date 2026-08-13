@@ -5,26 +5,27 @@
 ### Added
 
 - Added an `android` Docker template with Kotlin, Gradle, Android SDK command-line tools, API 36, Build Tools 36.0.0, platform-tools, and `adb` for Android builds.
-- Added `ContainerMount.add_to_path` for prepending mounted container directories to the image's existing `PATH`, including non-interactive `hht sh`/`hht ws` commands.
-- Added `hht install --headless` for Linux servers without a graphical session. The installer creates a `systemd --user` service, enables lingering so it can run across logout and at boot, and keeps installation scoped to the normal Docker-enabled user.
-- Added headless approval management through `hht approvals list [--json]`, `allow ID [--remember]`, `deny ID [--remember]`, and `trust ID`. Pending requests use short four-digit IDs, remain fail-closed while waiting, and can also be decided from an attached TUI.
-- Added nested `open EDITOR` actions (`hht sh ID open EDITOR` and `hht ws open EDITOR`) for opening sessions through any PATH-resolved editor executable that supports the Dev Containers integration.
-- Added canonical `hht sh`/`hht ws` session entry points, nested IDE actions, `ws --new` fresh-session launches, and launch-only `hht sh new --path DIRECTORY`, which prints the new integer session ID.
+- Added `ContainerMount.add_to_path` for prepending mounted container directories to the image's existing `PATH`, including non-interactive `hat sh`/`hat ws` commands.
+- Added `hat install --headless` for Linux servers without a graphical session. The installer creates a `systemd --user` service, enables lingering so it can run across logout and at boot, and keeps installation scoped to the normal Docker-enabled user.
+- Added headless approval management through `hat approvals list [--json]`, `allow ID [--remember]`, `deny ID [--remember]`, and `trust ID`. Pending requests use short four-digit IDs, remain fail-closed while waiting, and can also be decided from an attached TUI.
+- Added nested `open EDITOR` actions (`hat sh ID open EDITOR` and `hat ws open EDITOR`) for opening sessions through any PATH-resolved editor executable that supports the Dev Containers integration.
+- Added canonical `hat sh`/`hat ws` session entry points, nested IDE actions, `ws --new` fresh-session launches, and launch-only `hat sh new --path DIRECTORY`, which prints the new integer session ID.
 
 ### Changed
 
 - Workspace path mirroring is now enabled by default. Absolute POSIX paths are preserved, and Windows drive paths use a best-effort container equivalent such as `/C/Users/example/project`. Set `mirror_cwd = false` to retain the configured mount target.
-- Changed the canonical session termination syntax to `hht sh ID --kill`.
+- Changed the canonical session termination syntax to `hat sh ID --kill`.
 - Standardized CLI help and documentation around Clap-generated command usage, `sh`/`ws` (with `shell`/`workspace` compatibility aliases), compact shell actions, and approval subcommands.
-- `ws` is now current-directory-only; explicit directory launch belongs to `hht sh new --path DIRECTORY`.
+- `ws` is now current-directory-only; explicit directory launch belongs to `hat sh new --path DIRECTORY`.
 - Shell session IDs are now monotonically increasing integers (with legacy zero-padded IDs still accepted when attaching).
-- Expanded the TUI's selected-session Shell section to show attach, command, IDE, and stop forms for `hht sh`.
+- Expanded the TUI's selected-session Shell section to show attach, command, IDE, and stop forms for `hat sh`.
 - Generalized editor launches to accept one executable name from `PATH` (including VS Code forks and user-provided wrappers), with clear errors for missing executables or non-zero exits. Harness Hat does not probe editor capabilities because no reliable universal `--folder-uri` check exists.
 - Clarified the editor guide so Dev Containers setup comes before editor launch instructions, and command-line opening and manual attachment are presented as alternative workflows.
 - Fixed the TUI workspace action flow so Launch moves into the container-template picker while Remove remains available without launching a session.
-- Fixed `hht ws` launch streams aborting during long or quiet Docker builds because the CLI inherited reqwest's default request timeout.
-- `hostdo` now rejects direct invocation of `hht` or `hht.exe` before policy matching, marks hostdo process trees so wrapped `hht` calls also refuse to run, and rejects rules files containing direct Harness Hat control commands.
+- Fixed `hat ws` launch streams aborting during long or quiet Docker builds because the CLI inherited reqwest's default request timeout.
+- `hostdo` now rejects direct invocation of `hat`/`hat.exe` (and legacy `hht` names) before policy matching, marks hostdo process trees so wrapped `hat` calls also refuse to run, and rejects rules files containing direct Harness Hat control commands.
 - The maximum hostdo command timeout is now five minutes; larger requested or configured values are capped at 300 seconds.
+- Renamed the user-facing CLI from `hht` to `hat` and the background service binary from `hht-daemon` to `hat-daemon`; release archives now use the new executable names.
 
 ## 0.8.6 Aug 12, 2026
 

@@ -41,7 +41,7 @@ Prerequisites: [Docker](https://docs.docker.com/get-docker/) is running and Rust
 
 ```sh
 cargo install harness-hat
-hht install
+hat install
 ```
 
 ### 2. CD to your project
@@ -53,7 +53,7 @@ cd ~/src/my-awesome-project
 ### 3. Run Codex
 
 ```sh
-hht ws codex
+hat ws codex
 ```
 
 ### 4. Win.
@@ -71,7 +71,7 @@ On the first launch, Harness Hat:
 After that, the workflow stays gloriously boring:
 
 ```sh
-hht ws codex
+hat ws codex
 ```
 
 If a session is already running, Harness Hat attaches to it. Otherwise, it starts one.
@@ -222,7 +222,7 @@ Built-in Dockerfile templates cover:
 Select one directly:
 
 ```sh
-hht ws --template rust codex
+hat ws --template rust codex
 ```
 
 Harness Hat remembers the selection in the workspace policy.
@@ -247,36 +247,36 @@ Harness Hat discovers compatible workspace-local Dockerfiles and adds them to th
 
 ## Reusable sessions and persistent agent state
 
-`hht install` creates a per-user background agent that starts with the graphical desktop session. On a headless Linux host, use `hht install --headless`; it installs the same `systemd --user` service without graphical dependencies and enables lingering so it can run across logout and at boot.
+`hat install` creates a per-user background agent that starts with the graphical desktop session. On a headless Linux host, use `hat install --headless`; it installs the same `systemd --user` service without graphical dependencies and enables lingering so it can run across logout and at boot.
 
 Headless approvals can be managed over SSH with four-digit IDs:
 
 ```sh
-hht approvals list
-hht approvals list --json
-hht approvals allow 42
-hht approvals deny 0042 --remember
-hht approvals trust 17
+hat approvals list
+hat approvals list --json
+hat approvals allow 42
+hat approvals deny 0042 --remember
+hat approvals trust 17
 ```
 
-An attached `hht` TUI can also decide queued approvals. Unknown requests remain fail-closed while waiting, and changed rules files require the explicit `trust` command rather than allow/deny.
+An attached `hat` TUI can also decide queued approvals. Unknown requests remain fail-closed while waiting, and changed rules files require the explicit `trust` command rather than allow/deny.
 
 The CLI becomes a lightweight client:
 
 ```sh
-hht                    # open the manager TUI
-hht ws                 # start or attach to the workspace for the current directory
-hht ws codex           # run Codex in that workspace
-hht ws claude --resume # resume Claude in that workspace
-hht ws --new            # force a fresh session for the current directory
-hht ws open codium      # open the current workspace session in a PATH editor
-hht sh                 # list active sessions
-hht sh 42              # attach to a session
-hht sh 42 --kill       # stop and remove a session
-hht sh 42 open codium  # open the session in a PATH editor
-hht sh new --path .    # launch a fresh session and print its integer ID
-hht rebuild rust       # rebuild the base and Rust images
-hht restart            # reload config and policy without stopping sessions
+hat                    # open the manager TUI
+hat ws                 # start or attach to the workspace for the current directory
+hat ws codex           # run Codex in that workspace
+hat ws claude --resume # resume Claude in that workspace
+hat ws --new            # force a fresh session for the current directory
+hat ws open codium      # open the current workspace session in a PATH editor
+hat sh                 # list active sessions
+hat sh 42              # attach to a session
+hat sh 42 --kill       # stop and remove a session
+hat sh 42 open codium  # open the session in a PATH editor
+hat sh new --path .    # launch a fresh session and print its integer ID
+hat rebuild rust       # rebuild the base and Rust images
+hat restart            # reload config and policy without stopping sessions
 ```
 
 Harness Hat also reuses supported agent state where possible, while avoiding broad home-directory mounts. Some state is bind-mounted, some is seeded into a private session copy, and Codex state on Windows is copied into container-local storage to avoid unsafe SQLite sharing through Docker Desktop.
@@ -287,7 +287,7 @@ Harness Hat owns the container. VS Code, Windsurf, and compatible VS Code-based 
 
 ```sh
 cd ~/src/my-awesome-project
-hht ws
+hat ws
 ```
 
 Then attach the editor to the running Harness Hat container. Integrated terminals, extensions, language servers, debuggers, and agents run inside the same policy-controlled environment.
@@ -313,9 +313,9 @@ Harness Hat rejects obviously dangerous workspace and mount sources, including b
 * Docker Engine or Docker Desktop
 * Linux containers on Windows
 * Rust 1.89 or newer and Cargo for installation from crates.io
-* a signed-in graphical desktop user for the default `hht install`, or a Linux user with systemd user services and `loginctl` for `hht install --headless`
+* a signed-in graphical desktop user for the default `hat install`, or a Linux user with systemd user services and `loginctl` for `hat install --headless`
 
-Run Harness Hat as your normal user. Do not use `sudo` for `hht install` or `hht uninstall`.
+Run Harness Hat as your normal user. Do not use `sudo` for `hat install` or `hat uninstall`.
 
 ## Documentation
 

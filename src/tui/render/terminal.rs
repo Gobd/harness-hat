@@ -294,7 +294,7 @@ pub(crate) fn render_session_detail(
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "  hht sh commands for this session:",
+            "  hat sh commands for this session:",
             Style::default().fg(tone(Color::DarkGray)),
         )),
     ]);

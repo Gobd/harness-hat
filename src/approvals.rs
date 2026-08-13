@@ -11,7 +11,7 @@ pub fn run(command: ApprovalCommand) -> Result<()> {
     let config_path = crate::manager::default_home_config_path()?;
     if !config_path.exists() {
         bail!(
-            "global config does not exist at {}; run `hht install` first",
+            "global config does not exist at {}; run `hat install` first",
             config_path.display()
         );
     }

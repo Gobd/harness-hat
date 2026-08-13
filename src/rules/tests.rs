@@ -1,6 +1,6 @@
 use super::{
     ComposedRules, NetworkPolicy, NetworkRules, ProjectRules, append_hostdo_auto_approval,
-    host_matches, hostdo_invokes_hht, load,
+    host_matches, hostdo_invokes_hat, load,
 };
 use super::{HostdoCommand, HostdoRules};
 
@@ -451,7 +451,29 @@ commands = [{ argv = ["npm", "test"], image = "node:20", env_allowlist = ["CI"] 
 }
 
 #[test]
-fn identifies_hht_executables_in_hostdo_argv() {
+fn identifies_hat_executables_in_hostdo_argv() {
+    for executable in [
+        "hat",
+        "HAT",
+        "hat.exe",
+        "/usr/local/bin/hat",
+        r"C:\Users\dev\.cargo\bin\hat.exe",
+        "./hat",
+    ] {
+        assert!(
+            hostdo_invokes_hat(&[executable.to_string(), "install".to_string()]),
+            "expected {executable:?} to be blocked"
+        );
+    }
+    assert!(!hostdo_invokes_hat(&[
+        "cargo".to_string(),
+        "test".to_string()
+    ]));
+    assert!(!hostdo_invokes_hat(&[]));
+}
+
+#[test]
+fn legacy_hht_executables_remain_blocked_in_hostdo() {
     for executable in [
         "hht",
         "HHT",
@@ -461,19 +483,14 @@ fn identifies_hht_executables_in_hostdo_argv() {
         "./hht",
     ] {
         assert!(
-            hostdo_invokes_hht(&[executable.to_string(), "install".to_string()]),
-            "expected {executable:?} to be blocked"
+            hostdo_invokes_hat(&[executable.to_string(), "install".to_string()]),
+            "expected legacy {executable:?} to remain blocked"
         );
     }
-    assert!(!hostdo_invokes_hht(&[
-        "cargo".to_string(),
-        "test".to_string()
-    ]));
-    assert!(!hostdo_invokes_hht(&[]));
 }
 
 #[test]
-fn load_rejects_hht_hostdo_rules() {
+fn load_rejects_hat_hostdo_rules() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("harness-rules.toml");
     std::fs::write(
@@ -482,36 +499,36 @@ fn load_rejects_hht_hostdo_rules() {
 version = 1
 
 [hostdo]
-commands = [{ argv = ["/usr/local/bin/hht", "install"], approval_mode = "auto" }]
+commands = [{ argv = ["/usr/local/bin/hat", "install"], approval_mode = "auto" }]
 "#,
     )
     .expect("write rules");
 
-    let err = load(&path).expect_err("hht hostdo rule must be rejected");
+    let err = load(&path).expect_err("hat hostdo rule must be rejected");
     assert!(
         err.to_string()
-            .contains("invoking hht through hostdo is forbidden"),
+            .contains("invoking hat through hostdo is forbidden"),
         "error should explain the restriction: {err}"
     );
 }
 
 #[test]
-fn remembered_approval_rejects_hht_hostdo_commands() {
+fn remembered_approval_rejects_hat_hostdo_commands() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("harness-rules.toml");
     std::fs::write(&path, "version = 1\n").expect("write rules");
 
     let err = append_hostdo_auto_approval(
         &path,
-        &["hht.exe".to_string(), "restart".to_string()],
+        &["hat.exe".to_string(), "restart".to_string()],
         None,
         60,
         None,
     )
-    .expect_err("hht approval persistence must be rejected");
+    .expect_err("hat approval persistence must be rejected");
     assert!(
         err.to_string()
-            .contains("invoking hht through hostdo is forbidden")
+            .contains("invoking hat through hostdo is forbidden")
     );
 }
 

@@ -11,14 +11,14 @@ homepage = "https://github.com/only-cliches/harness-hat"
 keywords = ["docker", "sandbox", "proxy", "tui", "isolation"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["target/", ".git/", ".github/"]
-default-run = "hht"
+default-run = "hat"
 
 [[bin]]
-name = "hht"
+name = "hat"
 path = "src/main.rs"
 
 [[bin]]
-name = "hht-daemon"
+name = "hat-daemon"
 path = "src/daemon.rs"
 
 [dependencies]
@@ -79,7 +79,7 @@ hex = "0.4"
 notify-rust = "4.18"
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "common-controls-v6"] }
 
-# Native system dialogs (spawned in a subprocess via `hht __dialog ...` to
+# Native system dialogs (spawned in a subprocess via `hat __dialog ...` to
 # avoid taking over the parent's main thread). macOS uses NSAlert with a
 # suppression checkbox; Windows uses TaskDialogIndirect and Linux uses the
 # existing portal-backed fallback.
