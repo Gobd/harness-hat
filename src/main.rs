@@ -71,6 +71,9 @@ async fn main() -> Result<()> {
             let code = harness_hat::shell::run(id, kill, args)?;
             std::process::exit(code);
         }
+        Some(Command::Open { id, editor }) => {
+            harness_hat::shell::open(&id, editor)?;
+        }
         Some(Command::Workspace {
             list,
             template,
