@@ -234,11 +234,11 @@ fn ensure_user_ssh_include(path: &Path, config_dir: &Path) -> Result<()> {
         .create(true)
         .read(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
     file.lock_exclusive()
         .with_context(|| format!("locking {}", path.display()))?;
-    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let existing = fs::read_to_string(path).unwrap_or_default();
     let include_pattern = config_dir.join("*");
     let line = format!("Include {}", ssh_path(&include_pattern)?);
     if !existing.lines().any(|existing| existing.trim() == line) {
@@ -249,7 +249,7 @@ fn ensure_user_ssh_include(path: &Path, config_dir: &Path) -> Result<()> {
         file.sync_all()?;
     }
     if !existed {
-        set_private_file_permissions(&path)?;
+        set_private_file_permissions(path)?;
     }
     Ok(())
 }
