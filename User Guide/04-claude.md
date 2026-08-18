@@ -115,3 +115,48 @@ hat ws claude --resume
 > **Expected result:** Harness Hat opens the session and starts Claude. In the session, `/status` should show an authenticated Claude session rather than requesting a browser login.
 
 Inside the **session terminal**, use `/status` to confirm the active authentication method. Before asking Claude to use host-side tools, read [Use hostdo with an agent](05-hostdo.md).
+
+## Use Claude Desktop With A Hat Container
+
+Claude Desktop can use a Harness Hat container as an SSH environment while the
+native application remains on the host. Install Claude Desktop and the OpenSSH
+client, then rebuild the Hat images once to include the container SSH service:
+
+```sh
+hat rebuild --no-cache
+cd ~/my-awesome-project
+hat ws --desktop
+```
+
+Harness Hat creates or reuses a Desktop-enabled session for the current
+workspace, publishes its SSH service on a random host-loopback port, registers
+the pinned host key in Hat-owned state, and opens Claude Desktop on macOS or
+Windows. Hat adds one stable `Include` line to `~/.ssh/config`; changing ports
+and keys are replaced in Hat's private per-workspace SSH files, so repeated
+launches do not grow the user configuration. Hat never edits
+`~/.claude/settings.json`.
+
+The first time a workspace is used, open the **Code** tab, add an SSH
+environment, and select the `hat-<workspace>-<id>` host from the standard SSH
+configuration. Choose the project directory printed by Hat. Claude remembers
+that selection; later launches update the same SSH alias.
+
+On macOS or Windows, the release also includes a graphical launcher. Open
+**Harness Hat**, choose the project folder, and Hat starts the protected session
+and opens Claude Desktop. A saved workspace environment is selected by default;
+for a new project Hat suggests one from markers such as `go.mod`, `Cargo.toml`,
+`package.json`, or `pyproject.toml`. The dropdown always allows a different
+choice. This is the same backend operation as `hat ws --desktop`; the user does
+not need to open a terminal, change directories, or configure SSH. The Harness
+Hat background service and Docker Desktop must already be running.
+
+Desktop-enabled sessions receive a read-only managed policy that disables
+external Browser-pane navigation, Claude in Chrome, Claude.ai connectors, and
+computer-use tools. Localhost app previews remain available. SSH uses a
+Hat-specific key, does not forward the host SSH agent, and is not exposed beyond
+`127.0.0.1`.
+
+> **Security boundary:** only the named Hat SSH session is container-backed.
+> Claude Desktop still lets a person create separate Local, Chat, or Cowork
+> sessions, which are outside Harness Hat. Anthropic does not currently expose
+> a per-connection policy that removes those choices from the application.

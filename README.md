@@ -268,6 +268,7 @@ hat                    # open the manager TUI
 hat ws                 # start or attach to the workspace for the current directory
 hat ws codex           # run Codex in that workspace
 hat ws claude --resume # resume Claude in that workspace
+hat ws --desktop       # open a container-backed Claude Desktop environment
 hat ws --new            # force a fresh session for the current directory
 hat ws open codium      # open the current workspace session in a PATH editor
 hat sh                 # list active sessions
@@ -278,6 +279,12 @@ hat sh new --path .    # launch a fresh session and print its integer ID
 hat rebuild rust       # rebuild the base and Rust images
 hat restart            # reload config and policy without stopping sessions
 ```
+
+macOS and Windows releases also include a graphical Harness Hat launcher for
+people who do not use a terminal. Open **Harness Hat**, choose a project folder,
+confirm the saved or automatically suggested development environment, and open
+Claude Desktop. It performs the same protected launch as `hat ws --desktop`.
+The terminal manager and TUI remain available unchanged.
 
 Harness Hat also reuses supported agent state where possible, while avoiding broad home-directory mounts. Some state is bind-mounted, some is seeded into a private session copy, and Codex state on Windows is copied into container-local storage to avoid unsafe SQLite sharing through Docker Desktop.
 

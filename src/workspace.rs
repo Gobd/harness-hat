@@ -29,6 +29,7 @@ pub fn run(
     force_new: bool,
     explicit_path: Option<PathBuf>,
     launch_only: bool,
+    desktop: bool,
     open_editor: Option<crate::cli::OpenEditor>,
     explicit_config: Option<PathBuf>,
 ) -> Result<i32> {
@@ -93,13 +94,29 @@ pub fn run(
                 matched.canonical_path.display()
             ),
         );
-        if !force_new && let Some(session) = newest_session_for_workspace(&matched.name)? {
+        let reusable_session = if force_new {
+            None
+        } else {
+            newest_session_for_workspace(&matched.name)?
+        };
+        if let Some(session) = reusable_session
+            && (!desktop || crate::desktop::is_desktop_container(&session.name)?)
+        {
             status(
                 launch_only,
                 format!("attaching to running session {}", session.alias),
             );
             let mount_target = mount_target_for_session(&session, &config);
             let workdir = workspace_workdir(&matched, &pwd, &mount_target);
+            if desktop {
+                crate::desktop::open(
+                    &session.name,
+                    &matched.name,
+                    &workdir,
+                    &config.logging.log_dir,
+                )?;
+                return Ok(0);
+            }
             if let Some(editor) = open_editor {
                 crate::shell::open(&session.alias, editor)?;
                 return Ok(0);
@@ -125,9 +142,12 @@ pub fn run(
         if matched.template.is_none() && rules.template.as_deref() != Some(&template) {
             save_workspace_template(&rules_path, &template)?;
         }
-        let terminal_env = crate::shell::shell_exec_env_pairs_with_passthrough(
+        let mut terminal_env = crate::shell::shell_exec_env_pairs_with_passthrough(
             env_passthrough_for_template(&config, &template),
         );
+        if desktop {
+            terminal_env.push(crate::desktop::authorized_key_env(&config.logging.log_dir)?);
+        }
         let launch_cwd = matched.mount_cwd.then(|| pwd.to_str()).flatten();
         let resp = post_launch(
             &control_url,
@@ -158,6 +178,15 @@ pub fn run(
         } else {
             workspace_workdir(&matched, &pwd, &resp.mount_target)
         };
+        if desktop {
+            crate::desktop::open(
+                &resp.docker_name,
+                &matched.name,
+                &workdir,
+                &config.logging.log_dir,
+            )?;
+            return Ok(0);
+        }
         return attach_and_report(&resp.docker_name, &args, Some(&workdir));
     }
 
@@ -196,9 +225,12 @@ pub fn run(
         launch_only,
     )?;
     save_workspace_template(&workspace_rules_path(&pwd), &template)?;
-    let terminal_env = crate::shell::shell_exec_env_pairs_with_passthrough(
+    let mut terminal_env = crate::shell::shell_exec_env_pairs_with_passthrough(
         env_passthrough_for_template(&config, &template),
     );
+    if desktop {
+        terminal_env.push(crate::desktop::authorized_key_env(&config.logging.log_dir)?);
+    }
     let resp = post_launch(
         &control_url,
         &token,
@@ -219,6 +251,15 @@ pub fn run(
     }
     if let Some(editor) = open_editor {
         crate::shell::open(&resp.alias, editor)?;
+        return Ok(0);
+    }
+    if desktop {
+        crate::desktop::open(
+            &resp.docker_name,
+            &workspace_name,
+            &resp.mount_target,
+            &config.logging.log_dir,
+        )?;
         return Ok(0);
     }
     attach_and_report(&resp.docker_name, &args, Some(&resp.mount_target))

@@ -89,6 +89,7 @@ async fn main() -> Result<()> {
                         true,
                         Some(path),
                         true,
+                        false,
                         None,
                         None,
                     )
@@ -111,6 +112,7 @@ async fn main() -> Result<()> {
             name,
             rebuild,
             new,
+            desktop,
             args,
             open,
         }) => {
@@ -123,7 +125,7 @@ async fn main() -> Result<()> {
             // runtime thread.
             let code = tokio::task::spawn_blocking(move || {
                 harness_hat::workspace::run(
-                    args, list, template, name, rebuild, new, None, false, open, None,
+                    args, list, template, name, rebuild, new, None, false, desktop, open, None,
                 )
             })
             .await
