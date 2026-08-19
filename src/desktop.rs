@@ -8,7 +8,7 @@
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -419,11 +419,8 @@ pub fn open(
     workdir: &str,
     state_dir: &Path,
 ) -> Result<()> {
-    let identity = ensure_identity(state_dir)?;
-    let port = published_port(container_name)?;
-    let host_key = wait_for_host_key(container_name, Duration::from_secs(10))?;
-    let ssh_alias = register_connection(workspace_name, port, &host_key, &identity, state_dir)?;
-    launch_app()?;
+    let ssh_alias = prepare(container_name, workspace_name, state_dir)?;
+    launch_claude()?;
     println!(
         "Claude Desktop launch requested. In Code, add or select SSH host \"{ssh_alias}\" and folder \"{workdir}\"."
     );
@@ -431,6 +428,21 @@ pub fn open(
         "Safety boundary: that SSH session runs in container {container_name}; separate Local, Chat, or Cowork sessions are outside Harness Hat."
     );
     Ok(())
+}
+
+/// Register a running Desktop container in the user's SSH configuration
+/// without opening Claude Desktop.
+pub fn prepare(container_name: &str, workspace_name: &str, state_dir: &Path) -> Result<String> {
+    let identity = ensure_identity(state_dir)?;
+    let port = published_ssh_port(container_name)?;
+    let host_key = wait_for_host_key(container_name, Duration::from_secs(10))?;
+    let ssh_alias = register_connection(workspace_name, port, &host_key, &identity, state_dir)?;
+    Ok(ssh_alias)
+}
+
+/// Open Claude Desktop without claiming that it is already attached to SSH.
+pub fn launch_claude() -> Result<()> {
+    launch_app()
 }
 
 fn ensure_identity(state_dir: &Path) -> Result<PathBuf> {
@@ -489,7 +501,8 @@ fn ensure_identity(state_dir: &Path) -> Result<PathBuf> {
     Ok(identity)
 }
 
-fn published_port(container_name: &str) -> Result<u16> {
+/// Loopback host port currently forwarding to a Desktop container's SSH service.
+pub fn published_ssh_port(container_name: &str) -> Result<u16> {
     let output = docker_output(&["port", container_name, SSH_CONTAINER_PORT])?;
     output
         .lines()
@@ -589,7 +602,8 @@ fn ensure_user_ssh_include(path: &Path, config_dir: &Path) -> Result<()> {
     let mut file = OpenOptions::new()
         .create(true)
         .read(true)
-        .append(true)
+        .write(true)
+        .truncate(false)
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
     file.lock_exclusive()
@@ -597,11 +611,11 @@ fn ensure_user_ssh_include(path: &Path, config_dir: &Path) -> Result<()> {
     let existing = fs::read_to_string(path).unwrap_or_default();
     let include_pattern = config_dir.join("*");
     let line = format!("Include {}", ssh_path(&include_pattern)?);
-    if !existing.lines().any(|existing| existing.trim() == line) {
-        if !existing.is_empty() && !existing.ends_with('\n') {
-            writeln!(file)?;
-        }
-        writeln!(file, "{line}")?;
+    let updated = ssh_config_with_global_include(&existing, &line);
+    if updated != existing {
+        file.set_len(0)?;
+        file.seek(std::io::SeekFrom::Start(0))?;
+        file.write_all(updated.as_bytes())?;
         file.sync_all()?;
     }
     if !existed {
@@ -610,7 +624,23 @@ fn ensure_user_ssh_include(path: &Path, config_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn workspace_ssh_alias(workspace_name: &str) -> String {
+fn ssh_config_with_global_include(existing: &str, include_line: &str) -> String {
+    // An Include inherits the preceding Host/Match scope. Keep Hat's include
+    // before every block so its generated hosts are available globally.
+    let remaining = existing
+        .lines()
+        .filter(|line| line.trim() != include_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if remaining.is_empty() {
+        format!("{include_line}\n")
+    } else {
+        format!("{include_line}\n{remaining}\n")
+    }
+}
+
+/// Stable host name shown in Claude Desktop's SSH picker for a workspace.
+pub fn workspace_ssh_alias(workspace_name: &str) -> String {
     use sha2::{Digest, Sha256};
     let slug = workspace_name
         .chars()
@@ -778,6 +808,11 @@ mod tests {
         fs::write(&identity, "test identity").unwrap();
         let user_config = root.path().join("home/.ssh/config");
         fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+        fs::write(
+            &user_config,
+            "Host kiosk\n  HostName kiosk.example\nInclude \"/old/location/*\"\n",
+        )
+        .unwrap();
 
         let alias = register_connection_with_user_config(
             "My Project",
@@ -802,10 +837,12 @@ mod tests {
         assert_eq!(
             include
                 .lines()
-                .filter(|line| line.starts_with("Include "))
+                .filter(|line| line.contains("ssh-config.d"))
                 .count(),
             1
         );
+        assert!(include.lines().next().unwrap().contains("ssh-config.d"));
+        assert!(include.contains("Host kiosk\n  HostName kiosk.example"));
         let config =
             fs::read_to_string(state.join(format!("claude-desktop/ssh-config.d/{alias}.conf")))
                 .unwrap();

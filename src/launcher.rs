@@ -48,10 +48,12 @@ mod gui {
 
     enum LaunchState {
         Idle,
-        Launching(Receiver<Result<(), String>>),
-        Opened,
+        Launching(Receiver<Result<ConnectionGuide, String>>),
+        Opened(ConnectionGuide),
         Failed(String),
     }
+
+    struct ConnectionGuide;
 
     enum SetupState {
         NotStarted,
@@ -65,6 +67,7 @@ mod gui {
         container: harness_hat::desktop::DesktopContainer,
         folder: String,
         ssh_connected: Option<bool>,
+        ssh_port: Option<u16>,
     }
 
     pub struct Launcher {
@@ -78,7 +81,8 @@ mod gui {
         last_session_refresh: Instant,
         session_error: Option<String>,
         stopping: Option<(String, Receiver<Result<(), String>>)>,
-        reconnecting: Option<(String, Receiver<Result<(), String>>)>,
+        opening_claude: Option<Receiver<Result<(), String>>>,
+        show_connection_help: bool,
     }
 
     impl Default for Launcher {
@@ -94,7 +98,8 @@ mod gui {
                 last_session_refresh: Instant::now() - SESSION_REFRESH_INTERVAL,
                 session_error: None,
                 stopping: None,
-                reconnecting: None,
+                opening_claude: None,
+                show_connection_help: false,
             }
         }
     }
@@ -205,9 +210,10 @@ mod gui {
             };
             if let Some(result) = result {
                 self.state = match result {
-                    Ok(()) => {
+                    Ok(guide) => {
                         self.last_session_refresh = Instant::now() - SESSION_REFRESH_INTERVAL;
-                        LaunchState::Opened
+                        self.show_connection_help = true;
+                        LaunchState::Opened(guide)
                     }
                     Err(error) => LaunchState::Failed(error),
                 };
@@ -261,15 +267,14 @@ mod gui {
                 }
             }
 
-            let reconnected = self
-                .reconnecting
+            let opened = self
+                .opening_claude
                 .as_ref()
-                .and_then(|(_, receiver)| receiver.try_recv().ok());
-            if let Some(result) = reconnected {
-                self.reconnecting = None;
-                match result {
-                    Ok(()) => self.state = LaunchState::Opened,
-                    Err(error) => self.session_error = Some(error),
+                .and_then(|receiver| receiver.try_recv().ok());
+            if let Some(result) = opened {
+                self.opening_claude = None;
+                if let Err(error) = result {
+                    self.session_error = Some(error);
                 }
             }
         }
@@ -290,23 +295,19 @@ mod gui {
             self.stopping = Some((container_name, rx));
         }
 
-        fn reconnect_session(
-            &mut self,
-            container: harness_hat::desktop::DesktopContainer,
-            context: &egui::Context,
-        ) {
-            if self.reconnecting.is_some() || !container.desktop_enabled {
+        fn open_claude(&mut self, context: &egui::Context) {
+            if self.opening_claude.is_some() {
                 return;
             }
             let (tx, rx) = mpsc::channel();
             let repaint = context.clone();
-            let container_name = container.name.clone();
             std::thread::spawn(move || {
-                let result = reconnect_container(&container).map_err(|error| format!("{error:#}"));
+                let result =
+                    harness_hat::desktop::launch_claude().map_err(|error| format!("{error:#}"));
                 let _ = tx.send(result);
                 repaint.request_repaint();
             });
-            self.reconnecting = Some((container_name, rx));
+            self.opening_claude = Some(rx);
         }
     }
 
@@ -356,13 +357,16 @@ mod gui {
 
                 ui.add_space(22.0);
                 let launching = matches!(self.state, LaunchState::Launching(_));
-                let button = egui::Button::new(if launching {
-                    "Starting protected workspace…"
+                let start_label = if launching {
+                    "Starting protected session…"
                 } else {
-                    "Open in Claude Desktop"
-                });
+                    "Start protected session"
+                };
                 if ui
-                    .add_enabled(self.project.is_some() && !launching, button)
+                    .add_enabled(
+                        self.project.is_some() && !launching,
+                        egui::Button::new(start_label),
+                    )
                     .clicked()
                 {
                     self.launch(context);
@@ -378,9 +382,42 @@ mod gui {
                         ui.label(egui::RichText::new("The first launch may take several minutes while Docker builds the selected environment.").small().weak());
                         context.request_repaint_after(std::time::Duration::from_millis(100));
                     }
-                    LaunchState::Opened => {
-                        ui.colored_label(egui::Color32::from_rgb(40, 150, 80), "Claude Desktop launch requested. It may take a few seconds; select the Hat environment in Code.");
+                    LaunchState::Opened(_) if self.show_connection_help => {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(40, 150, 80),
+                                    egui::RichText::new("Finish connecting in Claude").strong(),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button("×").on_hover_text("Close help").clicked() {
+                                            self.show_connection_help = false;
+                                        }
+                                    },
+                                );
+                            });
+                            ui.label("1. In Code, start a new Code session.");
+                            ui.label("2. Click Local → SSH.");
+                            ui.label("3. Select the matching Harness Hat connection.");
+                            ui.label("4. Select the project folder shown below.");
+                            ui.label(
+                                egui::RichText::new(
+                                    "If it is missing, choose Add SSH host… and use the SSH host shown below. Leave port and identity blank.",
+                                )
+                                .small(),
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    "The session below changes to SSH connected when it works.",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                        });
                     }
+                    LaunchState::Opened(_) => {}
                     LaunchState::Failed(error) => {
                         ui.colored_label(egui::Color32::from_rgb(190, 55, 55), error);
                     }
@@ -389,7 +426,28 @@ mod gui {
                 ui.add_space(20.0);
                 ui.separator();
                 ui.add_space(12.0);
-                ui.heading("Running protected sessions");
+                ui.horizontal(|ui| {
+                    ui.heading("Running protected sessions");
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            let opening = self.opening_claude.is_some();
+                            if ui
+                                .add_enabled(
+                                    !opening,
+                                    egui::Button::new(if opening {
+                                        "Opening Claude…"
+                                    } else {
+                                        "Open Claude Desktop"
+                                    }),
+                                )
+                                .clicked()
+                            {
+                                self.open_claude(context);
+                            }
+                        },
+                    );
+                });
                 ui.label(
                     egui::RichText::new(
                         "Disconnected Desktop SSH sessions stop after 10 minutes; sessions never connected stop after 30 minutes.",
@@ -410,12 +468,8 @@ mod gui {
                     }
                 } else {
                     let stopping_name = self.stopping.as_ref().map(|(name, _)| name.as_str());
-                    let reconnecting_name = self
-                        .reconnecting
-                        .as_ref()
-                        .map(|(name, _)| name.as_str());
                     let mut stop_clicked = None;
-                    let mut reconnect_clicked = None;
+                    let mut help_clicked = false;
                     egui::ScrollArea::vertical()
                         .max_height(210.0)
                         .show(ui, |ui| {
@@ -450,6 +504,30 @@ mod gui {
                                                     session.container.alias
                                                 ),
                                             );
+                                            if session.container.desktop_enabled {
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "Claude connection: Harness Hat — {}",
+                                                        session.container.workspace
+                                                    ))
+                                                    .small()
+                                                    .weak(),
+                                                );
+                                                let alias = harness_hat::desktop::workspace_ssh_alias(
+                                                    &session.container.workspace,
+                                                );
+                                                let endpoint = session.ssh_port.map_or_else(
+                                                    || "127.0.0.1:<port unavailable>".to_string(),
+                                                    |port| format!("127.0.0.1:{port}"),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "SSH host: {alias}  •  coder@{endpoint}"
+                                                    ))
+                                                    .small()
+                                                    .weak(),
+                                                );
+                                            }
                                         });
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
@@ -470,23 +548,10 @@ mod gui {
                                                     stop_clicked =
                                                         Some(session.container.name.clone());
                                                 }
-                                                if session.container.desktop_enabled {
-                                                    let reconnecting = reconnecting_name
-                                                        == Some(session.container.name.as_str());
-                                                    if ui
-                                                        .add_enabled(
-                                                            self.reconnecting.is_none(),
-                                                            egui::Button::new(if reconnecting {
-                                                                "Opening…"
-                                                            } else {
-                                                                "Reconnect"
-                                                            }),
-                                                        )
-                                                        .clicked()
-                                                    {
-                                                        reconnect_clicked =
-                                                            Some(session.container.clone());
-                                                    }
+                                                if session.container.desktop_enabled
+                                                    && ui.button("Help").clicked()
+                                                {
+                                                    help_clicked = true;
                                                 }
                                             },
                                         );
@@ -498,8 +563,9 @@ mod gui {
                     if let Some(container_name) = stop_clicked {
                         self.stop_session(container_name, context);
                     }
-                    if let Some(container) = reconnect_clicked {
-                        self.reconnect_session(container, context);
+                    if help_clicked {
+                        self.show_connection_help = true;
+                        self.state = LaunchState::Opened(ConnectionGuide);
                     }
                 }
                 if let Some(error) = &self.session_error {
@@ -648,6 +714,10 @@ mod gui {
                     .desktop_enabled
                     .then(|| harness_hat::desktop::ssh_connected(&container.name).ok())
                     .flatten();
+                let ssh_port = container
+                    .desktop_enabled
+                    .then(|| harness_hat::desktop::published_ssh_port(&container.name).ok())
+                    .flatten();
                 let folder = folders
                     .get(&container.workspace)
                     .cloned()
@@ -656,27 +726,17 @@ mod gui {
                     container,
                     folder,
                     ssh_connected,
+                    ssh_port,
                 })
             })
             .collect()
     }
 
-    fn reconnect_container(container: &harness_hat::desktop::DesktopContainer) -> Result<()> {
-        let config_path = harness_hat::manager::default_home_config_path()?;
-        anyhow::ensure!(
-            config_path.exists(),
-            "Harness Hat configuration was not found"
-        );
-        let config = harness_hat::config::load(&config_path)?;
-        harness_hat::desktop::open(
-            &container.name,
-            &container.workspace,
-            &container.mount_target,
-            &config.logging.log_dir,
-        )
-    }
-
-    fn launch_workspace(project: PathBuf, template: String, config: PathBuf) -> Result<()> {
+    fn launch_workspace(
+        project: PathBuf,
+        template: String,
+        config: PathBuf,
+    ) -> Result<ConnectionGuide> {
         let exit = harness_hat::workspace::run(
             Vec::new(),
             false,
@@ -684,17 +744,18 @@ mod gui {
             None,
             false,
             false,
-            Some(project),
+            Some(project.clone()),
             true,
             true,
+            false,
             None,
-            Some(config),
+            Some(config.clone()),
         )?;
         anyhow::ensure!(
             exit == 0,
             "the workspace launcher exited with status {exit}"
         );
-        Ok(())
+        Ok(ConnectionGuide)
     }
 
     fn suggested_template(project: &Path) -> (String, String) {
@@ -826,21 +887,58 @@ mod gui {
             .unwrap_or(0)
     }
 
+    fn make_icon_background_transparent(icon: &mut egui::IconData) {
+        let width = icon.width as usize;
+        let height = icon.height as usize;
+        let radius = icon.width.min(icon.height) as f32 * 224.0 / 1024.0;
+        for y in 0..height {
+            for x in 0..width {
+                let px = x as f32 + 0.5;
+                let py = y as f32 + 0.5;
+                let dx = if px < radius {
+                    radius - px
+                } else if px > icon.width as f32 - radius {
+                    px - (icon.width as f32 - radius)
+                } else {
+                    0.0
+                };
+                let dy = if py < radius {
+                    radius - py
+                } else if py > icon.height as f32 - radius {
+                    py - (icon.height as f32 - radius)
+                } else {
+                    0.0
+                };
+                if dx == 0.0 || dy == 0.0 {
+                    continue;
+                }
+                let coverage = (radius - dx.hypot(dy) + 0.5).clamp(0.0, 1.0);
+                if coverage < 1.0 {
+                    let pixel = &mut icon.rgba[(y * width + x) * 4..][..4];
+                    pixel[..3].copy_from_slice(&[0x11, 0x18, 0x27]);
+                    pixel[3] = (coverage * 255.0).round() as u8;
+                }
+            }
+        }
+    }
+
     pub fn run() -> Result<()> {
         super::add_gui_tool_paths();
+        let mut icon =
+            eframe::icon_data::from_png_bytes(include_bytes!("../assets/harness-hat-1024.png"))
+                .map_err(|error| anyhow::anyhow!("loading the Harness Hat app icon: {error}"))?;
+        make_icon_background_transparent(&mut icon);
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([620.0, 670.0])
-                .with_min_inner_size([520.0, 520.0]),
+                .with_min_inner_size([520.0, 520.0])
+                .with_icon(icon),
             ..Default::default()
         };
         eframe::run_native(
             "Harness Hat",
             options,
-            Box::new(|context| {
-                context.egui_ctx.set_visuals(egui::Visuals::light());
-                Ok(Box::<Launcher>::default())
-            }),
+            Box::new(|_| Ok(Box::<Launcher>::default())),
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))
     }

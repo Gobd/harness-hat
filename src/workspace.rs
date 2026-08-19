@@ -30,6 +30,7 @@ pub fn run(
     explicit_path: Option<PathBuf>,
     launch_only: bool,
     desktop: bool,
+    open_desktop: bool,
     open_editor: Option<crate::cli::OpenEditor>,
     explicit_config: Option<PathBuf>,
 ) -> Result<i32> {
@@ -109,12 +110,16 @@ pub fn run(
             let mount_target = mount_target_for_session(&session, &config);
             let workdir = workspace_workdir(&matched, &pwd, &mount_target);
             if desktop {
-                crate::desktop::open(
-                    &session.name,
-                    &matched.name,
-                    &workdir,
-                    &config.logging.log_dir,
-                )?;
+                if open_desktop {
+                    crate::desktop::open(
+                        &session.name,
+                        &matched.name,
+                        &workdir,
+                        &config.logging.log_dir,
+                    )?;
+                } else {
+                    crate::desktop::prepare(&session.name, &matched.name, &config.logging.log_dir)?;
+                }
                 return Ok(0);
             }
             if let Some(editor) = open_editor {
@@ -182,12 +187,16 @@ pub fn run(
             workspace_workdir(&matched, &pwd, &resp.mount_target)
         };
         if desktop {
-            crate::desktop::open(
-                &resp.docker_name,
-                &matched.name,
-                &workdir,
-                &config.logging.log_dir,
-            )?;
+            if open_desktop {
+                crate::desktop::open(
+                    &resp.docker_name,
+                    &matched.name,
+                    &workdir,
+                    &config.logging.log_dir,
+                )?;
+            } else {
+                crate::desktop::prepare(&resp.docker_name, &matched.name, &config.logging.log_dir)?;
+            }
             return Ok(0);
         }
         return attach_and_report(&resp.docker_name, &args, Some(&workdir));
@@ -259,12 +268,16 @@ pub fn run(
         return Ok(0);
     }
     if desktop {
-        crate::desktop::open(
-            &resp.docker_name,
-            &workspace_name,
-            &resp.mount_target,
-            &config.logging.log_dir,
-        )?;
+        if open_desktop {
+            crate::desktop::open(
+                &resp.docker_name,
+                &workspace_name,
+                &resp.mount_target,
+                &config.logging.log_dir,
+            )?;
+        } else {
+            crate::desktop::prepare(&resp.docker_name, &workspace_name, &config.logging.log_dir)?;
+        }
         return Ok(0);
     }
     attach_and_report(&resp.docker_name, &args, Some(&resp.mount_target))

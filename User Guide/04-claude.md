@@ -136,10 +136,20 @@ and keys are replaced in Hat's private per-workspace SSH files, so repeated
 launches do not grow the user configuration. Hat never edits
 `~/.claude/settings.json`.
 
-The first time a workspace is used, open the **Code** tab, add an SSH
-environment, and select the `hat-<workspace>-<id>` host from the standard SSH
-configuration. Choose the project directory printed by Hat. Claude remembers
-that selection; later launches update the same SSH alias.
+The first time a workspace is used, finish the connection in Claude Desktop:
+
+1. Open **Code** and start a new Code session.
+2. Click **Local**, open **SSH**, then choose **Add SSH host…**.
+3. Use the friendly name shown by Harness Hat and enter its
+   `hat-<workspace>-<id>` value in **SSH Host**. Leave **SSH Port** and
+   **Identity File** blank; the Hat-owned SSH configuration supplies them.
+4. Add and connect to the SSH host, then select the remote project directory
+   shown by Harness Hat.
+
+Claude remembers that selection; later launches update the same SSH alias. The
+Harness Hat launcher keeps these instructions, the exact host name, and the
+folder path visible after it opens Claude. Its session status changes from
+**Waiting for SSH** to **SSH connected** when the connection succeeds.
 
 On macOS or Windows, the release also includes a graphical launcher. Open
 **Harness Hat.app** on macOS, or extract the Windows ZIP and double-click
@@ -156,14 +166,24 @@ or install the daemon manually. Docker images are built on demand for the
 selected environment; images created before Desktop SSH support are detected
 and rebuilt automatically.
 
+**Start protected session** prepares Docker and SSH; the first launch may take
+several minutes while Docker builds the environment. **Open Claude Desktop**
+above the running-session list only opens Claude and does not start another
+container.
+
 The launcher also lists every running Hat session, including its project
 folder, environment, session number, and current SSH connection state.
-Desktop-enabled sessions offer **Reconnect**, while every session offers
-**Stop**. The background manager checks
+Desktop-enabled sessions show their SSH alias and loopback endpoint and offer
+**Help**, while every session offers **Stop**. Dismiss the connection guide
+with its **×** when you are done. The background
+manager checks
 SSH state even when the launcher window is closed: after a session has been
 used, it is stopped if Claude remains disconnected for 10 minutes. A newly
 created session that never receives its first SSH connection is stopped after
 30 minutes. Reconnecting during either grace period cancels cleanup.
+
+The launcher follows the operating system's light or dark appearance and
+updates automatically when the system appearance changes.
 
 Desktop-enabled sessions receive a read-only managed policy that disables
 external Browser-pane navigation, Claude in Chrome, Claude.ai connectors, and
