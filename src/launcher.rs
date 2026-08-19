@@ -6,8 +6,12 @@
 mod gui {
     use anyhow::Result;
     use eframe::egui;
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc::{self, Receiver};
+    use std::time::{Duration, Instant};
+
+    const SESSION_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
     const TEMPLATES: &[Template] = &[
         Template::new("default", "General", "A small general-purpose environment"),
@@ -49,11 +53,23 @@ mod gui {
         Failed(String),
     }
 
+    struct SessionRow {
+        container: harness_hat::desktop::DesktopContainer,
+        folder: String,
+        ssh_connected: Option<bool>,
+    }
+
     pub struct Launcher {
         project: Option<PathBuf>,
         template: usize,
         template_note: String,
         state: LaunchState,
+        sessions: Vec<SessionRow>,
+        session_refresh: Option<Receiver<Result<Vec<SessionRow>, String>>>,
+        last_session_refresh: Instant,
+        session_error: Option<String>,
+        stopping: Option<(String, Receiver<Result<(), String>>)>,
+        reconnecting: Option<(String, Receiver<Result<(), String>>)>,
     }
 
     impl Default for Launcher {
@@ -63,6 +79,12 @@ mod gui {
                 template: 0,
                 template_note: "Choose a project and Hat will suggest an environment.".into(),
                 state: LaunchState::Idle,
+                sessions: Vec::new(),
+                session_refresh: None,
+                last_session_refresh: Instant::now() - SESSION_REFRESH_INTERVAL,
+                session_error: None,
+                stopping: None,
+                reconnecting: None,
             }
         }
     }
@@ -121,11 +143,108 @@ mod gui {
                 };
             }
         }
+
+        fn refresh_sessions(&mut self, context: &egui::Context) {
+            if self.session_refresh.is_some()
+                || self.last_session_refresh.elapsed() < SESSION_REFRESH_INTERVAL
+            {
+                return;
+            }
+            self.last_session_refresh = Instant::now();
+            let (tx, rx) = mpsc::channel();
+            let repaint = context.clone();
+            std::thread::spawn(move || {
+                let result = load_session_rows().map_err(|error| format!("{error:#}"));
+                let _ = tx.send(result);
+                repaint.request_repaint();
+            });
+            self.session_refresh = Some(rx);
+        }
+
+        fn poll_sessions(&mut self) {
+            let result = self
+                .session_refresh
+                .as_ref()
+                .and_then(|receiver| receiver.try_recv().ok());
+            if let Some(result) = result {
+                self.session_refresh = None;
+                match result {
+                    Ok(sessions) => {
+                        self.sessions = sessions;
+                        self.session_error = None;
+                    }
+                    Err(error) => self.session_error = Some(error),
+                }
+            }
+
+            let stopped = self
+                .stopping
+                .as_ref()
+                .and_then(|(_, receiver)| receiver.try_recv().ok());
+            if let Some(result) = stopped {
+                self.stopping = None;
+                match result {
+                    Ok(()) => {
+                        self.last_session_refresh = Instant::now() - SESSION_REFRESH_INTERVAL;
+                    }
+                    Err(error) => self.session_error = Some(error),
+                }
+            }
+
+            let reconnected = self
+                .reconnecting
+                .as_ref()
+                .and_then(|(_, receiver)| receiver.try_recv().ok());
+            if let Some(result) = reconnected {
+                self.reconnecting = None;
+                match result {
+                    Ok(()) => self.state = LaunchState::Opened,
+                    Err(error) => self.session_error = Some(error),
+                }
+            }
+        }
+
+        fn stop_session(&mut self, container_name: String, context: &egui::Context) {
+            if self.stopping.is_some() {
+                return;
+            }
+            let (tx, rx) = mpsc::channel();
+            let repaint = context.clone();
+            let thread_name = container_name.clone();
+            std::thread::spawn(move || {
+                let result = harness_hat::desktop::stop_container(&thread_name)
+                    .map_err(|error| format!("{error:#}"));
+                let _ = tx.send(result);
+                repaint.request_repaint();
+            });
+            self.stopping = Some((container_name, rx));
+        }
+
+        fn reconnect_session(
+            &mut self,
+            container: harness_hat::desktop::DesktopContainer,
+            context: &egui::Context,
+        ) {
+            if self.reconnecting.is_some() || !container.desktop_enabled {
+                return;
+            }
+            let (tx, rx) = mpsc::channel();
+            let repaint = context.clone();
+            let container_name = container.name.clone();
+            std::thread::spawn(move || {
+                let result = reconnect_container(&container).map_err(|error| format!("{error:#}"));
+                let _ = tx.send(result);
+                repaint.request_repaint();
+            });
+            self.reconnecting = Some((container_name, rx));
+        }
     }
 
     impl eframe::App for Launcher {
         fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
             self.poll_launch();
+            self.poll_sessions();
+            self.refresh_sessions(context);
             egui::CentralPanel::default().show(context, |ui| {
                 ui.add_space(16.0);
                 ui.heading("Open Claude safely");
@@ -183,14 +302,182 @@ mod gui {
                         context.request_repaint_after(std::time::Duration::from_millis(100));
                     }
                     LaunchState::Opened => {
-                        ui.colored_label(egui::Color32::from_rgb(40, 150, 80), "Claude Desktop opened. Select the Hat environment in Code.");
+                        ui.colored_label(egui::Color32::from_rgb(40, 150, 80), "Claude Desktop launch requested. It may take a few seconds; select the Hat environment in Code.");
                     }
                     LaunchState::Failed(error) => {
                         ui.colored_label(egui::Color32::from_rgb(190, 55, 55), error);
                     }
                 }
+
+                ui.add_space(20.0);
+                ui.separator();
+                ui.add_space(12.0);
+                ui.heading("Running protected sessions");
+                ui.label(
+                    egui::RichText::new(
+                        "Disconnected Desktop SSH sessions stop after 10 minutes; sessions never connected stop after 30 minutes.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(8.0);
+
+                if self.sessions.is_empty() {
+                    if self.session_refresh.is_some() {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Checking Docker…");
+                        });
+                    } else {
+                        ui.label("No protected sessions are running.");
+                    }
+                } else {
+                    let stopping_name = self.stopping.as_ref().map(|(name, _)| name.as_str());
+                    let reconnecting_name = self
+                        .reconnecting
+                        .as_ref()
+                        .map(|(name, _)| name.as_str());
+                    let mut stop_clicked = None;
+                    let mut reconnect_clicked = None;
+                    egui::ScrollArea::vertical()
+                        .max_height(210.0)
+                        .show(ui, |ui| {
+                            for session in &self.sessions {
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(egui::RichText::new(&session.container.workspace).strong());
+                                            ui.label(
+                                                egui::RichText::new(&session.folder).small().weak(),
+                                            );
+                                            let connection = match (
+                                                session.container.desktop_enabled,
+                                                session.ssh_connected,
+                                            ) {
+                                                (false, _) => "○ SSH not enabled",
+                                                (true, Some(true)) => "● SSH connected",
+                                                (true, Some(false)) => "○ Waiting for SSH",
+                                                (true, None) => "? SSH status unavailable",
+                                            };
+                                            let color = if session.ssh_connected == Some(true) {
+                                                egui::Color32::from_rgb(40, 150, 80)
+                                            } else {
+                                                egui::Color32::from_rgb(120, 120, 120)
+                                            };
+                                            ui.colored_label(
+                                                color,
+                                                format!(
+                                                    "{}  •  {}  •  session {}",
+                                                    connection,
+                                                    session.container.template,
+                                                    session.container.alias
+                                                ),
+                                            );
+                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let stopping = stopping_name
+                                                    == Some(session.container.name.as_str());
+                                                if ui
+                                                    .add_enabled(
+                                                        self.stopping.is_none(),
+                                                        egui::Button::new(if stopping {
+                                                            "Stopping…"
+                                                        } else {
+                                                            "Stop"
+                                                        }),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    stop_clicked =
+                                                        Some(session.container.name.clone());
+                                                }
+                                                if session.container.desktop_enabled {
+                                                    let reconnecting = reconnecting_name
+                                                        == Some(session.container.name.as_str());
+                                                    if ui
+                                                        .add_enabled(
+                                                            self.reconnecting.is_none(),
+                                                            egui::Button::new(if reconnecting {
+                                                                "Opening…"
+                                                            } else {
+                                                                "Reconnect"
+                                                            }),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        reconnect_clicked =
+                                                            Some(session.container.clone());
+                                                    }
+                                                }
+                                            },
+                                        );
+                                    });
+                                });
+                                ui.add_space(4.0);
+                            }
+                        });
+                    if let Some(container_name) = stop_clicked {
+                        self.stop_session(container_name, context);
+                    }
+                    if let Some(container) = reconnect_clicked {
+                        self.reconnect_session(container, context);
+                    }
+                }
+                if let Some(error) = &self.session_error {
+                    ui.colored_label(egui::Color32::from_rgb(190, 55, 55), error);
+                }
             });
         }
+    }
+
+    fn load_session_rows() -> Result<Vec<SessionRow>> {
+        let folders = harness_hat::manager::discover_default_config_path()
+            .and_then(|path| harness_hat::config::load(&path).ok())
+            .map(|config| {
+                config
+                    .workspaces
+                    .into_iter()
+                    .map(|workspace| {
+                        (
+                            workspace.name,
+                            workspace.canonical_path.display().to_string(),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        harness_hat::desktop::running_hat_containers()?
+            .into_iter()
+            .map(|container| {
+                let ssh_connected = container
+                    .desktop_enabled
+                    .then(|| harness_hat::desktop::ssh_connected(&container.name).ok())
+                    .flatten();
+                let folder = folders
+                    .get(&container.workspace)
+                    .cloned()
+                    .unwrap_or_else(|| container.mount_target.clone());
+                Ok(SessionRow {
+                    container,
+                    folder,
+                    ssh_connected,
+                })
+            })
+            .collect()
+    }
+
+    fn reconnect_container(container: &harness_hat::desktop::DesktopContainer) -> Result<()> {
+        let config_path = harness_hat::manager::discover_default_config_path()
+            .ok_or_else(|| anyhow::anyhow!("Harness Hat configuration was not found"))?;
+        let config = harness_hat::config::load(&config_path)?;
+        harness_hat::desktop::open(
+            &container.name,
+            &container.workspace,
+            &container.mount_target,
+            &config.logging.log_dir,
+        )
     }
 
     fn launch_workspace(project: PathBuf, template: String, config: PathBuf) -> Result<()> {
@@ -347,8 +634,8 @@ mod gui {
         super::add_gui_tool_paths();
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([560.0, 390.0])
-                .with_min_inner_size([480.0, 340.0]),
+                .with_inner_size([620.0, 670.0])
+                .with_min_inner_size([520.0, 520.0]),
             ..Default::default()
         };
         eframe::run_native(

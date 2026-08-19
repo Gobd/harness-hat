@@ -284,7 +284,10 @@ macOS and Windows releases also include a graphical Harness Hat launcher for
 people who do not use a terminal. Open **Harness Hat**, choose a project folder,
 confirm the saved or automatically suggested development environment, and open
 Claude Desktop. It performs the same protected launch as `hat ws --desktop`.
-The terminal manager and TUI remain available unchanged.
+The launcher also shows running protected sessions, their SSH connection
+state, and a Stop control. Disconnected Desktop sessions are automatically
+cleaned up after a reconnect grace period. The terminal manager and TUI remain
+available unchanged.
 
 Harness Hat also reuses supported agent state where possible, while avoiding broad home-directory mounts. Some state is bind-mounted, some is seeded into a private session copy, and Codex state on Windows is copied into container-local storage to avoid unsafe SQLite sharing through Docker Desktop.
 

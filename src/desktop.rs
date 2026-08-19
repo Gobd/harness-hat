@@ -17,6 +17,20 @@ pub const AUTHORIZED_KEY_ENV: &str = "HARNESS_HAT_DESKTOP_SSH_AUTHORIZED_KEY";
 pub const LABEL_DESKTOP: &str = "dev.harness-hat.desktop";
 pub const MANAGED_POLICY_CONTAINER_PATH: &str = "/etc/claude-code/managed-settings.json";
 const SSH_CONTAINER_PORT: &str = "2222/tcp";
+pub const SSH_CONNECTION_POLL_INTERVAL: Duration = Duration::from_secs(5);
+pub const SSH_DISCONNECT_GRACE: Duration = Duration::from_secs(10 * 60);
+pub const SSH_INITIAL_CONNECTION_GRACE: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesktopContainer {
+    pub id: String,
+    pub name: String,
+    pub alias: String,
+    pub workspace: String,
+    pub template: String,
+    pub mount_target: String,
+    pub desktop_enabled: bool,
+}
 
 pub const MANAGED_POLICY: &str = r#"{
   "disableBrowserExternalNavigation": true,
@@ -57,6 +71,103 @@ pub fn is_desktop_container(container_name: &str) -> Result<bool> {
     Ok(output.trim() == "true")
 }
 
+/// Enumerate running Desktop-enabled Hat containers using only Docker labels.
+pub fn running_containers() -> Result<Vec<DesktopContainer>> {
+    let output = docker_output(&[
+        "ps",
+        "--filter",
+        &format!("label={LABEL_DESKTOP}=true"),
+        "--format",
+        "{{.ID}}\t{{.Names}}\t{{.Labels}}",
+    ])?;
+    Ok(parse_running_containers(&output))
+}
+
+/// Enumerate every running Hat container. The graphical launcher uses this to
+/// manage ordinary sessions as well as sessions configured for Desktop SSH.
+pub fn running_hat_containers() -> Result<Vec<DesktopContainer>> {
+    let output = docker_output(&[
+        "ps",
+        "--filter",
+        &format!("label={}", crate::container::LABEL_ALIAS),
+        "--format",
+        "{{.ID}}\t{{.Names}}\t{{.Labels}}",
+    ])?;
+    Ok(parse_running_containers(&output))
+}
+
+fn parse_running_containers(output: &str) -> Vec<DesktopContainer> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut columns = line.splitn(3, '\t');
+            let (id, name, labels) = (columns.next()?, columns.next()?, columns.next()?);
+            Some(DesktopContainer {
+                id: id.trim().to_string(),
+                name: name.trim().to_string(),
+                alias: crate::container::parse_docker_label(labels, crate::container::LABEL_ALIAS)
+                    .unwrap_or_default(),
+                workspace: crate::container::parse_docker_label(
+                    labels,
+                    crate::container::LABEL_WORKSPACE,
+                )
+                .unwrap_or_default(),
+                template: crate::container::parse_docker_label(
+                    labels,
+                    crate::container::LABEL_TEMPLATE,
+                )
+                .unwrap_or_default(),
+                mount_target: crate::container::parse_docker_label(
+                    labels,
+                    crate::container::LABEL_MOUNT_TARGET,
+                )
+                .unwrap_or_default(),
+                desktop_enabled: crate::container::parse_docker_label(labels, LABEL_DESKTOP)
+                    .as_deref()
+                    == Some("true"),
+            })
+        })
+        .collect()
+}
+
+/// Whether Docker currently has an established TCP connection to this
+/// container's SSH server. The command prints an explicit state so an empty
+/// connection list is not confused with a failed `docker exec`.
+pub fn ssh_connected(container_name: &str) -> Result<bool> {
+    let output = docker_output(&[
+        "exec",
+        container_name,
+        "sh",
+        "-c",
+        "if ss -Hnt state established '( sport = :2222 )' | grep -q .; then printf connected; else printf disconnected; fi",
+    ])?;
+    match output.trim() {
+        "connected" => Ok(true),
+        "disconnected" => Ok(false),
+        state => bail!("unexpected SSH connection state from {container_name}: {state:?}"),
+    }
+}
+
+/// Stop a container only after re-checking its Desktop label. This keeps the
+/// graphical launcher's Stop action scoped to containers it is meant to own.
+pub fn stop_container(container_name: &str) -> Result<()> {
+    let alias = docker_output(&[
+        "inspect",
+        "-f",
+        &format!(
+            "{{{{index .Config.Labels {:?}}}}}",
+            crate::container::LABEL_ALIAS
+        ),
+        container_name,
+    ])?;
+    anyhow::ensure!(
+        !alias.trim().is_empty() && alias.trim() != "<no value>",
+        "refusing to stop non-Hat container {container_name}"
+    );
+    docker_output(&["rm", "-f", container_name])?;
+    Ok(())
+}
+
 pub fn open(
     container_name: &str,
     workspace_name: &str,
@@ -69,7 +180,7 @@ pub fn open(
     let ssh_alias = register_connection(workspace_name, port, &host_key, &identity, state_dir)?;
     launch_app()?;
     println!(
-        "Claude Desktop opened. In Code, add or select SSH host \"{ssh_alias}\" and folder \"{workdir}\"."
+        "Claude Desktop launch requested. In Code, add or select SSH host \"{ssh_alias}\" and folder \"{workdir}\"."
     );
     println!(
         "Safety boundary: that SSH session runs in container {container_name}; separate Local, Chat, or Cowork sessions are outside Harness Hat."
@@ -393,6 +504,23 @@ mod tests {
             first
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        );
+    }
+
+    #[test]
+    fn parses_running_desktop_container_labels() {
+        let output = "abc123\tharness-hat-rust-deadbeef\tharness-hat.alias=7,harness-hat.workspace=my-project,harness-hat.template=rust,harness-hat.mount-target=/work\n";
+        assert_eq!(
+            parse_running_containers(output),
+            vec![DesktopContainer {
+                id: "abc123".into(),
+                name: "harness-hat-rust-deadbeef".into(),
+                alias: "7".into(),
+                workspace: "my-project".into(),
+                template: "rust".into(),
+                mount_target: "/work".into(),
+                desktop_enabled: false,
+            }]
         );
     }
 

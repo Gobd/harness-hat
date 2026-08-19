@@ -163,7 +163,7 @@ pub fn run(
             format!("launched session {} ({})", resp.alias, resp.docker_name),
         );
         wait_for_container_running(&resp.docker_name, Duration::from_secs(15))?;
-        if launch_only {
+        if launch_only && !desktop {
             println!("{}", resp.alias);
             return Ok(0);
         }
@@ -245,7 +245,7 @@ pub fn run(
         format!("launched session {} ({})", resp.alias, resp.docker_name),
     );
     wait_for_container_running(&resp.docker_name, Duration::from_secs(15))?;
-    if launch_only {
+    if launch_only && !desktop {
         println!("{}", resp.alias);
         return Ok(0);
     }

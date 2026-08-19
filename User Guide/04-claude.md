@@ -150,6 +150,15 @@ choice. This is the same backend operation as `hat ws --desktop`; the user does
 not need to open a terminal, change directories, or configure SSH. The Harness
 Hat background service and Docker Desktop must already be running.
 
+The launcher also lists every running Hat session, including its project
+folder, environment, session number, and current SSH connection state.
+Desktop-enabled sessions offer **Reconnect**, while every session offers
+**Stop**. The background manager checks
+SSH state even when the launcher window is closed: after a session has been
+used, it is stopped if Claude remains disconnected for 10 minutes. A newly
+created session that never receives its first SSH connection is stopped after
+30 minutes. Reconnecting during either grace period cancels cleanup.
+
 Desktop-enabled sessions receive a read-only managed policy that disables
 external Browser-pane navigation, Claude in Chrome, Claude.ai connectors, and
 computer-use tools. Localhost app previews remain available. SSH uses a

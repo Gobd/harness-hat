@@ -40,7 +40,16 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Build
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: make build-macos
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: make build-linux
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package (Unix)
@@ -53,15 +62,12 @@ jobs:
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
-          mkdir -p "Harness Hat.app/Contents/MacOS" "Harness Hat.app/Contents/Resources"
-          cp "target/${{ matrix.target }}/release/hat-launcher" "Harness Hat.app/Contents/MacOS/hat-launcher"
-          cp packaging/macos/Info.plist "Harness Hat.app/Contents/Info.plist"
-          cp packaging/macos/HarnessHat.icns "Harness Hat.app/Contents/Resources/HarnessHat.icns"
           zip -j ${{ matrix.archive }} \
             target/${{ matrix.target }}/release/${{ matrix.artifact }} \
             target/${{ matrix.target }}/release/hat-daemon \
             target/${{ matrix.target }}/release/hat-launcher
-          zip -r ${{ matrix.archive }} "Harness Hat.app"
+          cd target/${{ matrix.target }}/release
+          zip -r "$GITHUB_WORKSPACE/${{ matrix.archive }}" "Harness Hat.app"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
