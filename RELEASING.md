@@ -47,5 +47,6 @@ currently configured.
 ## Expected archives
 
 - Linux ZIP: `hat`, `hat-daemon`
-- macOS ZIP: `hat`, `hat-daemon`, `hat-launcher`, and `Harness Hat.app`
+- macOS ZIP: `hat`, `hat-daemon`, `hat-launcher`, and a self-contained
+  `Harness Hat.app` whose `Contents/MacOS` also carries all three executables
 - Windows ZIP: `hat.exe`, `hat-daemon.exe`, `hat-launcher.exe`

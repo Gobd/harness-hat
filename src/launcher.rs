@@ -53,6 +53,14 @@ mod gui {
         Failed(String),
     }
 
+    enum SetupState {
+        NotStarted,
+        Checking(Receiver<harness_hat::desktop::LauncherReadiness>),
+        Installing(Receiver<Result<PathBuf, String>>),
+        Ready,
+        Blocked(harness_hat::desktop::LauncherReadiness),
+    }
+
     struct SessionRow {
         container: harness_hat::desktop::DesktopContainer,
         folder: String,
@@ -64,6 +72,7 @@ mod gui {
         template: usize,
         template_note: String,
         state: LaunchState,
+        setup: SetupState,
         sessions: Vec<SessionRow>,
         session_refresh: Option<Receiver<Result<Vec<SessionRow>, String>>>,
         last_session_refresh: Instant,
@@ -79,6 +88,7 @@ mod gui {
                 template: 0,
                 template_note: "Choose a project and Hat will suggest an environment.".into(),
                 state: LaunchState::Idle,
+                setup: SetupState::NotStarted,
                 sessions: Vec::new(),
                 session_refresh: None,
                 last_session_refresh: Instant::now() - SESSION_REFRESH_INTERVAL,
@@ -90,6 +100,63 @@ mod gui {
     }
 
     impl Launcher {
+        fn start_setup_check(&mut self, context: &egui::Context) {
+            let (tx, rx) = mpsc::channel();
+            let repaint = context.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(harness_hat::desktop::launcher_readiness());
+                repaint.request_repaint();
+            });
+            self.setup = SetupState::Checking(rx);
+        }
+
+        fn start_service_install(&mut self, context: &egui::Context) {
+            let (tx, rx) = mpsc::channel();
+            let repaint = context.clone();
+            std::thread::spawn(move || {
+                let result = harness_hat::desktop::install_launcher_service()
+                    .map_err(|error| format!("{error:#}"));
+                let _ = tx.send(result);
+                repaint.request_repaint();
+            });
+            self.setup = SetupState::Installing(rx);
+        }
+
+        fn poll_setup(&mut self, context: &egui::Context) {
+            if matches!(self.setup, SetupState::NotStarted) {
+                self.start_setup_check(context);
+                return;
+            }
+            let checked = match &self.setup {
+                SetupState::Checking(receiver) => receiver.try_recv().ok(),
+                _ => None,
+            };
+            if let Some(readiness) = checked {
+                match readiness {
+                    harness_hat::desktop::LauncherReadiness::Ready => {
+                        self.setup = SetupState::Ready;
+                    }
+                    harness_hat::desktop::LauncherReadiness::NeedsSetup(_) => {
+                        self.start_service_install(context);
+                    }
+                    blocked => self.setup = SetupState::Blocked(blocked),
+                }
+                return;
+            }
+            let installed = match &self.setup {
+                SetupState::Installing(receiver) => receiver.try_recv().ok(),
+                _ => None,
+            };
+            if let Some(result) = installed {
+                self.setup = match result {
+                    Ok(_) => SetupState::Ready,
+                    Err(error) => {
+                        SetupState::Blocked(harness_hat::desktop::LauncherReadiness::Error(error))
+                    }
+                };
+            }
+        }
+
         fn choose_project(&mut self) {
             let Some(path) = rfd::FileDialog::new()
                 .set_title("Choose a project to protect with Harness Hat")
@@ -110,9 +177,9 @@ mod gui {
                 return;
             };
             let template = TEMPLATES[self.template].id.to_string();
-            let config = match harness_hat::manager::discover_default_config_path() {
-                Some(config) => config,
-                None => {
+            let config = match harness_hat::manager::default_home_config_path() {
+                Ok(config) if config.exists() => config,
+                _ => {
                     self.state = LaunchState::Failed(
                         "Harness Hat is not set up yet. Run `hat init` and `hat install` once, then reopen this app."
                             .into(),
@@ -138,7 +205,10 @@ mod gui {
             };
             if let Some(result) = result {
                 self.state = match result {
-                    Ok(()) => LaunchState::Opened,
+                    Ok(()) => {
+                        self.last_session_refresh = Instant::now() - SESSION_REFRESH_INTERVAL;
+                        LaunchState::Opened
+                    }
                     Err(error) => LaunchState::Failed(error),
                 };
             }
@@ -242,6 +312,12 @@ mod gui {
 
     impl eframe::App for Launcher {
         fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+            self.poll_setup(context);
+            if !matches!(self.setup, SetupState::Ready) {
+                egui::CentralPanel::default().show(context, |ui| self.render_setup(ui, context));
+                context.request_repaint_after(Duration::from_millis(100));
+                return;
+            }
             self.poll_launch();
             self.poll_sessions();
             self.refresh_sessions(context);
@@ -299,6 +375,7 @@ mod gui {
                     }
                     LaunchState::Launching(_) => {
                         ui.spinner();
+                        ui.label(egui::RichText::new("The first launch may take several minutes while Docker builds the selected environment.").small().weak());
                         context.request_repaint_after(std::time::Duration::from_millis(100));
                     }
                     LaunchState::Opened => {
@@ -432,8 +509,124 @@ mod gui {
         }
     }
 
+    impl Launcher {
+        fn render_setup(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+            ui.add_space(28.0);
+            ui.heading("Getting Harness Hat ready");
+            ui.add_space(8.0);
+            match &self.setup {
+                SetupState::NotStarted | SetupState::Checking(_) => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Checking Docker, Claude Desktop, OpenSSH, and the Hat service…");
+                    });
+                }
+                SetupState::Installing(_) => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Creating your protected environment and starting Hat…");
+                    });
+                    ui.label(
+                        egui::RichText::new(
+                            "This is a per-user setup and does not require administrator access.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                }
+                SetupState::Blocked(issue) => {
+                    let mut retry = false;
+                    match issue {
+                        harness_hat::desktop::LauncherReadiness::DockerMissing => {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(190, 55, 55),
+                                "Docker Desktop is required but is not installed.",
+                            );
+                            ui.hyperlink_to(
+                                "Download Docker Desktop",
+                                "https://www.docker.com/products/docker-desktop/",
+                            );
+                        }
+                        harness_hat::desktop::LauncherReadiness::DockerNotRunning(reason) => {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(190, 110, 30),
+                                "Docker Desktop is installed but is not running.",
+                            );
+                            ui.label(egui::RichText::new(reason).small().weak());
+                            if ui.button("Start Docker Desktop").clicked() {
+                                match harness_hat::desktop::start_docker_desktop() {
+                                    Ok(()) => retry = true,
+                                    Err(error) => {
+                                        self.session_error = Some(format!("{error:#}"));
+                                    }
+                                }
+                            }
+                        }
+                        harness_hat::desktop::LauncherReadiness::OpenSshMissing => {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(190, 55, 55),
+                                "The OpenSSH client is required for protected Claude sessions.",
+                            );
+                            #[cfg(target_os = "windows")]
+                            ui.hyperlink_to(
+                                "Install OpenSSH Client",
+                                "https://learn.microsoft.com/windows-server/administration/openssh/openssh_install_firstuse",
+                            );
+                            #[cfg(target_os = "macos")]
+                            ui.label("Install or restore the macOS OpenSSH tools, then try again.");
+                        }
+                        harness_hat::desktop::LauncherReadiness::ClaudeMissing => {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(190, 55, 55),
+                                "Claude Desktop is required but was not found.",
+                            );
+                            ui.hyperlink_to(
+                                "Download Claude Desktop",
+                                "https://claude.com/download",
+                            );
+                        }
+                        harness_hat::desktop::LauncherReadiness::BundleIncomplete(missing) => {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(190, 55, 55),
+                                "This Harness Hat download is incomplete.",
+                            );
+                            ui.label(format!("Missing: {missing}"));
+                            ui.label("Download and extract the complete Harness Hat package, then run the launcher again.");
+                        }
+                        harness_hat::desktop::LauncherReadiness::Error(error) => {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(190, 55, 55),
+                                "Harness Hat could not finish setup.",
+                            );
+                            ui.label(error);
+                        }
+                        harness_hat::desktop::LauncherReadiness::NeedsSetup(reason) => {
+                            ui.label(reason);
+                            if ui.button("Set up Harness Hat").clicked() {
+                                self.start_service_install(context);
+                            }
+                        }
+                        harness_hat::desktop::LauncherReadiness::Ready => {}
+                    }
+                    ui.add_space(12.0);
+                    if ui.button("Check again").clicked() {
+                        retry = true;
+                    }
+                    if retry {
+                        self.start_setup_check(context);
+                    }
+                    if let Some(error) = &self.session_error {
+                        ui.colored_label(egui::Color32::from_rgb(190, 55, 55), error);
+                    }
+                }
+                SetupState::Ready => {}
+            }
+        }
+    }
+
     fn load_session_rows() -> Result<Vec<SessionRow>> {
-        let folders = harness_hat::manager::discover_default_config_path()
+        let folders = harness_hat::manager::default_home_config_path()
+            .ok()
             .and_then(|path| harness_hat::config::load(&path).ok())
             .map(|config| {
                 config
@@ -469,8 +662,11 @@ mod gui {
     }
 
     fn reconnect_container(container: &harness_hat::desktop::DesktopContainer) -> Result<()> {
-        let config_path = harness_hat::manager::discover_default_config_path()
-            .ok_or_else(|| anyhow::anyhow!("Harness Hat configuration was not found"))?;
+        let config_path = harness_hat::manager::default_home_config_path()?;
+        anyhow::ensure!(
+            config_path.exists(),
+            "Harness Hat configuration was not found"
+        );
         let config = harness_hat::config::load(&config_path)?;
         harness_hat::desktop::open(
             &container.name,
@@ -525,7 +721,7 @@ mod gui {
     }
 
     fn saved_template(project: &Path) -> Option<String> {
-        let config_path = harness_hat::manager::discover_default_config_path()?;
+        let config_path = harness_hat::manager::default_home_config_path().ok()?;
         let config = harness_hat::config::load(&config_path).ok()?;
         let workspace = config
             .workspaces
@@ -680,8 +876,13 @@ fn add_gui_tool_paths() {
         PathBuf::from("/opt/homebrew/bin"),
     ]);
     #[cfg(target_os = "windows")]
-    if let Some(program_files) = std::env::var_os("ProgramFiles") {
-        candidates.push(PathBuf::from(program_files).join("Docker/Docker/resources/bin"));
+    {
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            candidates.push(PathBuf::from(program_files).join("Docker/Docker/resources/bin"));
+        }
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            candidates.push(PathBuf::from(system_root).join("System32/OpenSSH"));
+        }
     }
     for candidate in candidates {
         if candidate.is_dir() && !paths.contains(&candidate) {

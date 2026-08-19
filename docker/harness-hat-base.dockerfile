@@ -23,6 +23,10 @@ RUN cargo install --locked --version "${TUN2PROXY_VERSION}" --bin tun2proxy-bin 
 
 FROM ubuntu:26.04
 
+# Capability marker used by the graphical launcher to reject/rebuild images
+# created before Desktop SSH support was added.
+LABEL dev.harness-hat.desktop-ssh="1"
+
 ARG DEBIAN_FRONTEND=noninteractive
 ARG UBUNTU_ARCHIVE_MIRRORS="http://archive.ubuntu.com/ubuntu/ http://us.archive.ubuntu.com/ubuntu/ http://mirrors.edge.kernel.org/ubuntu/ http://mirror.us.leaseweb.net/ubuntu/"
 ARG UBUNTU_PORTS_MIRRORS="http://ports.ubuntu.com/ubuntu-ports/ http://mirror.us.leaseweb.net/ubuntu-ports/ http://mirrors.edge.kernel.org/ubuntu-ports/"

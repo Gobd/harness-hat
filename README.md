@@ -281,9 +281,14 @@ hat restart            # reload config and policy without stopping sessions
 ```
 
 macOS and Windows releases also include a graphical Harness Hat launcher for
-people who do not use a terminal. Open **Harness Hat**, choose a project folder,
-confirm the saved or automatically suggested development environment, and open
-Claude Desktop. It performs the same protected launch as `hat ws --desktop`.
+people who do not use a terminal. On macOS, open **Harness Hat.app**. On
+Windows, extract the release ZIP and double-click **hat-launcher.exe**. The
+launcher checks Docker Desktop, OpenSSH, and Claude Desktop, creates the default
+configuration, and installs or repairs its per-user background service. Choose
+a project folder, confirm the saved or automatically suggested development
+environment, and open Claude Desktop. It performs the same protected launch as
+`hat ws --desktop` and builds only the selected image when it is missing or too
+old for Desktop SSH.
 The launcher also shows running protected sessions, their SSH connection
 state, and a Stop control. Disconnected Desktop sessions are automatically
 cleaned up after a reconnect grace period. The terminal manager and TUI remain

@@ -142,13 +142,19 @@ configuration. Choose the project directory printed by Hat. Claude remembers
 that selection; later launches update the same SSH alias.
 
 On macOS or Windows, the release also includes a graphical launcher. Open
-**Harness Hat**, choose the project folder, and Hat starts the protected session
-and opens Claude Desktop. A saved workspace environment is selected by default;
+**Harness Hat.app** on macOS, or extract the Windows ZIP and double-click
+**hat-launcher.exe**. No terminal setup is required. The launcher checks for
+Docker Desktop, OpenSSH, and Claude Desktop; creates Hat's default configuration;
+and installs or repairs its per-user background service. Missing prerequisites
+are shown with a direct download or setup link. Choose the project folder and
+Hat starts the protected session and opens Claude Desktop. A saved workspace environment is selected by default;
 for a new project Hat suggests one from markers such as `go.mod`, `Cargo.toml`,
 `package.json`, or `pyproject.toml`. The dropdown always allows a different
 choice. This is the same backend operation as `hat ws --desktop`; the user does
-not need to open a terminal, change directories, or configure SSH. The Harness
-Hat background service and Docker Desktop must already be running.
+not need to open a terminal, change directories, configure SSH, run `hat init`,
+or install the daemon manually. Docker images are built on demand for the
+selected environment; images created before Desktop SSH support are detected
+and rebuilt automatically.
 
 The launcher also lists every running Hat session, including its project
 folder, environment, session number, and current SSH connection state.

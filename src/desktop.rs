@@ -15,11 +15,25 @@ use std::time::{Duration, Instant};
 
 pub const AUTHORIZED_KEY_ENV: &str = "HARNESS_HAT_DESKTOP_SSH_AUTHORIZED_KEY";
 pub const LABEL_DESKTOP: &str = "dev.harness-hat.desktop";
+pub const LABEL_DESKTOP_SSH_IMAGE: &str = "dev.harness-hat.desktop-ssh";
 pub const MANAGED_POLICY_CONTAINER_PATH: &str = "/etc/claude-code/managed-settings.json";
 const SSH_CONTAINER_PORT: &str = "2222/tcp";
 pub const SSH_CONNECTION_POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub const SSH_DISCONNECT_GRACE: Duration = Duration::from_secs(10 * 60);
 pub const SSH_INITIAL_CONNECTION_GRACE: Duration = Duration::from_secs(30 * 60);
+const LAUNCHER_SERVICE_REVISION: &str = "2";
+
+#[derive(Clone, Debug)]
+pub enum LauncherReadiness {
+    Ready,
+    NeedsSetup(String),
+    DockerMissing,
+    DockerNotRunning(String),
+    OpenSshMissing,
+    ClaudeMissing,
+    BundleIncomplete(String),
+    Error(String),
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DesktopContainer {
@@ -30,6 +44,226 @@ pub struct DesktopContainer {
     pub template: String,
     pub mount_target: String,
     pub desktop_enabled: bool,
+}
+
+/// Inspect everything the no-terminal launcher needs without changing host
+/// state. The GUI automatically performs setup when this reports
+/// [`LauncherReadiness::NeedsSetup`].
+pub fn launcher_readiness() -> LauncherReadiness {
+    match launcher_readiness_inner() {
+        Ok(readiness) => readiness,
+        Err(error) => LauncherReadiness::Error(format!("{error:#}")),
+    }
+}
+
+fn launcher_readiness_inner() -> Result<LauncherReadiness> {
+    if let Some(missing) = missing_bundled_executables()? {
+        return Ok(LauncherReadiness::BundleIncomplete(missing));
+    }
+    if which::which("docker").is_err() {
+        return Ok(LauncherReadiness::DockerMissing);
+    }
+    if let Err(error) = crate::container::ensure_docker_installed_and_running() {
+        return Ok(LauncherReadiness::DockerNotRunning(error.to_string()));
+    }
+    if find_open_ssh_tool("ssh-keygen").is_none() || find_open_ssh_tool("ssh").is_none() {
+        return Ok(LauncherReadiness::OpenSshMissing);
+    }
+    if !claude_is_installed() {
+        return Ok(LauncherReadiness::ClaudeMissing);
+    }
+
+    let config_path = crate::manager::default_home_config_path()?;
+    if !config_path.exists() {
+        return Ok(LauncherReadiness::NeedsSetup(
+            "Harness Hat needs to create its private configuration and background service.".into(),
+        ));
+    }
+    let config = crate::config::load(&config_path)?;
+    let expected = launcher_service_version();
+    let installed = std::fs::read_to_string(launcher_service_marker(&config)).unwrap_or_default();
+    if installed.trim() != expected {
+        return Ok(LauncherReadiness::NeedsSetup(
+            "The bundled Harness Hat background service needs to be installed or updated.".into(),
+        ));
+    }
+    if !daemon_reachable(&config) {
+        return Ok(LauncherReadiness::NeedsSetup(
+            "The Harness Hat background service is not running and needs to be repaired.".into(),
+        ));
+    }
+    Ok(LauncherReadiness::Ready)
+}
+
+/// Create the default config, install/update the per-user service from the
+/// bundled daemon, and wait until its control endpoint is reachable.
+pub fn install_launcher_service() -> Result<PathBuf> {
+    if let Some(missing) = missing_bundled_executables()? {
+        bail!("the Harness Hat app bundle is incomplete: missing {missing}");
+    }
+    let daemon = stage_launcher_tools()?;
+    crate::service::install_with_daemon(None, false, daemon)?;
+    let config_path = crate::manager::default_home_config_path()?;
+    let config = crate::config::load(&config_path)?;
+    crate::init::refresh_managed_docker_assets(&config.docker_dir)?;
+    std::fs::create_dir_all(&config.logging.log_dir)?;
+    crate::config::atomic_write_with_lock(
+        &launcher_service_marker(&config),
+        format!("{}\n", launcher_service_version()).as_bytes(),
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if daemon_reachable(&config) {
+            return Ok(config_path);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    bail!(
+        "Harness Hat installed its background service, but the service did not start within 15 seconds"
+    )
+}
+
+fn stage_launcher_tools() -> Result<PathBuf> {
+    let executable = std::env::current_exe().context("locating Harness Hat launcher")?;
+    let source = executable
+        .parent()
+        .context("Harness Hat launcher has no containing directory")?;
+    let suffix = if cfg!(target_os = "windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    let runtime_root = if cfg!(target_os = "macos") {
+        dirs::data_dir()
+    } else {
+        dirs::data_local_dir()
+    }
+    .context("cannot determine the per-user application data directory")?
+    .join("harness-hat")
+    .join("bin")
+    .join(launcher_service_version().replace(':', "-"));
+    std::fs::create_dir_all(&runtime_root)?;
+    for name in [format!("hat{suffix}"), format!("hat-daemon{suffix}")] {
+        let from = source.join(&name);
+        let to = runtime_root.join(&name);
+        std::fs::copy(&from, &to).with_context(|| {
+            format!(
+                "installing bundled executable {} to {}",
+                from.display(),
+                to.display()
+            )
+        })?;
+    }
+    Ok(runtime_root.join(format!("hat-daemon{suffix}")))
+}
+
+fn launcher_service_version() -> String {
+    format!(
+        "{}:{}",
+        env!("CARGO_PKG_VERSION"),
+        LAUNCHER_SERVICE_REVISION
+    )
+}
+
+fn launcher_service_marker(config: &crate::config::Config) -> PathBuf {
+    config.logging.log_dir.join("launcher-service-version")
+}
+
+fn daemon_reachable(config: &crate::config::Config) -> bool {
+    let url = format!(
+        "http://{}:{}/healthz",
+        config.defaults.control.server_host, config.defaults.control.server_port
+    );
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(1))
+        .timeout(Duration::from_secs(2))
+        .build()
+    else {
+        return false;
+    };
+    matches!(client.get(url).send(), Ok(response) if response.status().is_success() || response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE)
+}
+
+fn missing_bundled_executables() -> Result<Option<String>> {
+    let executable = std::env::current_exe().context("locating Harness Hat launcher")?;
+    let directory = executable
+        .parent()
+        .context("Harness Hat launcher has no containing directory")?;
+    let suffix = if cfg!(target_os = "windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    let missing = [format!("hat{suffix}"), format!("hat-daemon{suffix}")]
+        .into_iter()
+        .filter(|name| !directory.join(name).is_file())
+        .collect::<Vec<_>>();
+    Ok((!missing.is_empty()).then(|| missing.join(", ")))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn find_open_ssh_tool(name: &str) -> Option<PathBuf> {
+    which::which(name).ok()
+}
+
+#[cfg(target_os = "windows")]
+fn find_open_ssh_tool(name: &str) -> Option<PathBuf> {
+    which::which(name).ok().or_else(|| {
+        let root = std::env::var_os("SystemRoot")?;
+        let path = PathBuf::from(root).join(format!("System32/OpenSSH/{name}.exe"));
+        path.is_file().then_some(path)
+    })
+}
+
+fn claude_is_installed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        Path::new("/Applications/Claude.app").is_dir()
+            || dirs::home_dir().is_some_and(|home| home.join("Applications/Claude.app").is_dir())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let Some(local_app_data) = dirs::data_local_dir() else {
+            return false;
+        };
+        [
+            local_app_data.join("AnthropicClaude/Claude.exe"),
+            local_app_data.join("Programs/Claude/Claude.exe"),
+            local_app_data.join("Claude/Claude.exe"),
+        ]
+        .iter()
+        .any(|path| path.is_file())
+            || which::which("Claude.exe").is_ok()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    false
+}
+
+#[cfg(target_os = "macos")]
+pub fn start_docker_desktop() -> Result<()> {
+    let status = Command::new("/usr/bin/open")
+        .args(["-a", "Docker"])
+        .status()
+        .context("starting Docker Desktop")?;
+    anyhow::ensure!(status.success(), "macOS could not start Docker Desktop");
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn start_docker_desktop() -> Result<()> {
+    let program_files = std::env::var_os("ProgramFiles")
+        .context("Windows Program Files directory is unavailable")?;
+    let executable = PathBuf::from(program_files).join("Docker/Docker/Docker Desktop.exe");
+    anyhow::ensure!(executable.is_file(), "Docker Desktop is not installed");
+    let mut command = Command::new(executable);
+    crate::process_util::hide_console_window(&mut command);
+    command.spawn().context("starting Docker Desktop")?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn start_docker_desktop() -> Result<()> {
+    bail!("Docker Desktop launch is supported only on macOS and Windows")
 }
 
 pub const MANAGED_POLICY: &str = r#"{
@@ -69,6 +303,17 @@ pub fn is_desktop_container(container_name: &str) -> Result<bool> {
         container_name,
     ])?;
     Ok(output.trim() == "true")
+}
+
+pub fn image_supports_desktop_ssh(image: &str) -> bool {
+    docker_output(&[
+        "image",
+        "inspect",
+        "-f",
+        &format!("{{{{index .Config.Labels {:?}}}}}", LABEL_DESKTOP_SSH_IMAGE),
+        image,
+    ])
+    .is_ok_and(|output| output.trim() == "1")
 }
 
 /// Enumerate running Desktop-enabled Hat containers using only Docker labels.
@@ -198,7 +443,7 @@ fn ensure_identity(state_dir: &Path) -> Result<PathBuf> {
     if identity.exists() && public_identity.exists() {
         return Ok(identity);
     }
-    let ssh_keygen = which::which("ssh-keygen")
+    let ssh_keygen = find_open_ssh_tool("ssh-keygen")
         .context("ssh-keygen is required for `hat ws --desktop`; install the OpenSSH client")?;
     if identity.exists() {
         let output = Command::new(&ssh_keygen)

@@ -26,6 +26,8 @@ build-all: build-macos build-linux build-windows
 macos-app:
 	mkdir -p "$(RELEASE_DIR)/Harness Hat.app/Contents/MacOS" "$(RELEASE_DIR)/Harness Hat.app/Contents/Resources"
 	cp "$(RELEASE_DIR)/hat-launcher" "$(RELEASE_DIR)/Harness Hat.app/Contents/MacOS/hat-launcher"
+	cp "$(RELEASE_DIR)/hat" "$(RELEASE_DIR)/Harness Hat.app/Contents/MacOS/hat"
+	cp "$(RELEASE_DIR)/hat-daemon" "$(RELEASE_DIR)/Harness Hat.app/Contents/MacOS/hat-daemon"
 	cp packaging/macos/Info.plist "$(RELEASE_DIR)/Harness Hat.app/Contents/Info.plist"
 	cp packaging/macos/HarnessHat.icns "$(RELEASE_DIR)/Harness Hat.app/Contents/Resources/HarnessHat.icns"
 	@echo "Built $(RELEASE_DIR)/Harness Hat.app"
